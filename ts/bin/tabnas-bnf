@@ -1,0 +1,2 @@
+#!/usr/bin/env node
+require('../dist/bin/tabnas-bnf-cli').run(process.argv, console).catch((e) => console.error(e.message))
