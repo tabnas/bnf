@@ -19,8 +19,8 @@ const assert = require('node:assert')
 
 const { Tabnas } = require('tabnas')
 const { bnf: bnfPlugin } = require('..')
-const am = new Tabnas({ plugins: [bnfPlugin] })
-const J = (src, meta, ctx) => am.parse(src, meta, ctx)
+const tn = new Tabnas({ plugins: [bnfPlugin] })
+const J = (src, meta, ctx) => tn.parse(src, meta, ctx)
 
 
 describe('probe-dispatch', () => {
@@ -40,7 +40,7 @@ Y   = *( ALPHA )
 `
 
     const makeParser = () => {
-      const j = am.make({ rewind: { history: 4096 } })
+      const j = tn.make({ rewind: { history: 4096 } })
       j.bnf(GRAMMAR)
       return j
     }
@@ -77,7 +77,7 @@ Y   = *( ALPHA )
   describe('emitter shape', () => {
 
     it('synthesises probe/with/no/dispatch helper rules', () => {
-      const j = am.make({ rewind: { history: 4096 } })
+      const j = tn.make({ rewind: { history: 4096 } })
       const spec = j.bnf(`
 top = [ X "@" ] Y
 X   = *( ALPHA )
@@ -102,7 +102,7 @@ Y   = *( ALPHA )
     it('no-ambiguity grammars are left alone (no probe rules)', () => {
       // The optional's body ends with a terminal that can't be in
       // the tail's vocabulary, so FIRST-set dispatch suffices.
-      const j = am.make()
+      const j = tn.make()
       const spec = j.bnf(`
 top = [ X "!" ] Y
 X   = *( ALPHA )
@@ -122,7 +122,7 @@ Y   = *DIGIT
       // The `@` in [ X "@" ] is the disambiguator. If the probe
       // helper included @ in its vocab, it would eat the @ and the
       // peek would never see it — breaking the with-branch path.
-      const j = am.make({ rewind: { history: 4096 } })
+      const j = tn.make({ rewind: { history: 4096 } })
       const spec = j.bnf(`
 top = [ X "@" ] Y
 X   = *( ALPHA / "@" )
@@ -174,7 +174,7 @@ X    = *( ALPHA )
 B    = "-" "-"
 C    = *( ALPHA )
 `
-      const j = am.make({ rewind: { history: 4096 } })
+      const j = tn.make({ rewind: { history: 4096 } })
       j.bnf(GRAMMAR)
       assert.doesNotThrow(() => j.parse('abc--def'))
     })
@@ -189,7 +189,7 @@ A = *( ALPHA )
 Z = "1"
 Y = "2"
 `
-      const j = am.make({ rewind: { history: 4096 } })
+      const j = tn.make({ rewind: { history: 4096 } })
       j.bnf(GRAMMAR)
       assert.doesNotThrow(() => j.parse('abc2'))
     })
@@ -212,7 +212,7 @@ unreserved = ALPHA / "-" / "."
 `
 
     const makeParser = () => {
-      const j = am.make({ rewind: { history: 4096 } })
+      const j = tn.make({ rewind: { history: 4096 } })
       j.bnf(AUTHORITY)
       return j
     }

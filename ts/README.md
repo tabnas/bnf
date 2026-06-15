@@ -17,9 +17,9 @@ npm install tabnas @tabnas/bnf
 const { Tabnas } = require('tabnas')
 const { bnf } = require('@tabnas/bnf')
 
-const am = new Tabnas({ plugins: [bnf] })
-am.bnf(`<greet> ::= "hi" | "hello"`)
-am.parse('hi')
+const tn = new Tabnas({ plugins: [bnf] })
+tn.bnf(`<greet> ::= "hi" | "hello"`)
+tn.parse('hi')
 ```
 
 Or convert without installing:
