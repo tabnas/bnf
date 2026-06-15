@@ -18,15 +18,17 @@ const { Tabnas } = require('@tabnas/parser')
 const { bnf } = require('@tabnas/bnf')
 
 const tn = new Tabnas({ plugins: [bnf] })
-tn.bnf(`<greet> ::= "hi" | "hello"`)
-tn.parse('hi')
+tn.bnf(`greet = "hi" / "hello"`)
+tn.parse('hi').rule    // => 'greet'
+tn.parse('hello').rule // => 'greet'
 ```
 
 Or convert without installing:
 
 ```js
 const { bnfConvert } = require('@tabnas/bnf')
-const spec = bnfConvert(`<greet> ::= "hi"`)
+const spec = bnfConvert(`greet = "hi"`)
+spec.options.rule.start // => '__start__'
 ```
 
 ## CLI
