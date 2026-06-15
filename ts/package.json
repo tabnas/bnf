@@ -39,11 +39,11 @@
     ".": "./dist/bnf.js"
   },
   "peerDependencies": {
-    "tabnas": "*"
+    "tabnas": "file:../../parser/ts"
   },
   "devDependencies": {
     "@types/node": "25.6.0",
-    "tabnas": "*",
+    "tabnas": "file:../../parser/ts",
     "typescript": "6.0.3"
   }
 }
