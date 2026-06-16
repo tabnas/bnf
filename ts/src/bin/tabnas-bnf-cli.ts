@@ -6,7 +6,7 @@
 
 import Fs from 'node:fs'
 
-import { bnfConvert } from '../bnf'
+import { bnfConvert, bnfCompile, BnfCompileError } from '../bnf'
 import { Tabnas } from '@tabnas/parser'
 
 
@@ -23,6 +23,8 @@ export async function run(argv: string[], console: Console) {
     // and report the tree (or an error) instead of the spec.
     parse: [] as string[],
     parseFiles: [] as string[],
+    // Compilation mode: emit a pure recognition grammar as jsonic text.
+    compile: false,
   }
 
   for (let aI = 2; aI < argv.length; aI++) {
@@ -39,6 +41,8 @@ export async function run(argv: string[], console: Console) {
       args.tag = argv[++aI]
     } else if ('--compact' === arg || '-c' === arg) {
       args.space = 0
+    } else if ('--compile' === arg || '-C' === arg) {
+      args.compile = true
     } else if ('--parse' === arg || '-P' === arg) {
       args.parse.push(argv[++aI])
     } else if ('--parse-file' === arg) {
@@ -67,6 +71,28 @@ export async function run(argv: string[], console: Console) {
   }
 
   const spec = bnfConvert(src, { start: args.start, tag: args.tag })
+
+  // Compilation mode: emit a pure recognition grammar as jsonic text.
+  // No function references — recognition is fully structural. Grammars
+  // that need control functions (probe / unbounded lookahead) are
+  // refused until those ship as engine `$`-builtins.
+  if (args.compile) {
+    try {
+      console.log(bnfCompile(src, {
+        start: args.start,
+        tag: args.tag,
+        indent: args.space || 2,
+      }))
+    } catch (e: any) {
+      if (e instanceof BnfCompileError) {
+        console.error(e.message)
+        process.exitCode = 1
+        return
+      }
+      throw e
+    }
+    return
+  }
 
   // Parse-mode: validate the grammar against one or more sample
   // inputs and print their parse trees. Exits 1 if any sample fails.
@@ -141,6 +167,11 @@ Arguments:
 
   --compact              Emit single-line JSON (default indent is 2).
   -c
+
+  --compile              Compilation mode: emit a pure *recognition*
+  -C                       grammar as jsonic text (no function refs).
+                           Refuses grammars needing probe/unbounded
+                           lookahead until engine \`$\`-builtins exist.
 
   --parse <input>        Parse <input> against the generated grammar
   -P <input>               and print its parse tree. Repeatable.

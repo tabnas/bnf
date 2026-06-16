@@ -25,6 +25,14 @@ import {
   BnfConvertOptions,
 } from './converter'
 
+import {
+  bnfCompile,
+  toRecognitionSpec,
+  toJsonic,
+  BnfCompileError,
+  BnfCompileOptions,
+} from './compile'
+
 
 // Plugin entry point. Decorates the instance with a callable `bnf`
 // member that converts and installs a grammar, plus `bnf.toSpec` for
@@ -51,6 +59,10 @@ export {
   eliminateLeftRecursion,
   bnfRules,
   BnfParseError,
+  bnfCompile,
+  toRecognitionSpec,
+  toJsonic,
+  BnfCompileError,
 }
 
-export type { BnfConvertOptions }
+export type { BnfConvertOptions, BnfCompileOptions }

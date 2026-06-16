@@ -266,7 +266,138 @@ feature usable:
   *silently* ignores unknown keys, so a typo or a stale mark after an edit
   would no-op invisibly. Loud failure keeps the coupling honest.
 
-## 6. Prior art
+## 6. Compilation mode: pure-recognition output and `$`-builtins
+
+A separate `@tabnas/bnf` operating mode — **compilation mode** — emits a
+serializable tabnas grammar (jsonic format) rather than installing a live one.
+The key realisation that makes this clean is that **functions are not needed to
+*represent* ABNF; they are only used to *shape the output tree*.**
+
+### 6.1 Recognition is structural; trees need actions
+
+Tabnas's alternate-spec fields split cleanly:
+
+- **Structural (data):** `s` (token pattern), `p` (push), `r` (replace),
+  `b` (backtrack), `g` (group tag), `n` (counter increment), `u`/`k` (custom
+  data).
+- **Function-valued:** `a` (action), `c` (condition — *also* expressible
+  declaratively as an object matched against `rule.n` counters), `h`, `e`.
+
+Every function the converter currently emits is for **AST construction**, not
+recognition: `segmentToAlt`'s `a:` (allocate `r.node`, accumulate
+`r.o[i].src`), `captureChildRef` (merge child into `kids`), the `__start__`
+close `a:` (copy child node up), the FIRST-peek alts' `a:` (node init only —
+the `s`/`b`/`p` do the recognising). Strip them all and the grammar still
+recognises the same language.
+
+**Backtracking is structural.** `b` is a number ("match for the decision, back
+up N"), so ordered first-match alts, bounded lookahead, optional/repetition are
+all function-free. This was verified empirically: a function-stripped `greet`
+spec installed on a bare engine still accepts `hi`/`hello` and rejects `nope`.
+
+### 6.2 The one exception: unbounded lookahead
+
+The **probe + phase-retry dispatcher** (optional-prefix ambiguity, `[X D] Y`,
+where the disambiguator D is arbitrarily far ahead) is the *only* place
+functions do recognition work — a fixed `b: N` cannot express "scan a run of
+unknown length, then peek for D." It synthesises `a:` control actions
+(mark / probe / peek / rewind) and `c:` guards keyed on `r.k.pd_phase`
+(`converter.ts:1411-1454`). So a probe-requiring grammar is the only thing that
+cannot be emitted purely structurally as the converter compiles it today.
+
+### 6.3 Standard `$`-builtins
+
+Rather than refuse those grammars, expose the probe machinery as **named engine
+builtins** the grammar references by name. Convention:
+
+- **`@name$`** — a trailing `$` in a *ref name* marks an engine-provided
+  builtin, resolved from a standard ref library the engine merges into
+  `spec.ref` at load time.
+- **`$` is disallowed in user refs.** This partitions the namespace so builtins
+  never collide with user `@<rule>:<phase>:<mark>` refs, and makes serialized
+  grammars self-documenting (a reader sees `@probe$` and knows it is stock).
+- Namespace note: `$` already appears in synthetic **rule names**
+  (`<head>$stepN`). Those are a *different* namespace; the convention is
+  specifically "trailing `$` in a **ref** name = builtin."
+
+A builtin is **parameterised by declarative config**, not by being many distinct
+functions. The probe carries its vocab token set, disambiguator token, and
+branch rule names in a serializable `k`/`u` blob the builtin reads:
+
+```jsonic
+R$pd0: {
+  open: [
+    { c: { n: { pd_phase: 0 } }, a: '@probeMark$',   k: { probe$: {
+        vocab: ['#ALPHA'], d: '#AT', withBranch: 'R$pd0$with', elseBranch: 'R$pd0$no' } } }
+    { c: { n: { pd_phase: 1 } }, p: 'R$pd0$with' }
+    { c: { n: { pd_phase: 2 } }, p: 'R$pd0$no' }
+  ]
+  close: [ { c: { n: { pd_phase: 0 } }, a: '@probeDecide$' } ]
+}
+```
+
+Note the phase guards became **declarative** `c: { n: { pd_phase: N } }`
+counter conditions, leaving only the genuinely procedural pieces
+(`@probeMark$` / `@probeDecide$`) as code. All token/rule references are names;
+the whole rule is pure data.
+
+### 6.4 The generalisation — everything becomes data
+
+The probe is not special: **every** converter-emitted function is generic and
+parameterisable from data —
+
+- `segmentToAlt`'s action ← `(initNode, ruleName, nodeKind, nterms)` → a
+  `@node$` / `@src$` builtin reading those from `k`.
+- `captureChildRef` ← `(ruleName, nodeKind)` → a `@capture$` builtin.
+
+All parameters are strings / numbers / bools. So the two "modes" collapse: the
+**output is always pure data**, and the only difference is *which* refs appear:
+
+| Mode | Structure | Tree builtins | Probe builtins | User actions |
+|---|---|---|---|---|
+| Pure recognition | ✓ | — | `@probe…$` (when needed) | — |
+| Full (AST) | ✓ | `@node$`/`@capture$` | `@probe…$` | `@<rule>:<phase>:<mark>` |
+
+Functions then live in exactly two places — the engine's `$`-builtin stdlib and
+the user's supplied ref map — and **never in the wire format**. "Does
+compilation need functions?" → no; it *references* named ones.
+
+### 6.5 Caveats
+
+1. **Architectural seam.** The `$`-builtins must ship with `@tabnas/parser`
+   (or a stdlib the engine auto-merges) so a serialized grammar loads
+   standalone. Engine change, not just compiler.
+2. **Config schema is a public contract** between compiler output and the
+   builtins. Probe-algorithm or node-shape changes must stay schema-compatible
+   or be versioned (`@probe$2`, or a version field in the config).
+3. **Serialisation fidelity.** Match-token RegExps carry an extra `eager$`
+   flag (`{source, flags, eager$:true}`) that `@/source/flags` cannot represent;
+   round-tripping needs either an object encoding or an engine convention for
+   eagerness. (Observed while prototyping; see §6.6.)
+4. **Maintenance.** One builtin library to test, but it becomes load-bearing
+   for every compiled grammar.
+
+### 6.6 Prototype status (this repo)
+
+Implemented in `@tabnas/bnf` (TS) and verified against a locally-built engine:
+
+- `toRecognitionSpec(spec)` — RegExp-preserving transform that drops the `ref`
+  map and the `a`/`bo`/`bc` tree-building functions, and **detects + refuses**
+  probe-requiring grammars (any control ref surviving the strip) with a
+  `BnfCompileError`. *(This is the §6.1/§6.2 boundary, enforced.)*
+- `toJsonic(value)` — relaxed-jsonic serialiser (unquoted identifier keys,
+  single-quoted strings, `RegExp → @/source/flags`), plus a strict-JSON mode
+  used for round-trip verification.
+- `bnfCompile(src, opts)` and a CLI `--compile` flag emitting the jsonic
+  recognition grammar.
+
+Not yet built (needs the engine, §6.5.1): the `$`-builtin stdlib, so
+probe-requiring grammars are currently *refused* in compilation mode rather than
+emitted with `@probe…$` refs. The `@node$`/`@capture$` generalisation (§6.4)
+and the `m`-mark user-action wiring (§3) are likewise compiler-ready in design
+but gated on engine support.
+
+## 7. Prior art
 
 - **ANTLR** per-alternative labels (`expr # AddExpr`) generate a visitor method
   per alt — the closest analogue. ANTLR pays for stability by **requiring** the
@@ -280,7 +411,7 @@ feature usable:
 - **Bison** named references (`$[name]`) and **jsonic**'s `resolveFuncRefs` are
   the value-level precedents.
 
-## 7. Non-goals
+## 8. Non-goals
 
 - Inlining executable code into ABNF text. Bindings stay in the `ref` map; the
   ABNF source remains valid RFC 5234.
@@ -288,7 +419,7 @@ feature usable:
 - Stable marks for rules that the compiler structurally rewrites
   (left-recursion, probe dispatch) — those are look-up-only by design.
 
-## 8. Open questions
+## 9. Open questions
 
 1. **Ordering of the node-init action.** Should `/prepend` ever be allowed to
    run before the compiler's node-allocation action, or is that always pinned
