@@ -18,6 +18,8 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+    - name: Use LF line endings
+      run: git config --global core.autocrlf false
     - uses: actions/checkout@v4
       with:
         path: abnf
