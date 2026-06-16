@@ -234,6 +234,12 @@ tn.bnf(src, {
   `NR …` source alternative, wrapped after the compiler's src-accumulation
   action.
 
+> **Implemented** (closure mode). Marks are assigned from each alt's leading
+> discriminator (token name sans `#` / pushed rule / `_`), opt-in via
+> `bnfConvert(src,{marks:true})` and listed by CLI `--marks`. Verified demo:
+> `op = "inc" / "dec"` with `{'@op:o:INC':…, '@op:o:DEC':…}`. See
+> [`implementation-diary.md`](./implementation-diary.md) §6.
+
 ## 4. Feasibility & edge cases
 
 | Case | Handling |
@@ -378,9 +384,9 @@ compilation need functions?" → no; it *references* named ones.
    builtins. Probe-algorithm or node-shape changes must stay schema-compatible
    or be versioned (`@probe$2`, or a version field in the config).
 3. **Serialisation fidelity.** Match-token RegExps carry an extra `eager$`
-   flag (`{source, flags, eager$:true}`) that `@/source/flags` cannot represent;
-   round-tripping needs either an object encoding or an engine convention for
-   eagerness. (Observed while prototyping; see §6.6.)
+   flag (`{source, flags, eager$:true}`) that `@/source/flags` cannot represent.
+   **Resolved:** a sibling sentinel `@~/source/flags` carries it, and
+   `resolveFuncRefs` reconstructs `eager$` on load.
 4. **Maintenance.** One builtin library to test, but it becomes load-bearing
    for every compiled grammar.
 
@@ -424,10 +430,19 @@ round-trips to identical trees (verified greet / pair / arith / probe).
 `bnfCompile` gained `recognition:false` and the CLI a `--full` flag;
 `toPureSpec` emits the full AST grammar.
 
-Still design-only: the `m`-mark user-action wiring (§3). The `eager$`
-match-token fidelity gap (§6.5.3) is unaddressed. A full engineer's log —
-contracts, gotchas, and a productionising checklist for `@tabnas/parser` — is in
-[`implementation-diary.md`](./implementation-diary.md).
+**`m`-mark user actions (§3) — now implemented.** `bnfConvert(src,{marks:true})`
+stamps user-rule alts; `tn.bnf(src,{actions})` binds `@<rule>:o|c:<mark>` (alt)
+and `@<rule>:bo|ao|bc|ac` (phase) user functions, composed after the compiler's
+own action (`attachActions`, with `BnfActionError` validation). CLI `--marks`
+lists them. Closure-mode only for now (composing user actions with `$`-builtin
+tree actions is the remaining engine item).
+
+**`eager$` fidelity (§6.5.3) — fixed.** A sibling sentinel `@~/source/flags`
+carries the matcher's `eager$` flag through serialisation; `resolveFuncRefs`
+reconstructs it. Verified round-trip.
+
+A full engineer's log — contracts, gotchas, and a productionising checklist for
+`@tabnas/parser` — is in [`implementation-diary.md`](./implementation-diary.md).
 
 ## 7. Prior art
 

@@ -38,6 +38,10 @@ export type BnfConvertOptions = {
   // function-free so it survives compilation (pure-recognition) mode.
   // Requires an engine that ships the probe `$`-builtins.
   builtins?: boolean
+  // Emit a stable `m` (mark) on each user-rule alt, enabling
+  // `@<rule>:o|c:<mark>` user-action references. Off by default so the
+  // emitted spec shape is unchanged unless marks are wanted.
+  marks?: boolean
 }
 
 
@@ -1588,6 +1592,7 @@ function emitGrammarSpec(
     grammar, literals, regexTokens)
   const refs = new RefRegistry()
   refs.useBuiltins = !!opts?.builtins
+  refs.emitMarks = !!opts?.marks
 
   const ruleSpec: NonNullable<GrammarSpec['rule']> = {}
   for (const prod of grammar.productions) {
@@ -1741,6 +1746,8 @@ class RefRegistry {
   // refs + `k` config (pure data) instead of registered closures. See
   // docs/design/alt-action-refs.md §6.4 and implementation-diary.md.
   useBuiltins = false
+  // When set, the emitter stamps user-rule alts with a `m` mark.
+  emitMarks = false
   register(fn: Function): `@${string}` {
     const name = `@bnf_a${this.counter++}` as `@${string}`
     this.refs[name] = fn
@@ -1784,6 +1791,46 @@ function mkAstNode(ruleName: string, nodeKind: BnfProduction['nodeKind']): AstNo
   return nodeKind === 'user'
     ? { rule: ruleName, src: '', kids: [] }
     : { src: '', kids: [] }
+}
+
+
+// A stable, human-predictable "mark" for an alternative — its leading
+// discriminator: the first matched token name (sans `#`), the pushed
+// rule name, or `_` for the empty alt. Used for `@<rule>:o|c:<mark>`
+// user-action references. See docs/design/alt-action-refs.md §3.
+function altDiscriminator(
+  alt: BnfSequence,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+): string {
+  if (alt.length === 0) return '_'
+  const el = alt[0]
+  if (el.kind === 'term') {
+    return (literals.get(termKey(el)) || '').replace(/^#/, '') || '_'
+  }
+  if (el.kind === 'regex') {
+    return (regexTokens.get(regexKey(el)) || '').replace(/^#/, '') || '_'
+  }
+  if (el.kind === 'ref') return el.name
+  return '_'
+}
+
+// Assign a unique mark per source alternative (same alt object → same
+// mark, so fan-out copies share it). Collisions get a `~N` suffix.
+function assignMarks(
+  alts: BnfSequence[],
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+): Map<BnfSequence, string> {
+  const marks = new Map<BnfSequence, string>()
+  const seen = new Map<string, number>()
+  for (const alt of alts) {
+    const base = altDiscriminator(alt, literals, regexTokens)
+    const n = (seen.get(base) || 0) + 1
+    seen.set(base, n)
+    marks.set(alt, n === 1 ? base : `${base}~${n}`)
+  }
+  return marks
 }
 
 
@@ -1881,6 +1928,10 @@ function emitProduction(
     // tabnas's first-match-wins would silently let them shadow any
     // later alternative. Guard them with FIRST-set peeks when the
     // production has more than one alt.
+    const prodKind = prod.nodeKind ?? 'user'
+    const marks = (prodKind === 'user' && refs.emitMarks)
+      ? assignMarks(ordered, literals, regexTokens)
+      : null
     const needsPeek = ordered.length > 1
     const opens: any[] = []
     for (const alt of ordered) {
@@ -1891,13 +1942,13 @@ function emitProduction(
         seg.terms.length === 0 &&
         seg.ref != null
 
-      const prodKind = prod.nodeKind ?? 'user'
+      const mark = marks ? marks.get(alt) : undefined
       if (needsPeek && isRefOnly) {
         const firstTokens = firstOfAlt(
           alt, literals, regexTokens, firstSets, nullable)
         if (firstTokens) {
           for (const tok of firstTokens) {
-            opens.push({
+            const o: any = {
               s: tok,
               b: 1,
               p: seg.ref,
@@ -1905,12 +1956,16 @@ function emitProduction(
                 { init: true, rule: prod.name, kind: prodKind, nterms: 0 },
                 (r: Rule) => { r.node = mkAstNode(prod.name, prodKind) }),
               g: tag,
-            })
+            }
+            if (mark) o.m = mark
+            opens.push(o)
           }
           continue
         }
       }
-      opens.push(segmentToAlt(seg, tag, refs, true, prod.name, prodKind))
+      const o = segmentToAlt(seg, tag, refs, true, prod.name, prodKind)
+      if (mark) o.m = mark
+      opens.push(o)
     }
 
     const rs: any = { open: opens }
@@ -1919,10 +1974,12 @@ function emitProduction(
     // returned child. Add a universal fallback close alt whose
     // action is a no-op when there was no push.
     if (prod.alts.some((alt) => alt.some((el) => el.kind === 'ref'))) {
-      rs.close = [{
+      const close: any = {
         ...captureChildFields(refs, prod.name, prod.nodeKind ?? 'user'),
         g: tag,
-      }]
+      }
+      if (marks) close.m = '_'
+      rs.close = [close]
     }
     ruleSpec[prod.name] = rs
     return
@@ -1944,10 +2001,14 @@ function emitProduction(
   // impl's node in its close-state action.
   const dispatchOpen: any[] = []
   let emptyAltSeen = false
+  const dispatchMarks = ((prod.nodeKind ?? 'user') === 'user' && refs.emitMarks)
+    ? assignMarks(prod.alts, literals, regexTokens)
+    : null
 
   for (let i = 0; i < prod.alts.length; i++) {
     const alt = prod.alts[i]
     const implName = `${prod.name}$alt${i}`
+    const mark = dispatchMarks ? dispatchMarks.get(alt) : undefined
 
     if (alt.length === 0) {
       // Empty alt acts as fallback — handled after the loop.
@@ -1980,13 +2041,15 @@ function emitProduction(
     const usable = prefixes.filter((p) => p.length > 0)
     if (usable.length > 0) {
       for (const p of usable) {
-        dispatchOpen.push({
+        const o: any = {
           s: p.join(' '),
           b: p.length,
           p: implName,
           ...initDispatchFields,
           g: tag,
-        })
+        }
+        if (mark) o.m = mark
+        dispatchOpen.push(o)
       }
     } else {
       const firstTokens = firstOfAlt(
@@ -1997,9 +2060,11 @@ function emitProduction(
           `but is not the only empty alt; FIRST set is ambiguous`)
       }
       for (const tok of firstTokens) {
-        dispatchOpen.push({
+        const o: any = {
           s: tok, b: 1, p: implName, ...initDispatchFields, g: tag,
-        })
+        }
+        if (mark) o.m = mark
+        dispatchOpen.push(o)
       }
     }
   }
@@ -2010,25 +2075,26 @@ function emitProduction(
     // walking the tree still gets a placeholder node for the empty
     // alternative.
     const fallbackKind = prod.nodeKind ?? 'user'
-    dispatchOpen.push({
+    const o: any = {
       ...refs.node(
         { init: true, rule: prod.name, kind: fallbackKind, nterms: 0 },
         (r: Rule) => { r.node = mkAstNode(prod.name, fallbackKind) }),
       g: tag,
-    })
+    }
+    if (dispatchMarks) o.m = '_'
+    dispatchOpen.push(o)
   }
 
-  ruleSpec[prod.name] = {
-    open: dispatchOpen,
-    close: [{
-      // Merge the chosen impl's result up into the dispatcher's node,
-      // tagged with the user rule name (so the enclosing rule sees a
-      // `{rule, src, kids}` child, not the impl chain's transparent
-      // `{src, kids}`).
-      ...captureChildFields(refs, prod.name, prod.nodeKind ?? 'user'),
-      g: tag,
-    }],
+  const dispClose: any = {
+    // Merge the chosen impl's result up into the dispatcher's node,
+    // tagged with the user rule name (so the enclosing rule sees a
+    // `{rule, src, kids}` child, not the impl chain's transparent
+    // `{src, kids}`).
+    ...captureChildFields(refs, prod.name, prod.nodeKind ?? 'user'),
+    g: tag,
   }
+  if (dispatchMarks) dispClose.m = '_'
+  ruleSpec[prod.name] = { open: dispatchOpen, close: [dispClose] }
 }
 
 
@@ -2061,7 +2127,12 @@ function emitChain(
     const kind = i === 0 ? headKind : 'helper'
     // Only the head of the chain initialises the node object; later
     // steps inherit and continue to accumulate into it via `r:`.
-    const open = [segmentToAlt(seg, tag, refs, i === 0, name, kind)]
+    const headAlt = segmentToAlt(seg, tag, refs, i === 0, name, kind)
+    // Single-alt user rule: the head alt is user-addressable.
+    if (i === 0 && headKind === 'user' && refs.emitMarks) {
+      headAlt.m = altDiscriminator(alt, literals, regexTokens)
+    }
+    const open = [headAlt]
     const rs: any = { open }
 
     const isLast = i === segs.length - 1

@@ -138,3 +138,25 @@ index b0cd759..1912b06 100644
            if (rulespec.open) {
              const isarr = Array.isArray(rulespec.open)
              const alts = isarr
+diff --git a/ts/src/utility.ts b/ts/src/utility.ts
+index e3539e5..50dc026 100644
+--- a/ts/src/utility.ts
++++ b/ts/src/utility.ts
+@@ -1028,6 +1028,17 @@ function resolveFuncRefs(
+       if (m) {
+         return new RegExp(m[1], m[2])
+       }
++      // Eager variant `@~/pattern/flags` — a RegExp matcher flagged
++      // `eager$` (opts out of tcol gating in the lexer). Used by
++      // serialized grammars whose match tokens must fire even when the
++      // active rule's token column is narrower (e.g. ABNF
++      // case-insensitive literals). See lexer `eager$` handling.
++      const me = obj.match(/^@~\/(.*)\/([\w]*)$/)
++      if (me) {
++        const re = new RegExp(me[1], me[2]) as RegExp & { eager$?: boolean }
++        re.eager$ = true
++        return re
++      }
+       if (ref) {
+         const fn = ref[obj]
+         if ('function' === typeof fn) {

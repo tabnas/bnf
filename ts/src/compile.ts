@@ -186,7 +186,12 @@ export function toJsonic(value: any, opts: JsonicOptions = {}): string {
 
   const ser = (v: any, depth: number): string => {
     if (null === v || undefined === v) return 'null'
-    if (v instanceof RegExp) return str('@/' + v.source + '/' + v.flags)
+    if (v instanceof RegExp) {
+      // `@~/…/` carries the `eager$` matcher flag through serialisation;
+      // plain `@/…/` for ordinary regexes.
+      const sentinel = (v as any).eager$ ? '@~/' : '@/'
+      return str(sentinel + v.source + '/' + v.flags)
+    }
     const t = typeof v
     if ('number' === t || 'boolean' === t) return String(v)
     if ('string' === t) return str(v)
@@ -209,6 +214,119 @@ export function toJsonic(value: any, opts: JsonicOptions = {}): string {
 }
 
 
+// ---- User semantic actions (the `m`-mark feature) -----------------
+
+export class BnfActionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BnfActionError'
+  }
+}
+
+type ActionFn = (r: any, ctx: any, alt: any) => any
+export type ActionsMap = Record<string, ActionFn | ActionFn[]>
+
+const PHASES = new Set(['bo', 'ao', 'bc', 'ac'])
+
+// Compose a previous action (the compiler's own, run first) with the
+// user's, in attachment order — the synthetic wrapper from the design.
+function composeActions(prev: any, fns: ActionFn[]): ActionFn {
+  const prevFn: ActionFn | null = 'function' === typeof prev ? prev : null
+  return (r, ctx, alt) => {
+    if (prevFn) prevFn(r, ctx, alt)
+    for (const fn of fns) fn(r, ctx, alt)
+  }
+}
+
+// Attach user semantic actions to a closure-mode spec, in place.
+// Keys: `@<rule>:<phase>` (phase = bo/ao/bc/ac) or `@<rule>:o|c:<mark>`
+// (open/close alt by mark). Values: a function or array of functions,
+// run in attachment order *after* the compiler's own action. Throws
+// `BnfActionError` for a ref that matches no rule / hook / marked alt.
+export function attachActions(spec: GrammarSpec, actions: ActionsMap): GrammarSpec {
+  const ref: Record<string, any> =
+    ((spec as any).ref = (spec as any).ref ?? {})
+  const rules = spec.rule ?? {}
+  let counter = 0
+
+  for (const key of Object.keys(actions)) {
+    const fns = ([] as ActionFn[]).concat(actions[key] as any)
+    const m = /^@([^:]+):(.+)$/.exec(key)
+    if (!m) {
+      throw new BnfActionError(
+        `bnf: malformed action ref '${key}' ` +
+        `(expected @rule:phase or @rule:o|c:mark)`)
+    }
+    const rule = m[1]
+    const sel = m[2]
+    if (!(rules as any)[rule]) {
+      throw new BnfActionError(
+        `bnf: action ref '${key}' targets unknown rule '${rule}'`)
+    }
+
+    // Rule-phase hook: reuse the engine's `@<rule>-<phase>` fnref
+    // auto-install (fnref builds the key from the rule name, so a
+    // hyphenated ABNF rule name stays unambiguous).
+    if (PHASES.has(sel)) {
+      const fkey = `@${rule}-${sel}`
+      ref[fkey] = composeActions(ref[fkey], fns)
+      continue
+    }
+
+    // Alt action by mark.
+    const pm = /^([oc]):(.+)$/.exec(sel)
+    if (!pm) {
+      throw new BnfActionError(`bnf: malformed action ref '${key}'`)
+    }
+    const phase = 'o' === pm[1] ? 'open' : 'close'
+    const mark = pm[2]
+    const altsField = (rules as any)[rule][phase]
+    const list: any[] = Array.isArray(altsField)
+      ? altsField
+      : (altsField && altsField.alts) || []
+    const targets = list.filter((a) => a && a.m === mark)
+    if (0 === targets.length) {
+      throw new BnfActionError(
+        `bnf: action ref '${key}' matches no ${phase} alt with mark ` +
+        `'${mark}' in rule '${rule}'`)
+    }
+    for (const alt of targets) {
+      const prev = 'string' === typeof alt.a ? ref[alt.a]
+        : 'function' === typeof alt.a ? alt.a : null
+      if ('string' === typeof alt.a && alt.a.endsWith('$')) {
+        throw new BnfActionError(
+          `bnf: user actions require closure-mode conversion; rule ` +
+          `'${rule}' alt is a $-builtin (do not pass builtins:true)`)
+      }
+      const wrapName = `@bnf_user${counter++}`
+      ref[wrapName] = composeActions(prev, fns)
+      alt.a = wrapName
+    }
+  }
+  return spec
+}
+
+// Human-readable listing of the marks the compiler assigned, for
+// discoverability (CLI `--marks`).
+export function markListing(spec: GrammarSpec): string {
+  const lines: string[] = []
+  const rules = spec.rule ?? {}
+  for (const rule of Object.keys(rules)) {
+    for (const [ph, sym] of [['open', 'o'], ['close', 'c']] as const) {
+      const f = (rules as any)[rule][ph]
+      const list: any[] = Array.isArray(f) ? f : (f && f.alts) || []
+      for (const a of list) {
+        if (a && null != a.m) {
+          const what = a.s ? `s:${a.s}` : a.p ? `p:${a.p}` : '(empty)'
+          lines.push(`${rule}  ${sym}:${a.m}  ${what}`)
+        }
+      }
+    }
+  }
+  return lines.join('\n')
+}
+
+
 export type BnfCompileOptions = BnfConvertOptions & JsonicOptions & {
   // Default `true`: emit a pure *recognition* grammar (tree-building
   // dropped). Set `false` to emit the full AST grammar with tree
@@ -221,7 +339,8 @@ export type BnfCompileOptions = BnfConvertOptions & JsonicOptions & {
 // Always converts with `builtins: true` so probe dispatch and tree
 // building serialise as `@…$` builtin refs (no closures).
 export function bnfCompile(src: string, opts: BnfCompileOptions = {}): string {
-  const spec = bnfConvert(src, { start: opts.start, tag: opts.tag, builtins: true })
+  const spec = bnfConvert(src,
+    { start: opts.start, tag: opts.tag, builtins: true, marks: true })
   const out = (false === opts.recognition)
     ? toPureSpec(spec)
     : toRecognitionSpec(spec)

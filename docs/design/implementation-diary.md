@@ -159,17 +159,68 @@ AST-shape contract between compiler and engine (see §4).
 - [ ] Versioning policy for the config schema (§4.4).
 - [ ] Changelog: note the `grammar()` behaviour change (§4.5).
 
-## 6. Still design-only (not in this prototype)
+## 6. `m`-mark user actions (now prototyped)
 
-- The `m`-mark **user action** wiring (`@<rule>:<phase>:<mark>`,
-  alt-action-refs.md §3) — depends on the same `$`/`:` ref conventions but adds
-  user-supplied functions + the wrapper-composition for multiple actions per
-  alt.
-- `@/…/` `eager$` fidelity (§4.2).
+Pure ABNF + an out-of-band `actions` map; bindings keyed by `:`.
+
+- **Marks.** `bnfConvert(src, {marks:true})` stamps each *user-rule* alt with a
+  stable `m` = its leading discriminator (first token name sans `#`, the pushed
+  rule name, or `_`; `~N` suffix on collision), via `assignMarks`. Same source
+  alt → same mark, so FIRST-peek/dispatch fan-out copies share it. **Opt-in** —
+  default conversion is byte-identical (existing structural tests untouched).
+  Engine ignores the extra `m` field. CLI `--marks` / `markListing(spec)` lists
+  them (discoverability, design §5).
+- **Binding** (`attachActions(spec, actions)`, closure-mode spec):
+  - `@<rule>:o|c:<mark>` → wrap the matching open/close alts' `a`. The compiler's
+    own action runs **first**, then user actions in array order
+    (`composeActions` — the synthetic wrapper). Implemented by registering a new
+    `@bnf_userN` ref wrapping the previous one.
+  - `@<rule>:bo|ao|bc|ac` → set `spec.ref['@<rule>-<phase>']`, reusing the
+    engine's existing `fnref` auto-install. `fnref` builds the reserved key from
+    the *known rule name* (`@${rn}-bo`), so a hyphenated ABNF rule name is **not**
+    ambiguous (the parse-the-name problem only bites a generic parser, which
+    `fnref` is not). This is why no engine change was needed for rule-phase.
+  - **Validation**: throws `BnfActionError` on a ref matching no rule / no marked
+    alt / bad selector.
+- **Plugin**: `tn.bnf(src, {actions})` converts in closure mode with
+  `marks:true`, then `attachActions`, then installs.
+- **Closure-mode only.** Wrapping needs the previous action *function*; in
+  `builtins` mode the alt's `a` is a `$`-builtin string with no compiler-side
+  function, so `attachActions` throws. Composing user actions with engine
+  builtins is a production item (needs engine-side wrapper support — see §5/§7).
+
+Worked demo (verified): `op = "inc" / "dec"` with
+`{'@op:o:INC':(r)=>{r.node.delta=1}, '@op:o:DEC':(r)=>{r.node.delta=-1}}` →
+`parse('inc').delta===1`, `parse('dec').delta===-1`; `@g:bo` fires on enter;
+multiple actions run in order; bad refs throw.
+
+## 7. `@/…/` `eager$` fidelity — fixed
+
+Match-token RegExps carry `.eager$` (opts out of lexer tcol gating; see
+`lexer.ts`). `@/src/flags` lost it. Fix = a sibling sentinel **`@~/src/flags`**:
+
+- Engine `resolveFuncRefs` (utility.ts): a new branch matches `@~/(.*)/(\w*)`,
+  builds the RegExp and sets `re.eager$ = true`. Placed before the funcref
+  lookup; non-eager `@/…/` unchanged.
+- `@tabnas/bnf` `toJsonic`: emits `(re as any).eager$ ? '@~/…' : '@/…'`.
+
+Verified: a reloaded `#HI` match token is a `RegExp` with `eager$===true` and
+still recognises. **Note:** `tsc --build` is incremental and *missed* the
+`utility.ts` edit on first run — had to `tsc --build src --force`. Force/clean
+the engine after editing it.
+
+## 8. Still design-only
+
+- Composing user actions with **`$`-builtin** tree actions (full/serialized
+  grammars) — needs engine-side wrapper composition (a builtin that calls a
+  list), or the compiler emitting a composite `k` action list. Closure mode
+  works today.
+- Reserving `$` in user refs and accepting `:` directly in the engine `fnref`
+  reserved scan (currently the compiler translates `:`→`-` for phases).
 
 ---
 
-## 7. Verification log
+## 9. Verification log
 
 - `greet`/`pair`/`arith`/`probe`: full-mode pure-data tree `deepStrictEqual`
   live-plugin tree. ✓
@@ -178,5 +229,10 @@ AST-shape contract between compiler and engine (see §4).
   still accepts/rejects correctly. ✓
 - Probe round-trip (reparse→`resolveFuncRefs`→bare engine) recognises
   `ab/a@b/a`, rejects `a@/@`. ✓
-- Suites: `@tabnas/parser` 169/169; `@tabnas/bnf` 132 pass / 5 skipped / 0 fail
-  (`compile.test.js` 19/19). Node 22 locally (engines want ≥24; CI uses 24).
+- Eager match token round-trips: reloaded `#HI` is a `RegExp` with
+  `eager$===true`; still recognises. ✓
+- User actions: `@op:o:INC/DEC` set `node.delta` (compiler action first);
+  multiple actions ordered; `@g:bo` fires on enter; bad refs throw
+  `BnfActionError`. ✓ Marks are opt-in (default spec unchanged). ✓
+- Suites: `@tabnas/parser` 169/169; `@tabnas/bnf` 139 pass / 5 skipped / 0 fail
+  (`compile.test.js` 26/26). Node 22 locally (engines want ≥24; CI uses 24).

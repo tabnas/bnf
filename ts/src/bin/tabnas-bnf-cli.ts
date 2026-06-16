@@ -6,7 +6,7 @@
 
 import Fs from 'node:fs'
 
-import { bnfConvert, bnfCompile, BnfCompileError } from '../bnf'
+import { bnfConvert, bnfCompile, markListing, BnfCompileError } from '../bnf'
 import { Tabnas } from '@tabnas/parser'
 
 
@@ -28,6 +28,8 @@ export async function run(argv: string[], console: Console) {
     // With --compile, emit the full AST grammar (tree builtins kept)
     // instead of the recognition-only grammar.
     full: false,
+    // List the marks the compiler assigns (for @rule:o|c:mark actions).
+    marks: false,
   }
 
   for (let aI = 2; aI < argv.length; aI++) {
@@ -49,6 +51,8 @@ export async function run(argv: string[], console: Console) {
     } else if ('--full' === arg || '-F' === arg) {
       args.compile = true
       args.full = true
+    } else if ('--marks' === arg || '-m' === arg) {
+      args.marks = true
     } else if ('--parse' === arg || '-P' === arg) {
       args.parse.push(argv[++aI])
     } else if ('--parse-file' === arg) {
@@ -77,6 +81,14 @@ export async function run(argv: string[], console: Console) {
   }
 
   const spec = bnfConvert(src, { start: args.start, tag: args.tag })
+
+  // Marks mode: list the user-action marks the compiler assigns.
+  if (args.marks) {
+    console.log(markListing(bnfConvert(src, {
+      start: args.start, tag: args.tag, marks: true,
+    })))
+    return
+  }
 
   // Compilation mode: emit a pure recognition grammar as jsonic text.
   // No function references — recognition is fully structural. Grammars
@@ -183,6 +195,9 @@ Arguments:
   --full                 With compilation mode, emit the full AST
   -F                       grammar (tree \`$\`-builtins retained) instead
                            of recognition-only. Still pure data.
+
+  --marks                List the per-alt marks the compiler assigns,
+  -m                       usable as \`@<rule>:o|c:<mark>\` action refs.
 
   --parse <input>        Parse <input> against the generated grammar
   -P <input>               and print its parse tree. Repeatable.

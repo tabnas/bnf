@@ -30,20 +30,30 @@ import {
   toRecognitionSpec,
   toPureSpec,
   toJsonic,
+  attachActions,
+  markListing,
   BnfCompileError,
+  BnfActionError,
   BnfCompileOptions,
+  ActionsMap,
 } from './compile'
 
 
 // Plugin entry point. Decorates the instance with a callable `bnf`
 // member that converts and installs a grammar, plus `bnf.toSpec` for
 // callers that just want the spec.
+type BnfPluginOptions = BnfConvertOptions & { actions?: ActionsMap }
+
 const bnf: Plugin = function bnf(tn: Tabnas, _options?: any): void {
-  const fn = ((src: string, opts?: BnfConvertOptions): GrammarSpec => {
-    const spec = bnfConvert(src, opts)
+  const fn = ((src: string, opts?: BnfPluginOptions): GrammarSpec => {
+    // User actions wrap the compiler's closures, so convert in closure
+    // mode (never builtins) and request marks when actions are supplied.
+    const spec = bnfConvert(src,
+      opts?.actions ? { ...opts, builtins: false, marks: true } : opts)
+    if (opts?.actions) attachActions(spec, opts.actions)
     tn.grammar(spec)
     return spec
-  }) as ((src: string, opts?: BnfConvertOptions) => GrammarSpec) & {
+  }) as ((src: string, opts?: BnfPluginOptions) => GrammarSpec) & {
     toSpec: (src: string, opts?: BnfConvertOptions) => GrammarSpec
   }
   fn.toSpec = (src: string, opts?: BnfConvertOptions): GrammarSpec =>
@@ -64,7 +74,10 @@ export {
   toRecognitionSpec,
   toPureSpec,
   toJsonic,
+  attachActions,
+  markListing,
   BnfCompileError,
+  BnfActionError,
 }
 
-export type { BnfConvertOptions, BnfCompileOptions }
+export type { BnfConvertOptions, BnfCompileOptions, ActionsMap }

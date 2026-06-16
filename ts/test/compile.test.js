@@ -24,7 +24,9 @@ const {
   toRecognitionSpec,
   toPureSpec,
   toJsonic,
+  markListing,
   BnfCompileError,
+  BnfActionError,
 } = require('..')
 
 
@@ -156,10 +158,10 @@ describe('compile: jsonic serialisation', () => {
     assert.doesNotMatch(text, /"open"/, 'keys are not double-quoted')
   })
 
-  it('emits RegExp match tokens as @/source/flags', () => {
-    // "hi" is case-insensitive -> a regex match token.
+  it('emits eager RegExp match tokens as @~/source/flags', () => {
+    // "hi" is case-insensitive -> an eager regex match token.
     const text = bnfCompile('greet = "hi"')
-    assert.match(text, /'@\/\^hi\/i'/)
+    assert.match(text, /'@~\/\^hi\/i'/)
   })
 })
 
@@ -207,6 +209,82 @@ describe('compile: full pure-data AST mode', () => {
       () => toPureSpec(bnfConvert('greet = "hi"')),
       (e) => e instanceof BnfCompileError,
     )
+  })
+})
+
+
+describe('compile: eager match tokens', () => {
+  it('preserves eager$ across serialization round-trip', () => {
+    const spec = resolveFuncRefs(JSON.parse(
+      bnfCompile('greet = "hi" / "hello"', { recognition: false, strict: true })))
+    const hi = spec.options.match.token['#HI']
+    assert.ok(hi instanceof RegExp, 'reconstructed as RegExp')
+    assert.strictEqual(hi.eager$, true, 'eager$ flag survives')
+    // and it still recognises
+    const tn = new Tabnas()
+    tn.grammar(spec)
+    assert.doesNotThrow(() => tn.parse('hello'))
+  })
+})
+
+
+describe('user actions (m-marks)', () => {
+  it('binds alt actions by mark; compiler action runs first', () => {
+    const tn = new Tabnas({ plugins: [bnfPlugin] })
+    const log = []
+    tn.bnf('op = "inc" / "dec"', {
+      actions: {
+        '@op:o:INC': (r) => { log.push('inc'); r.node.delta = 1 },
+        '@op:o:DEC': (r) => { log.push('dec'); r.node.delta = -1 },
+      },
+    })
+    const inc = tn.parse('inc')
+    const dec = tn.parse('dec')
+    assert.strictEqual(inc.delta, 1)
+    assert.strictEqual(dec.delta, -1)
+    // r.node existed (compiler's tree action ran before the user action)
+    assert.strictEqual(inc.rule, 'op')
+    assert.deepStrictEqual(log, ['inc', 'dec'])
+  })
+
+  it('multiple actions on one alt run in attachment order', () => {
+    const tn = new Tabnas({ plugins: [bnfPlugin] })
+    const log = []
+    tn.bnf('op = "inc"', {
+      actions: { '@op:o:INC': [() => log.push('a'), () => log.push('b')] },
+    })
+    tn.parse('inc')
+    assert.deepStrictEqual(log, ['a', 'b'])
+  })
+
+  it('binds rule-phase hooks (bo)', () => {
+    const tn = new Tabnas({ plugins: [bnfPlugin] })
+    const log = []
+    tn.bnf('g = "x"', { actions: { '@g:bo': () => log.push('enter') } })
+    tn.parse('x')
+    assert.deepStrictEqual(log, ['enter'])
+  })
+
+  it('rejects refs that match no rule/alt/hook', () => {
+    const tn = new Tabnas({ plugins: [bnfPlugin] })
+    for (const bad of ['@op:o:NOPE', '@nope:o:INC', '@op:zz']) {
+      assert.throws(
+        () => tn.bnf('op = "inc" / "dec"', { actions: { [bad]: () => {} } }),
+        (e) => e instanceof BnfActionError,
+        `should reject ${bad}`)
+    }
+  })
+
+  it('markListing reports the assigned marks', () => {
+    const listing = markListing(bnfConvert('op = "inc" / "dec"', { marks: true }))
+    assert.match(listing, /op\s+o:INC/)
+    assert.match(listing, /op\s+o:DEC/)
+  })
+
+  it('marks are opt-in (default conversion is unchanged)', () => {
+    const spec = bnfConvert('op = "inc" / "dec"')
+    const hasMark = JSON.stringify(spec.rule).includes('"m":')
+    assert.strictEqual(hasMark, false)
   })
 })
 
