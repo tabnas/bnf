@@ -162,8 +162,10 @@ export type BnfCompileOptions = BnfConvertOptions & JsonicOptions
 
 
 // Compile ABNF source into a pure recognition grammar in jsonic text.
+// Probe dispatchers are emitted with engine `$`-builtins so they too
+// serialise as pure data.
 export function bnfCompile(src: string, opts: BnfCompileOptions = {}): string {
-  const spec = bnfConvert(src, { start: opts.start, tag: opts.tag })
+  const spec = bnfConvert(src, { start: opts.start, tag: opts.tag, builtins: true })
   const rspec = toRecognitionSpec(spec)
   return toJsonic(rspec, { strict: opts.strict, indent: opts.indent })
 }

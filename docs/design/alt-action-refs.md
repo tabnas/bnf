@@ -377,25 +377,43 @@ compilation need functions?" → no; it *references* named ones.
 4. **Maintenance.** One builtin library to test, but it becomes load-bearing
    for every compiled grammar.
 
-### 6.6 Prototype status (this repo)
+### 6.6 Prototype status
 
-Implemented in `@tabnas/bnf` (TS) and verified against a locally-built engine:
+Implemented and verified end-to-end against a locally-built engine.
+
+**`@tabnas/bnf` (this repo):**
 
 - `toRecognitionSpec(spec)` — RegExp-preserving transform that drops the `ref`
-  map and the `a`/`bo`/`bc` tree-building functions, and **detects + refuses**
-  probe-requiring grammars (any control ref surviving the strip) with a
-  `BnfCompileError`. *(This is the §6.1/§6.2 boundary, enforced.)*
+  map and the `a`/`bo`/`bc` tree-building functions. It **refuses**
+  (`BnfCompileError`) any spec with *control* refs surviving the strip — i.e. a
+  closure-mode probe dispatcher (§6.1/§6.2 boundary, enforced).
 - `toJsonic(value)` — relaxed-jsonic serialiser (unquoted identifier keys,
   single-quoted strings, `RegExp → @/source/flags`), plus a strict-JSON mode
   used for round-trip verification.
-- `bnfCompile(src, opts)` and a CLI `--compile` flag emitting the jsonic
-  recognition grammar.
+- A `builtins` convert option that emits the probe dispatcher with `@probe…$`
+  refs + `k` config (§6.3) instead of closures; `bnfCompile` turns it on so
+  probe grammars serialise as **pure data**.
+- `bnfCompile(src, opts)` and a CLI `--compile` flag.
 
-Not yet built (needs the engine, §6.5.1): the `$`-builtin stdlib, so
-probe-requiring grammars are currently *refused* in compilation mode rather than
-emitted with `@probe…$` refs. The `@node$`/`@capture$` generalisation (§6.4)
-and the `m`-mark user-action wiring (§3) are likewise compiler-ready in design
-but gated on engine support.
+**`@tabnas/parser` (engine — prototyped locally, captured in
+[`engine-prototype.patch`](./engine-prototype.patch)):**
+
+- `src/builtins.ts` — the `$`-builtin stdlib: `@probeInit$`, `@probeDecide$`,
+  `@probePhase0$`/`1$`/`2$`. Generic functions; the disambiguator token rides
+  in `k.pd_d`.
+- `grammar()` merges `BUILTIN_REFS` under any spec-supplied `ref` before
+  resolving, so a serialized function-free spec resolves `@probe…$` by name.
+
+Verified: an optional-prefix grammar (`R = [ A "@" ] A`) compiles with **no**
+`@bnf_` closures, only `@probe…$` builtins; round-trips (reparse → resolve →
+install on a bare engine) and recognises correctly (`ab`, `a@b`, `a` accept;
+`a@`, `@` reject). Full suites green: engine 169/169, `@tabnas/bnf` 122 pass /
+5 skipped.
+
+Still design-only (compiler-ready, gated on the same engine seam): the
+`@node$`/`@capture$` tree-builder generalisation (§6.4) and the `m`-mark
+user-action wiring (§3). The `eager$` match-token fidelity gap (§6.5.3) is
+unaddressed.
 
 ## 7. Prior art
 

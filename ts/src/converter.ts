@@ -32,6 +32,12 @@ import type { GrammarSpec, Rule } from '@tabnas/parser'
 export type BnfConvertOptions = {
   start?: string
   tag?: string
+  // Emit the probe/phase-retry dispatcher using engine `$`-builtin
+  // refs (`@probeInit$` / `@probeDecide$` / `@probePhaseN$`) + `k`
+  // config, instead of registered closures. This keeps the dispatcher
+  // function-free so it survives compilation (pure-recognition) mode.
+  // Requires an engine that ships the probe `$`-builtins.
+  builtins?: boolean
 }
 
 
@@ -1393,6 +1399,7 @@ function emitProbeDispatch(
   refs: RefRegistry,
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
+  useBuiltins: boolean,
 ): void {
   const { probeRule, disambiguator, withBranch, noBranch } =
     prod.probeDispatch!
@@ -1408,6 +1415,32 @@ function emitProbeDispatch(
       `disambiguator (kind=${disambiguator.kind})`)
   }
 
+  // `bubble` lifts the committed child's node up — pure tree-building,
+  // so it stays a registered closure (dropped in recognition mode)
+  // whichever emission style we use.
+  const bubble = refs.register((r: Rule) => {
+    if (r.child && r.child.node !== undefined) r.node = r.child.node
+  })
+
+  if (useBuiltins) {
+    // Function-free dispatcher: control logic is engine `$`-builtins,
+    // the disambiguator token rides in `k` config. See
+    // docs/design/alt-action-refs.md §6.3.
+    ruleSpec[prod.name] = {
+      open: [
+        { c: '@probePhase0$', a: '@probeInit$', p: probeRule,
+          k: { pd_d: disambiguatorToken }, g: tag } as any,
+        { c: '@probePhase1$', p: withBranch, g: tag } as any,
+        { c: '@probePhase2$', p: noBranch, g: tag } as any,
+      ],
+      close: [
+        { c: '@probePhase0$', a: '@probeDecide$', r: prod.name, g: tag } as any,
+        { a: bubble, g: tag },
+      ],
+    }
+    return
+  }
+
   const initMark = refs.register((r: Rule, ctx: any) => {
     r.k.pd_phase = 0
     r.k.pd_mark = ctx.mark()
@@ -1420,10 +1453,6 @@ function emitProbeDispatch(
     ctx.rewind(r.k.pd_mark)
     const matched = peek && peek.name === disambiguatorToken
     r.k.pd_phase = matched ? 1 : 2
-  })
-
-  const bubble = refs.register((r: Rule) => {
-    if (r.child && r.child.node !== undefined) r.node = r.child.node
   })
 
   ruleSpec[prod.name] = {
@@ -1566,7 +1595,8 @@ function emitGrammarSpec(
       continue
     }
     if (prod.probeDispatch) {
-      emitProbeDispatch(prod, tag, ruleSpec, refs, literals, regexTokens)
+      emitProbeDispatch(
+        prod, tag, ruleSpec, refs, literals, regexTokens, !!opts?.builtins)
       continue
     }
     // Standard path: a (possibly single-segment) set of alternatives

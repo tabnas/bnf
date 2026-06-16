@@ -1,0 +1,95 @@
+diff --git a/ts/src/builtins.ts b/ts/src/builtins.ts
+new file mode 100644
+index 0000000..bc1d701
+--- /dev/null
++++ b/ts/src/builtins.ts
+@@ -0,0 +1,48 @@
++/* Copyright (c) 2026 Richard Rodger and other contributors, MIT License */
++
++/*  builtins.ts
++ *  Standard `$`-suffixed builtin function references.
++ *
++ *  A trailing `$` in a ref name marks an engine-provided builtin. The
++ *  `$` ref-namespace is reserved (user grammars must not define refs
++ *  containing `$`). These functions are merged into the effective ref
++ *  map at `grammar()` load time, so a *serialized* (function-free)
++ *  GrammarSpec can reference them purely by name — the wire format
++ *  carries strings like `@probeInit$`, not closures.
++ *
++ *  Probe + phase-retry dispatch (optional-prefix `[X D] Y` ambiguity)
++ *  ----------------------------------------------------------------
++ *  The dispatcher rule retries itself across three phases stored in
++ *  `r.k.pd_phase` (0 = probe, 1 = saw disambiguator, 2 = did not).
++ *  Phase 0 marks the position and runs a failure-proof probe; its
++ *  close peeks the next token, rewinds, and picks phase 1 or 2. The
++ *  disambiguator token name rides in `k.pd_d` on the phase-0 open alt
++ *  (propagated into `r.k`). These builtins are generic — all grammar-
++ *  specific data is config, never closed-over state.
++ */
++
++import type { Rule, Context } from './types'
++
++
++export const BUILTIN_REFS: Record<string, Function> = {
++  // Phase-0 open action: mark the token position and reset phase.
++  '@probeInit$': (r: Rule, ctx: any) => {
++    r.k.pd_phase = 0
++    r.k.pd_mark = ctx.mark()
++  },
++
++  // Phase-0 close action: peek the first token the probe did not
++  // consume, rewind to the mark, and commit to phase 1 (disambiguator
++  // present) or phase 2 (absent). The probe never fails, so `ctx.t[0]`
++  // always reflects a real position.
++  '@probeDecide$': (r: Rule, ctx: any) => {
++    const peek = ctx.t[0]
++    ctx.rewind(r.k.pd_mark)
++    r.k.pd_phase = (peek && peek.name === r.k.pd_d) ? 1 : 2
++  },
++
++  // Phase-guard conditions.
++  '@probePhase0$': (r: Rule) => !r.k.pd_phase,
++  '@probePhase1$': (r: Rule) => r.k.pd_phase === 1,
++  '@probePhase2$': (r: Rule) => r.k.pd_phase === 2,
++}
+diff --git a/ts/src/tabnas.ts b/ts/src/tabnas.ts
+index b0cd759..1912b06 100644
+--- a/ts/src/tabnas.ts
++++ b/ts/src/tabnas.ts
+@@ -69,6 +69,8 @@ import {
+   values,
+ } from './utility'
+ 
++import { BUILTIN_REFS } from './builtins'
++
+ import {
+   TabnasError,
+   errdesc,
+@@ -474,8 +476,15 @@ class Tabnas {
+       })
+     }
+ 
++    // Merge the standard `$`-suffixed builtins under any spec-supplied
++    // refs (the spec wins on collision, though `$` is reserved). This
++    // lets a serialized, function-free GrammarSpec reference engine
++    // builtins (e.g. `@probeInit$`) by name. See builtins.ts.
++    const ref: Record<string, any> =
++      Object.assign(Object.create(null), BUILTIN_REFS, gs.ref || {})
++
+     if (gs.options) {
+-      const resolved = resolveFuncRefs(gs.options, gs.ref)
++      const resolved = resolveFuncRefs(gs.options, ref)
+       this.options(resolved)
+     }
+ 
+@@ -483,9 +492,7 @@ class Tabnas {
+       for (const rulename of Object.keys(gs.rule)) {
+         const rulespec = gs.rule[rulename]
+         this.rule(rulename, (rs: RuleSpec) => {
+-          if (gs.ref) {
+-            rs.fnref(gs.ref)
+-          }
++          rs.fnref(ref)
+           if (rulespec.open) {
+             const isarr = Array.isArray(rulespec.open)
+             const alts = isarr

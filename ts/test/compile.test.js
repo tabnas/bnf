@@ -144,12 +144,17 @@ describe('compile: jsonic serialisation', () => {
 })
 
 
-describe('compile: probe grammars are refused', () => {
-  it('throws BnfCompileError naming the offending rules', () => {
-    // [ A "@" ] A — optional-prefix ambiguity needing the probe.
-    const src = 'R = [ A "@" ] A\nA = 1*ALPHA'
+// [ A "@" ] A — optional-prefix ambiguity that compiles to a probe
+// dispatcher.
+const PROBE_SRC = 'R = [ A "@" ] A\nA = 1*ALPHA'
+
+describe('compile: probe grammars', () => {
+  it('closure-mode probe is refused by toRecognitionSpec', () => {
+    // Without `builtins`, the dispatcher uses registered closures for
+    // its control logic, which cannot be emitted as pure data.
+    const spec = bnfConvert(PROBE_SRC)
     assert.throws(
-      () => bnfCompile(src),
+      () => toRecognitionSpec(spec),
       (e) => {
         assert.ok(e instanceof BnfCompileError, 'is BnfCompileError')
         assert.ok(e.rules.length > 0, 'lists offending rules')
@@ -157,5 +162,28 @@ describe('compile: probe grammars are refused', () => {
         return true
       },
     )
+  })
+
+  it('builtin-mode probe compiles to pure data', () => {
+    const text = bnfCompile(PROBE_SRC)
+    assert.doesNotMatch(text, /@bnf_/, 'no registered closures remain')
+    assert.match(text, /@probeInit\$/)
+    assert.match(text, /@probeDecide\$/)
+    assert.match(text, /@probePhase0\$/)
+  })
+
+  it('builtin-mode probe round-trips into a working grammar', () => {
+    const spec = resolveFuncRefs(JSON.parse(bnfCompile(PROBE_SRC, { strict: true })))
+    const tn = new Tabnas()
+    tn.grammar(spec)
+    const acc = (s) => {
+      try { tn.parse(s); return true } catch (e) { return false }
+    }
+    // With disambiguator: A "@" A. Without: A A (single A is the Y branch).
+    assert.ok(acc('ab'), 'A A')
+    assert.ok(acc('a@b'), 'A @ A')
+    assert.ok(acc('a'), 'single A')
+    assert.ok(!acc('a@'), 'A @ with no trailing A is rejected')
+    assert.ok(!acc('@'), 'bare disambiguator rejected')
   })
 })
