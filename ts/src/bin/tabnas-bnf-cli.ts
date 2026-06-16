@@ -152,10 +152,14 @@ Arguments:
   --help                 Print this help message.
   -h
 
+Grammar dialect:
+  Rules are ABNF-style: \`name = element ...\`, with \`/\` for choice and
+  double-quoted literals. For example: \`greet = "hi" / "hello"\`.
+
 Examples:
-  > tabnas-bnf '<greet> ::= "hi" | "hello"'
+  > tabnas-bnf 'greet = "hi" / "hello"'
   > tabnas-bnf -f grammar.bnf
-  > echo '<g> ::= "a"' | tabnas-bnf -
+  > echo 'g = "a"' | tabnas-bnf -
   > tabnas-bnf -f grammar.bnf --parse 'hi'
 `)
 }
