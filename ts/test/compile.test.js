@@ -18,12 +18,32 @@ const assert = require('node:assert')
 const { Tabnas } = require('@tabnas/parser')
 const { resolveFuncRefs } = require('@tabnas/parser/utility')
 const {
+  bnf: bnfPlugin,
   bnfConvert,
   bnfCompile,
   toRecognitionSpec,
+  toPureSpec,
   toJsonic,
   BnfCompileError,
 } = require('..')
+
+
+// Parse `input` with the live plugin (closures) — the reference tree.
+function liveTree(src, input) {
+  const tn = new Tabnas({ plugins: [bnfPlugin] })
+  tn.bnf(src)
+  return tn.parse(input)
+}
+
+// Parse `input` with the serialized full pure-data grammar (tree
+// `$`-builtins reconstructed by the engine).
+function pureTree(src, input) {
+  const spec = resolveFuncRefs(JSON.parse(
+    bnfCompile(src, { recognition: false, strict: true })))
+  const tn = new Tabnas()
+  tn.grammar(spec)
+  return tn.parse(input)
+}
 
 
 // Walk a value; collect every string that is a key of the original
@@ -147,6 +167,49 @@ describe('compile: jsonic serialisation', () => {
 // [ A "@" ] A — optional-prefix ambiguity that compiles to a probe
 // dispatcher.
 const PROBE_SRC = 'R = [ A "@" ] A\nA = 1*ALPHA'
+
+describe('compile: full pure-data AST mode', () => {
+  const CASES = [
+    ['greet', 'greet = "hi" / "hello"', 'hello'],
+    ['pair', 'pair = "a" "b"', 'ab'],
+    ['arith',
+      'expr = term *("+" term)\nterm = "(" expr ")" / number\nnumber = 1*DIGIT',
+      '(1+2)+3'],
+    ['probe', 'R = [ A "@" ] A\nA = 1*ALPHA', 'a@b'],
+  ]
+
+  for (const [name, src, input] of CASES) {
+    it(`${name}: pure-data tree equals the live plugin tree`, () => {
+      assert.deepStrictEqual(pureTree(src, input), liveTree(src, input))
+    })
+
+    it(`${name}: builtins conversion leaves no closures`, () => {
+      const spec = bnfConvert(src, { builtins: true })
+      assert.deepStrictEqual(Object.keys(spec.ref || {}), [],
+        'ref map must be empty — every action is a $-builtin')
+    })
+  }
+
+  it('full mode keeps tree builtins; recognition mode drops them', () => {
+    const src = 'pair = "a" "b"'
+    const full = bnfCompile(src, { recognition: false })
+    assert.match(full, /@node\$/, 'full mode retains @node$')
+
+    const recog = bnfCompile(src, { recognition: true })
+    assert.doesNotMatch(recog, /@node\$|@capture\$|@bubble\$/,
+      'recognition mode drops all tree builtins')
+    assert.doesNotMatch(recog, /node\$|capture\$/,
+      'recognition mode drops orphaned k config too')
+  })
+
+  it('toPureSpec rejects a closure spec (needs builtins:true)', () => {
+    assert.throws(
+      () => toPureSpec(bnfConvert('greet = "hi"')),
+      (e) => e instanceof BnfCompileError,
+    )
+  })
+})
+
 
 describe('compile: probe grammars', () => {
   it('closure-mode probe is refused by toRecognitionSpec', () => {

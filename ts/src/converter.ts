@@ -1415,10 +1415,10 @@ function emitProbeDispatch(
       `disambiguator (kind=${disambiguator.kind})`)
   }
 
-  // `bubble` lifts the committed child's node up — pure tree-building,
-  // so it stays a registered closure (dropped in recognition mode)
-  // whichever emission style we use.
-  const bubble = refs.register((r: Rule) => {
+  // `bubble` lifts the committed child's node up — pure tree-building
+  // (a `@bubble$` builtin or a closure, per refs mode; dropped in
+  // recognition mode either way).
+  const bubbleFields = refs.bubble((r: Rule) => {
     if (r.child && r.child.node !== undefined) r.node = r.child.node
   })
 
@@ -1435,7 +1435,7 @@ function emitProbeDispatch(
       ],
       close: [
         { c: '@probePhase0$', a: '@probeDecide$', r: prod.name, g: tag } as any,
-        { a: bubble, g: tag },
+        { ...bubbleFields, g: tag },
       ],
     }
     return
@@ -1486,7 +1486,7 @@ function emitProbeDispatch(
         g: tag,
       },
       // Phase 1 / 2 close: lift the committed child's node up.
-      { a: bubble, g: tag },
+      { ...bubbleFields, g: tag },
     ],
   }
 }
@@ -1587,6 +1587,7 @@ function emitGrammarSpec(
   const { firstSets, nullable } = computeFirstSets(
     grammar, literals, regexTokens)
   const refs = new RefRegistry()
+  refs.useBuiltins = !!opts?.builtins
 
   const ruleSpec: NonNullable<GrammarSpec['rule']> = {}
   for (const prod of grammar.productions) {
@@ -1625,7 +1626,7 @@ function emitGrammarSpec(
       // wrapper exists only to ensure end-of-source gets consumed.
       // The caller of `tabnas(src)` receives the tagged user-rule
       // node (e.g. `{rule: 'URI', src, kids: [...]}`) unadorned.
-      a: refs.register((r: Rule) => {
+      ...refs.bubble((r: Rule) => {
         if (r.child && r.child.node !== undefined) {
           r.node = r.child.node
         }
@@ -1736,6 +1737,10 @@ function validateRefs(
 class RefRegistry {
   private refs: Record<string, Function> = {}
   private counter = 0
+  // When set, tree-building actions are emitted as engine `$`-builtin
+  // refs + `k` config (pure data) instead of registered closures. See
+  // docs/design/alt-action-refs.md §6.4 and implementation-diary.md.
+  useBuiltins = false
   register(fn: Function): `@${string}` {
     const name = `@bnf_a${this.counter++}` as `@${string}`
     this.refs[name] = fn
@@ -1743,6 +1748,22 @@ class RefRegistry {
   }
   get map(): Record<string, Function> {
     return this.refs
+  }
+
+  // Tree-action emitters. Each returns the alt-spec fields to merge
+  // (`{a}` in closure mode, `{a, k}` in builtins mode).
+  node(cfg: Record<string, any>, closure: Function): { a: any; k?: any } {
+    return this.useBuiltins
+      ? { a: '@node$', k: { node$: cfg } }
+      : { a: this.register(closure) }
+  }
+  capture(cfg: Record<string, any>, closure: Function): { a: any; k?: any } {
+    return this.useBuiltins
+      ? { a: '@capture$', k: { capture$: cfg } }
+      : { a: this.register(closure) }
+  }
+  bubble(closure: Function): { a: any } {
+    return this.useBuiltins ? { a: '@bubble$' } : { a: this.register(closure) }
   }
 }
 
@@ -1783,11 +1804,13 @@ function segmentToAlt(
   // so the child doesn't inherit (and then mutate) its parent's.
   const nterms = seg.terms.length
   if (nterms > 0 || initNode) {
-    spec.a = refs.register((r: Rule) => {
-      if (initNode) r.node = mkAstNode(ruleName, nodeKind)
-      const n = r.node as AstNode
-      for (let i = 0; i < nterms; i++) n.src += r.o[i].src
-    })
+    Object.assign(spec, refs.node(
+      { init: initNode, rule: ruleName, kind: nodeKind, nterms },
+      (r: Rule) => {
+        if (initNode) r.node = mkAstNode(ruleName, nodeKind)
+        const n = r.node as AstNode
+        for (let i = 0; i < nterms; i++) n.src += r.o[i].src
+      }))
   }
   return spec
 }
@@ -1799,12 +1822,12 @@ function segmentToAlt(
 // `src` appends and their `kids` extend. Either way `src`
 // concatenates so every ancestor's `.src` reflects everything it
 // matched.
-function captureChildRef(
+function captureChildFields(
   refs: RefRegistry,
   ruleName: string,
   nodeKind: BnfProduction['nodeKind'],
-): `@${string}` {
-  return refs.register((r: Rule) => {
+): { a: any; k?: any } {
+  return refs.capture({ rule: ruleName, kind: nodeKind }, (r: Rule) => {
     if (r.node == null) r.node = mkAstNode(ruleName, nodeKind)
     const n = r.node as AstNode
     const c = r.child && r.child.node as AstNode | undefined
@@ -1878,9 +1901,9 @@ function emitProduction(
               s: tok,
               b: 1,
               p: seg.ref,
-              a: refs.register((r: Rule) => {
-                r.node = mkAstNode(prod.name, prodKind)
-              }),
+              ...refs.node(
+                { init: true, rule: prod.name, kind: prodKind, nterms: 0 },
+                (r: Rule) => { r.node = mkAstNode(prod.name, prodKind) }),
               g: tag,
             })
           }
@@ -1897,7 +1920,7 @@ function emitProduction(
     // action is a no-op when there was no push.
     if (prod.alts.some((alt) => alt.some((el) => el.kind === 'ref'))) {
       rs.close = [{
-        a: captureChildRef(refs, prod.name, prod.nodeKind ?? 'user'),
+        ...captureChildFields(refs, prod.name, prod.nodeKind ?? 'user'),
         g: tag,
       }]
     }
@@ -1947,9 +1970,9 @@ function emitProduction(
     // would be shared and the dispatcher's captureChildRef would
     // mutate the parent's tree.
     const dispatchKind = prod.nodeKind ?? 'user'
-    const initDispatchNode = refs.register((r: Rule) => {
-      r.node = mkAstNode(prod.name, dispatchKind)
-    })
+    const initDispatchFields = refs.node(
+      { init: true, rule: prod.name, kind: dispatchKind, nterms: 0 },
+      (r: Rule) => { r.node = mkAstNode(prod.name, dispatchKind) })
 
     const LOOKAHEAD_K = 4
     const prefixes = altPrefixes(
@@ -1961,7 +1984,7 @@ function emitProduction(
           s: p.join(' '),
           b: p.length,
           p: implName,
-          a: initDispatchNode,
+          ...initDispatchFields,
           g: tag,
         })
       }
@@ -1975,7 +1998,7 @@ function emitProduction(
       }
       for (const tok of firstTokens) {
         dispatchOpen.push({
-          s: tok, b: 1, p: implName, a: initDispatchNode, g: tag,
+          s: tok, b: 1, p: implName, ...initDispatchFields, g: tag,
         })
       }
     }
@@ -1988,9 +2011,9 @@ function emitProduction(
     // alternative.
     const fallbackKind = prod.nodeKind ?? 'user'
     dispatchOpen.push({
-      a: refs.register((r: Rule) => {
-        r.node = mkAstNode(prod.name, fallbackKind)
-      }),
+      ...refs.node(
+        { init: true, rule: prod.name, kind: fallbackKind, nterms: 0 },
+        (r: Rule) => { r.node = mkAstNode(prod.name, fallbackKind) }),
       g: tag,
     })
   }
@@ -2002,7 +2025,7 @@ function emitProduction(
       // tagged with the user rule name (so the enclosing rule sees a
       // `{rule, src, kids}` child, not the impl chain's transparent
       // `{src, kids}`).
-      a: captureChildRef(refs, prod.name, prod.nodeKind ?? 'user'),
+      ...captureChildFields(refs, prod.name, prod.nodeKind ?? 'user'),
       g: tag,
     }],
   }
@@ -2047,13 +2070,13 @@ function emitChain(
       // node and replace with the next step rule.
       rs.close = [{
         r: chainName(i + 1),
-        a: captureChildRef(refs, name, kind),
+        ...captureChildFields(refs, name, kind),
         g: tag,
       }]
     } else if (seg.ref) {
       // Last step, but it had a push — we still need to capture the
       // final child before popping.
-      rs.close = [{ a: captureChildRef(refs, name, kind), g: tag }]
+      rs.close = [{ ...captureChildFields(refs, name, kind), g: tag }]
     }
     ruleSpec[name] = rs
   }

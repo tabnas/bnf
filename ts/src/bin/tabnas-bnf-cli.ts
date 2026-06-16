@@ -23,8 +23,11 @@ export async function run(argv: string[], console: Console) {
     // and report the tree (or an error) instead of the spec.
     parse: [] as string[],
     parseFiles: [] as string[],
-    // Compilation mode: emit a pure recognition grammar as jsonic text.
+    // Compilation mode: emit a pure-data grammar as jsonic text.
     compile: false,
+    // With --compile, emit the full AST grammar (tree builtins kept)
+    // instead of the recognition-only grammar.
+    full: false,
   }
 
   for (let aI = 2; aI < argv.length; aI++) {
@@ -43,6 +46,9 @@ export async function run(argv: string[], console: Console) {
       args.space = 0
     } else if ('--compile' === arg || '-C' === arg) {
       args.compile = true
+    } else if ('--full' === arg || '-F' === arg) {
+      args.compile = true
+      args.full = true
     } else if ('--parse' === arg || '-P' === arg) {
       args.parse.push(argv[++aI])
     } else if ('--parse-file' === arg) {
@@ -82,6 +88,7 @@ export async function run(argv: string[], console: Console) {
         start: args.start,
         tag: args.tag,
         indent: args.space || 2,
+        recognition: !args.full,
       }))
     } catch (e: any) {
       if (e instanceof BnfCompileError) {
@@ -168,10 +175,14 @@ Arguments:
   --compact              Emit single-line JSON (default indent is 2).
   -c
 
-  --compile              Compilation mode: emit a pure *recognition*
-  -C                       grammar as jsonic text (no function refs).
-                           Refuses grammars needing probe/unbounded
-                           lookahead until engine \`$\`-builtins exist.
+  --compile              Compilation mode: emit a pure-data *recognition*
+  -C                       grammar as jsonic text (no closures; control
+                           and tree building reference engine
+                           \`$\`-builtins).
+
+  --full                 With compilation mode, emit the full AST
+  -F                       grammar (tree \`$\`-builtins retained) instead
+                           of recognition-only. Still pure data.
 
   --parse <input>        Parse <input> against the generated grammar
   -P <input>               and print its parse tree. Repeatable.

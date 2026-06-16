@@ -362,6 +362,13 @@ Functions then live in exactly two places — the engine's `$`-builtin stdlib an
 the user's supplied ref map — and **never in the wire format**. "Does
 compilation need functions?" → no; it *references* named ones.
 
+> **Implemented.** The tree builtins (`@node$`, `@capture$`, `@bubble$`) and the
+> full pure-data mode now exist (CLI `--full`, `bnfCompile(src,
+> {recognition:false})`). A full-mode grammar reloaded on a bare engine builds
+> trees **deep-equal** to the live plugin (greet / pair / arith / probe), and
+> `bnfConvert(src,{builtins:true}).ref` is empty — zero closures reach the wire.
+> See [`implementation-diary.md`](./implementation-diary.md).
+
 ### 6.5 Caveats
 
 1. **Architectural seam.** The `$`-builtins must ship with `@tabnas/parser`
@@ -410,10 +417,17 @@ install on a bare engine) and recognises correctly (`ab`, `a@b`, `a` accept;
 `a@`, `@` reject). Full suites green: engine 169/169, `@tabnas/bnf` 122 pass /
 5 skipped.
 
-Still design-only (compiler-ready, gated on the same engine seam): the
-`@node$`/`@capture$` tree-builder generalisation (§6.4) and the `m`-mark
-user-action wiring (§3). The `eager$` match-token fidelity gap (§6.5.3) is
-unaddressed.
+**Tree-builder generalisation (§6.4) — now implemented.** `@node$`/`@capture$`/
+`@bubble$` ship in the engine builtins; the converter's `builtins` option routes
+*all* tree closures through them, so a full grammar serialises as pure data and
+round-trips to identical trees (verified greet / pair / arith / probe).
+`bnfCompile` gained `recognition:false` and the CLI a `--full` flag;
+`toPureSpec` emits the full AST grammar.
+
+Still design-only: the `m`-mark user-action wiring (§3). The `eager$`
+match-token fidelity gap (§6.5.3) is unaddressed. A full engineer's log —
+contracts, gotchas, and a productionising checklist for `@tabnas/parser` — is in
+[`implementation-diary.md`](./implementation-diary.md).
 
 ## 7. Prior art
 

@@ -1,9 +1,9 @@
 diff --git a/ts/src/builtins.ts b/ts/src/builtins.ts
 new file mode 100644
-index 0000000..bc1d701
+index 0000000..3c15c25
 --- /dev/null
 +++ b/ts/src/builtins.ts
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,93 @@
 +/* Copyright (c) 2026 Richard Rodger and other contributors, MIT License */
 +
 +/*  builtins.ts
@@ -30,7 +30,52 @@ index 0000000..bc1d701
 +import type { Rule, Context } from './types'
 +
 +
++// Output AST node shape produced by the @tabnas/bnf tree builtins:
++// `{rule?, src, kids}`. `user` rules carry a `rule` tag; `core` /
++// `helper` rules omit it so they flatten into the enclosing user node.
++function mkNode(rule: string | undefined, kind: string | undefined): any {
++  return 'user' === kind ? { rule, src: '', kids: [] } : { src: '', kids: [] }
++}
++
++
 +export const BUILTIN_REFS: Record<string, Function> = {
++
++  // ---- Tree builders (config in `alt.k.<name>`) -------------------
++  // These mirror @tabnas/bnf's emitter closures so a serialized,
++  // function-free grammar builds the identical `{rule,src,kids}` tree.
++
++  // Allocate (when `init`) and/or accumulate matched terminals' src.
++  // Config `node$: { init?, rule?, kind?, nterms? }`.
++  '@node$': (r: Rule, _ctx: any, alt: any) => {
++    const cfg = (alt && alt.k && alt.k.node$) || {}
++    if (cfg.init) r.node = mkNode(cfg.rule, cfg.kind)
++    const n = r.node as any
++    const nterms = cfg.nterms || 0
++    for (let i = 0; i < nterms; i++) n.src += r.o[i].src
++  },
++
++  // Merge the just-returned child node into the current node. Tagged
++  // children push into `kids`; untagged ones flatten (src concatenates,
++  // kids extend). Config `capture$: { rule?, kind? }`.
++  '@capture$': (r: Rule, _ctx: any, alt: any) => {
++    const cfg = (alt && alt.k && alt.k.capture$) || {}
++    if (null == r.node) r.node = mkNode(cfg.rule, cfg.kind)
++    const n = r.node as any
++    const c = r.child && (r.child.node as any)
++    if (null == c) return
++    if ('object' !== typeof c || !('src' in c)) { n.kids.push(c); return }
++    if (c === n) return
++    n.src += c.src
++    if (c.rule) n.kids.push(c)
++    else if (Array.isArray(c.kids)) n.kids.push(...c.kids)
++  },
++
++  // Lift the committed child's node straight up (no merge).
++  '@bubble$': (r: Rule) => {
++    if (r.child && (r.child.node as any) !== undefined) r.node = r.child.node
++  },
++
++  // ---- Probe + phase-retry dispatch -------------------------------
 +  // Phase-0 open action: mark the token position and reset phase.
 +  '@probeInit$': (r: Rule, ctx: any) => {
 +    r.k.pd_phase = 0

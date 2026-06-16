@@ -28,6 +28,7 @@ import {
 import {
   bnfCompile,
   toRecognitionSpec,
+  toPureSpec,
   toJsonic,
   BnfCompileError,
   BnfCompileOptions,
@@ -61,6 +62,7 @@ export {
   BnfParseError,
   bnfCompile,
   toRecognitionSpec,
+  toPureSpec,
   toJsonic,
   BnfCompileError,
 }
