@@ -20,6 +20,7 @@
  */
 
 import type { GrammarSpec } from '@tabnas/parser'
+import { BUILTIN_SCHEMA_VERSION } from '@tabnas/parser'
 
 import { bnf as bnfConvert, BnfConvertOptions } from './converter'
 
@@ -133,8 +134,12 @@ export function toRecognitionSpec(spec: GrammarSpec): GrammarSpec {
   }
 
   const isDropped = (s: string) => isRef(s) || TREE_BUILTINS.has(s)
-  return cloneRecognition(
+  const out = cloneRecognition(
     { options: spec.options, rule: spec.rule }, isDropped) as GrammarSpec
+  // Declare the builtin config-schema version so the engine can refuse a
+  // grammar that needs a newer schema than it implements.
+  out.v = BUILTIN_SCHEMA_VERSION
+  return out
 }
 
 
@@ -152,7 +157,9 @@ export function toPureSpec(spec: GrammarSpec): GrammarSpec {
       [],
     )
   }
-  return cloneData({ options: spec.options, rule: spec.rule }) as GrammarSpec
+  const out = cloneData({ options: spec.options, rule: spec.rule }) as GrammarSpec
+  out.v = BUILTIN_SCHEMA_VERSION
+  return out
 }
 
 
@@ -261,6 +268,14 @@ function altListOf(field: any): any[] {
 function resolveTarget(
   spec: GrammarSpec, key: string,
 ): { phase: string } | { alts: any[]; rule: string } {
+  // `$` is reserved for engine builtins (the `@…$` namespace); a user
+  // action ref may not contain it. The engine enforces the same on
+  // spec.ref keys at load — fail early here with a clearer message.
+  if (key.includes('$')) {
+    throw new BnfActionError(
+      `bnf: '$' is reserved for engine builtins; user action ref ` +
+      `'${key}' may not contain '$'`)
+  }
   const m = /^@([^:]+):(.+)$/.exec(key)
   if (!m) {
     throw new BnfActionError(

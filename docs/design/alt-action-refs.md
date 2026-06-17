@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft / discussion |
+| **Status** | Engine (`$`-builtins, array-`a`, eager sentinel, `$`-reservation, schema-version gate) **landed in `@tabnas/parser`**; compiler emits `v:1` + reserves `$`. Go-port parity is a committed fast-follow. |
 | **Scope** | `@tabnas/bnf` (ABNF → `GrammarSpec` compiler) + a proposed `@tabnas/parser` engine extension |
 | **Repo** | This document lives in `tabnas/abnf` because that is where the feature is driven. The engine-side changes (the alt `m` field and the `fnref` resolver extension) ultimately belong in `tabnas/parser`. |
 

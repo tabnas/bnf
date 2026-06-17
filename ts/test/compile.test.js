@@ -15,7 +15,7 @@
 const { describe, it } = require('node:test')
 const assert = require('node:assert')
 
-const { Tabnas } = require('@tabnas/parser')
+const { Tabnas, BUILTIN_SCHEMA_VERSION } = require('@tabnas/parser')
 const { resolveFuncRefs } = require('@tabnas/parser/utility')
 const {
   bnf: bnfPlugin,
@@ -374,5 +374,65 @@ describe('compile: probe grammars', () => {
     assert.ok(acc('a'), 'single A')
     assert.ok(!acc('a@'), 'A @ with no trailing A is rejected')
     assert.ok(!acc('@'), 'bare disambiguator rejected')
+  })
+})
+
+
+describe('compile: builtin schema version', () => {
+  it('emits v = BUILTIN_SCHEMA_VERSION in recognition and full modes', () => {
+    for (const recognition of [true, false]) {
+      const spec = JSON.parse(bnfCompile('g = "hi"', { strict: true, recognition }))
+      assert.equal(spec.v, BUILTIN_SCHEMA_VERSION)
+    }
+  })
+
+  it('the engine refuses a compiled grammar bumped past the supported schema', () => {
+    const spec = JSON.parse(bnfCompile('g = "hi"', { strict: true }))
+    spec.v = BUILTIN_SCHEMA_VERSION + 1
+    assert.throws(() => new Tabnas().grammar(spec), /requires builtin schema version/)
+  })
+
+  it('a compiled grammar reloads and recognises with v honoured', () => {
+    const spec = resolveFuncRefs(JSON.parse(bnfCompile('g = "hi"', { strict: true })))
+    const tn = new Tabnas()
+    tn.grammar(spec)
+    assert.doesNotThrow(() => tn.parse('HI'))
+  })
+})
+
+
+describe('user actions: marks, slots, $-reservation', () => {
+  const COLLIDE = 'g = "a" X / "a" Y\nX = "x"\nY = "y"'
+
+  it('disambiguates same-leading-token alts with ~N collision marks', () => {
+    const listing = markListing(bnfConvert(COLLIDE, { marks: true }))
+    assert.match(listing, /g\s+o:A\b/)
+    assert.match(listing, /g\s+o:A~2\b/)
+    // both collision marks are bindable; a nonexistent mark throws.
+    assert.doesNotThrow(() =>
+      attachActions(bnfConvert(COLLIDE, { marks: true }), { '@g:o:A~2': () => { } }))
+    assert.throws(
+      () => attachActions(bnfConvert(COLLIDE, { marks: true }), { '@g:o:Zzz': () => { } }),
+      BnfActionError)
+  })
+
+  it('markListing reports token (s:), pushed-rule (p:) and empty alts', () => {
+    const listing = markListing(bnfConvert('g = [ "a" ]', { marks: true }))
+    assert.match(listing, /p:/)
+    assert.match(listing, /\(empty\)/)
+  })
+
+  it('attachActionSlots rejects a rule-phase ref', () => {
+    const spec = JSON.parse(bnfCompile('g = "x"', { strict: true, recognition: false }))
+    assert.throws(() => attachActionSlots(spec, ['@g:bo']), /rule-phase ref/)
+  })
+
+  it('rejects a user action ref containing `$` (attachActions and slots)', () => {
+    assert.throws(
+      () => attachActions(bnfConvert('g = "x"', { marks: true }), { '@g$x:o:X': () => { } }),
+      /reserved for engine builtins/)
+    assert.throws(
+      () => attachActionSlots(bnfConvert('g = "x"', { marks: true }), ['@g$x:o:X']),
+      /reserved for engine builtins/)
   })
 })
