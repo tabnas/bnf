@@ -13,6 +13,23 @@ The engine diff is captured verbatim in
 
 ---
 
+## 0. Production status (2026-06-17)
+
+The engine half **landed in `@tabnas/parser`** (production-hardened, not the
+verbatim patch): typed `BuiltinRef`, frozen `BUILTIN_REFS`, a
+`BUILTIN_SCHEMA_VERSION` + load-time version gate, `$`-namespace reservation,
+the array-`a` composition, and the `@~/` eager sentinel — with an engine-owned
+`builtins.test.js` (probe + eager exercised end-to-end via captured pure-data
+fixtures, so the engine is self-tested without `@tabnas/bnf`). The compiler now
+**emits `v:1`** in both recognition and full pure-data output and **reserves
+`$`** in user action refs (`attachActions`/`attachActionSlots`).
+
+Still open: the Go-port parity (committed fast-follow), a *shared* AST-shape
+conformance fixture consumed by both repos, and the deferred items below
+(declarative phase guards, strict collision mode, serialized rule-phase slots).
+
+---
+
 ## 1. Goal reached
 
 Any ABNF grammar now compiles to a **function-free, JSON/jsonic-serializable**
