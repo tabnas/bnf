@@ -238,70 +238,106 @@ function composeActions(prev: any, fns: ActionFn[]): ActionFn {
   }
 }
 
-// Attach user semantic actions to a closure-mode spec, in place.
-// Keys: `@<rule>:<phase>` (phase = bo/ao/bc/ac) or `@<rule>:o|c:<mark>`
-// (open/close alt by mark). Values: a function or array of functions,
-// run in attachment order *after* the compiler's own action. Throws
-// `BnfActionError` for a ref that matches no rule / hook / marked alt.
+// Collapse a function list into a single action (or pass one through).
+function seqActions(fns: ActionFn[]): ActionFn {
+  return 1 === fns.length ? fns[0] : (r, ctx, alt) => {
+    for (const fn of fns) fn(r, ctx, alt)
+  }
+}
+
+// Append an action ref/fn to an alt's `a`, producing the engine's
+// array-`a` form so the alt's own action runs first, then the new one.
+function appendAction(existing: any, added: any): any {
+  if (null == existing) return added
+  return Array.isArray(existing) ? [...existing, added] : [existing, added]
+}
+
+function altListOf(field: any): any[] {
+  return Array.isArray(field) ? field : (field && field.alts) || []
+}
+
+// Resolve `@<rule>:<sel>` against the spec; return the matched alts (for
+// o:/c: selectors) or the rule-phase string (for bo/ao/bc/ac).
+function resolveTarget(
+  spec: GrammarSpec, key: string,
+): { phase: string } | { alts: any[]; rule: string } {
+  const m = /^@([^:]+):(.+)$/.exec(key)
+  if (!m) {
+    throw new BnfActionError(
+      `bnf: malformed action ref '${key}' ` +
+      `(expected @rule:phase or @rule:o|c:mark)`)
+  }
+  const rule = m[1]
+  const sel = m[2]
+  const rules = (spec.rule ?? {}) as any
+  if (!rules[rule]) {
+    throw new BnfActionError(
+      `bnf: action ref '${key}' targets unknown rule '${rule}'`)
+  }
+  if (PHASES.has(sel)) return { phase: sel }
+
+  const pm = /^([oc]):(.+)$/.exec(sel)
+  if (!pm) throw new BnfActionError(`bnf: malformed action ref '${key}'`)
+  const phase = 'o' === pm[1] ? 'open' : 'close'
+  const mark = pm[2]
+  const alts = altListOf(rules[rule][phase]).filter((a) => a && a.m === mark)
+  if (0 === alts.length) {
+    throw new BnfActionError(
+      `bnf: action ref '${key}' matches no ${phase} alt with mark ` +
+      `'${mark}' in rule '${rule}'`)
+  }
+  return { alts, rule }
+}
+
+// Attach user semantic actions to a spec, in place. Keys:
+// `@<rule>:<phase>` (bo/ao/bc/ac) or `@<rule>:o|c:<mark>`. Values: a
+// function or array of functions, run *after* the compiler's own action
+// in attachment order. Works in both closure and `builtins` mode — alt
+// actions are injected as the engine's array-`a` form (the alt's own
+// action, builtin or closure, runs first). Throws `BnfActionError` for
+// a ref matching no rule / hook / marked alt.
 export function attachActions(spec: GrammarSpec, actions: ActionsMap): GrammarSpec {
   const ref: Record<string, any> =
     ((spec as any).ref = (spec as any).ref ?? {})
-  const rules = spec.rule ?? {}
   let counter = 0
 
   for (const key of Object.keys(actions)) {
     const fns = ([] as ActionFn[]).concat(actions[key] as any)
-    const m = /^@([^:]+):(.+)$/.exec(key)
-    if (!m) {
-      throw new BnfActionError(
-        `bnf: malformed action ref '${key}' ` +
-        `(expected @rule:phase or @rule:o|c:mark)`)
-    }
-    const rule = m[1]
-    const sel = m[2]
-    if (!(rules as any)[rule]) {
-      throw new BnfActionError(
-        `bnf: action ref '${key}' targets unknown rule '${rule}'`)
-    }
+    const target = resolveTarget(spec, key)
 
-    // Rule-phase hook: reuse the engine's `@<rule>-<phase>` fnref
-    // auto-install (fnref builds the key from the rule name, so a
-    // hyphenated ABNF rule name stays unambiguous).
-    if (PHASES.has(sel)) {
-      const fkey = `@${rule}-${sel}`
+    if ('phase' in target) {
+      // Rule-phase hook: reuse the engine's `@<rule>-<phase>` fnref
+      // auto-install (fnref builds the key from the rule name, so a
+      // hyphenated ABNF rule name stays unambiguous).
+      const rule = /^@([^:]+):/.exec(key)![1]
+      const fkey = `@${rule}-${target.phase}`
       ref[fkey] = composeActions(ref[fkey], fns)
       continue
     }
 
-    // Alt action by mark.
-    const pm = /^([oc]):(.+)$/.exec(sel)
-    if (!pm) {
-      throw new BnfActionError(`bnf: malformed action ref '${key}'`)
+    for (const alt of target.alts) {
+      const userRef = `@bnf_user${counter++}`
+      ref[userRef] = seqActions(fns)
+      alt.a = appendAction(alt.a, userRef)
     }
-    const phase = 'o' === pm[1] ? 'open' : 'close'
-    const mark = pm[2]
-    const altsField = (rules as any)[rule][phase]
-    const list: any[] = Array.isArray(altsField)
-      ? altsField
-      : (altsField && altsField.alts) || []
-    const targets = list.filter((a) => a && a.m === mark)
-    if (0 === targets.length) {
+  }
+  return spec
+}
+
+// Declare user-action *slots* on a (pure-data) spec without supplying
+// functions: each `@<rule>:o|c:<mark>` ref name is injected into the
+// matched alt's array-`a`, to be resolved at load time from a
+// user-supplied ref map. Lets a serialized grammar carry user-action
+// hooks that the consumer binds by name. Throws on unknown targets.
+export function attachActionSlots(spec: GrammarSpec, refNames: string[]): GrammarSpec {
+  for (const name of refNames) {
+    const target = resolveTarget(spec, name)
+    if ('phase' in target) {
       throw new BnfActionError(
-        `bnf: action ref '${key}' matches no ${phase} alt with mark ` +
-        `'${mark}' in rule '${rule}'`)
+        `bnf: slot '${name}' is a rule-phase ref; slots are for ` +
+        `@rule:o|c:mark alt actions`)
     }
-    for (const alt of targets) {
-      const prev = 'string' === typeof alt.a ? ref[alt.a]
-        : 'function' === typeof alt.a ? alt.a : null
-      if ('string' === typeof alt.a && alt.a.endsWith('$')) {
-        throw new BnfActionError(
-          `bnf: user actions require closure-mode conversion; rule ` +
-          `'${rule}' alt is a $-builtin (do not pass builtins:true)`)
-      }
-      const wrapName = `@bnf_user${counter++}`
-      ref[wrapName] = composeActions(prev, fns)
-      alt.a = wrapName
-    }
+    for (const alt of target.alts) alt.a = appendAction(alt.a, name)
   }
   return spec
 }

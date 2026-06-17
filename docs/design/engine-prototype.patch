@@ -97,6 +97,45 @@ index 0000000..3c15c25
 +  '@probePhase1$': (r: Rule) => r.k.pd_phase === 1,
 +  '@probePhase2$': (r: Rule) => r.k.pd_phase === 2,
 +}
+diff --git a/ts/src/rules.ts b/ts/src/rules.ts
+index b8a9c32..958bb81 100644
+--- a/ts/src/rules.ts
++++ b/ts/src/rules.ts
+@@ -1074,6 +1074,34 @@ function resolveFunctionRef(
+ ) {
+   const val = a[k]
+ 
++  // An action (`a`) may be a list of refs/functions, run in order when
++  // the alt matches (the matched alt's own action first, then composed
++  // user actions). This lets a serialized, function-free grammar carry
++  // `a: ['@node$', '@my:user:action']` and resolve each by name.
++  if ('a' === k && Array.isArray(val)) {
++    const fns = val.map((v: any) => {
++      if (isfnref(v)) {
++        const f = r.def.fnref[v as FuncRef] as Function
++        if (null == f) {
++          throw new Error(`Grammar: unknown ${fkind} function reference: ` + v +
++            ` for rule ${r.name} (${rs}) and alt ${a.s} (${a.g})`)
++        }
++        return f
++      }
++      return v
++    })
++    a[k] = function composedAction(rule: any, ctx: any, alt: any) {
++      let out
++      for (const f of fns) {
++        out = f(rule, ctx, alt)
++        // Preserve error-token short-circuit semantics.
++        if (out && out.isToken && out.err) return out
++      }
++      return out
++    } as any
++    return
++  }
++
+   if (isfnref(val)) {
+     const func = r.def.fnref[val as FuncRef] as Function
+     if (null == func) {
 diff --git a/ts/src/tabnas.ts b/ts/src/tabnas.ts
 index b0cd759..1912b06 100644
 --- a/ts/src/tabnas.ts
@@ -138,6 +177,31 @@ index b0cd759..1912b06 100644
            if (rulespec.open) {
              const isarr = Array.isArray(rulespec.open)
              const alts = isarr
+diff --git a/ts/src/types.ts b/ts/src/types.ts
+index e24c8ab..34f95c8 100644
+--- a/ts/src/types.ts
++++ b/ts/src/types.ts
+@@ -516,7 +516,10 @@ export interface AltSpec {
+   c?: AltCond | null
+ 
+   n?: Counters                    // Increment counters by specified amounts.
+-  a?: AltAction | FuncRef | null  // Perform an action if this alternate matches.
++  // Action(s) on match. An array runs each in order (the matched alt's
++  // own action first, then composed user actions); each element is a
++  // function or a FuncRef string.
++  a?: AltAction | FuncRef | (AltAction | FuncRef)[] | null
+   h?: AltModifier | null          // Modify current Alt to customize parser.
+   u?: Record<string, any>         // Key-value custom data.
+   k?: Record<string, any>         // Key-value custom data (propagated).
+@@ -737,7 +740,7 @@ export type GrammarAltSpec = {
+   b?: FuncRef | number,                     // Token push back count.
+   p?: FuncRef | string,                     // Push child rule.
+   r?: FuncRef | string,                     // Replace with sibling rule.
+-  a?: FuncRef,                              // Action on match.
++  a?: FuncRef | FuncRef[],                  // Action(s) on match (array runs in order).
+   e?: FuncRef,                              // Error token generator.
+   h?: FuncRef,                              // Alternate modifier.
+   c?: FuncRef | Record<string, any>,        // Match condition.
 diff --git a/ts/src/utility.ts b/ts/src/utility.ts
 index e3539e5..50dc026 100644
 --- a/ts/src/utility.ts

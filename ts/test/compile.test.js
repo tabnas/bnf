@@ -24,6 +24,8 @@ const {
   toRecognitionSpec,
   toPureSpec,
   toJsonic,
+  attachActions,
+  attachActionSlots,
   markListing,
   BnfCompileError,
   BnfActionError,
@@ -285,6 +287,52 @@ describe('user actions (m-marks)', () => {
     const spec = bnfConvert('op = "inc" / "dec"')
     const hasMark = JSON.stringify(spec.rule).includes('"m":')
     assert.strictEqual(hasMark, false)
+  })
+})
+
+
+describe('user actions composed with $-builtins (pure data)', () => {
+  it('live builtins-mode: user action runs after the @node$ tree builtin', () => {
+    const spec = bnfConvert('op = "inc" / "dec"', { builtins: true, marks: true })
+    attachActions(spec, { '@op:o:INC': (r) => { r.node.delta = 1 } })
+    // no closures except the injected user fn; the tree action is @node$
+    const tn = new Tabnas()
+    tn.grammar(spec)
+    const t = tn.parse('inc')
+    assert.strictEqual(t.rule, 'op', 'tree built by @node$')
+    assert.strictEqual(t.delta, 1, 'user action ran')
+  })
+
+  it('serialized slot bound at load time', () => {
+    const spec = bnfConvert('op = "inc" / "dec"', { builtins: true, marks: true })
+    attachActionSlots(spec, ['@op:o:INC'])
+    const text = toJsonic(toPureSpec(spec), { strict: true })
+    assert.match(text, /@op:o:INC/, 'slot serialized by name')
+    assert.doesNotMatch(text, /@bnf_/, 'no closures in the wire format')
+
+    // Consumer binds the slot at load.
+    const obj = JSON.parse(text)
+    obj.ref = { '@op:o:INC': (r) => { r.node.delta = 7 } }
+    const tn = new Tabnas()
+    tn.grammar(obj)
+    const t = tn.parse('inc')
+    assert.strictEqual(t.rule, 'op', 'tree still built by @node$')
+    assert.strictEqual(t.delta, 7, 'load-bound user action ran')
+  })
+
+  it('engine array-a runs each action in order', () => {
+    const log = []
+    const tn = new Tabnas()
+    tn.grammar({
+      options: { rule: { start: 'g' }, match: { token: { '#A': /^a/ } } },
+      ref: {
+        '@one': () => log.push(1),
+        '@two': () => log.push(2),
+      },
+      rule: { g: { open: [{ s: '#A', a: ['@one', '@two'] }] } },
+    })
+    tn.parse('a')
+    assert.deepStrictEqual(log, [1, 2])
   })
 })
 

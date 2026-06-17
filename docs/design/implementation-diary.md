@@ -140,6 +140,9 @@ AST-shape contract between compiler and engine (see §4).
 
 ## 5. Productionising checklist (`@tabnas/parser`)
 
+The full engine prototype is in `engine-prototype.patch` (5 files: `builtins.ts`,
+`tabnas.ts`, `utility.ts`, `rules.ts`, `types.ts`).
+
 - [ ] Land `src/builtins.ts` + the `grammar()` merge (apply
       `engine-prototype.patch`). Decide final home/name (`builtins.ts` vs
       folding into `defaults.ts`/`utility.ts`).
@@ -149,7 +152,11 @@ AST-shape contract between compiler and engine (see §4).
 - [ ] Decide whether `$`-builtins are always-on or opt-in via a setting.
 - [ ] Engine tests: load a hand-written function-free spec using each builtin;
       assert trees. Don't depend on `@tabnas/bnf` (keep the engine self-tested).
-- [ ] Resolve the `eager$` fidelity gap (§4.2) — pick (a) or (b), add a test.
+- [x] **Array-`a` composition** (§8): `resolveFunctionRef` resolves an `a` array
+      into one ordered call; `AltSpec.a`/`GrammarAltSpec.a` typed. Prototyped +
+      tested. (Production: review error-token short-circuit semantics; decide if
+      `c`/other fields should ever accept arrays — currently `a`-only.)
+- [x] **`eager$` fidelity** (§7): `@~/src/flags` sentinel in `resolveFuncRefs`.
 - [ ] Reserve `$` in user-supplied refs (validate in `fnref`/`normalt`); error
       clearly on collision.
 - [ ] Consider declarative phase guards (`c:{n:{pd_phase:N}}`) to shrink the
@@ -184,10 +191,10 @@ Pure ABNF + an out-of-band `actions` map; bindings keyed by `:`.
     alt / bad selector.
 - **Plugin**: `tn.bnf(src, {actions})` converts in closure mode with
   `marks:true`, then `attachActions`, then installs.
-- **Closure-mode only.** Wrapping needs the previous action *function*; in
-  `builtins` mode the alt's `a` is a `$`-builtin string with no compiler-side
-  function, so `attachActions` throws. Composing user actions with engine
-  builtins is a production item (needs engine-side wrapper support — see §5/§7).
+- **Originally closure-mode only** (the first cut wrapped the previous action
+  *function*, which a `$`-builtin string doesn't provide). **§8 lifts this** via
+  engine array-`a`, so `attachActions` now also works in `builtins`/pure-data
+  mode and the wrapper is no longer needed for alt actions.
 
 Worked demo (verified): `op = "inc" / "dec"` with
 `{'@op:o:INC':(r)=>{r.node.delta=1}, '@op:o:DEC':(r)=>{r.node.delta=-1}}` →
@@ -209,18 +216,49 @@ still recognises. **Note:** `tsc --build` is incremental and *missed* the
 `utility.ts` edit on first run — had to `tsc --build src --force`. Force/clean
 the engine after editing it.
 
-## 8. Still design-only
+## 8. Composing user actions with `$`-builtins (now done)
 
-- Composing user actions with **`$`-builtin** tree actions (full/serialized
-  grammars) — needs engine-side wrapper composition (a builtin that calls a
-  list), or the compiler emitting a composite `k` action list. Closure mode
-  works today.
+The last engine item: user actions on **pure-data / builtins-mode** grammars,
+where the alt's `a` is a `$`-builtin string with no compiler-side function to
+wrap. Solved with **array-`a`** in the engine — `a` may be a list of
+refs/functions, run in order.
+
+- **Engine** (`rules.ts` `resolveFunctionRef`, gated to `k === 'a'`): when `a`
+  is an array, resolve each element (string→fn via `fnref`, or pass a function
+  through) and replace it with one `composedAction` that calls each in order,
+  short-circuiting on an error-token return. `process()` is unchanged (it still
+  calls a single `alt.a`). Types: `AltSpec.a` / `GrammarAltSpec.a` now accept
+  `(AltAction|FuncRef)[]`. The composition is resolved once at `normalt` time —
+  no per-parse overhead beyond the loop.
+- **Compiler** (`compile.ts`):
+  - `attachActions` no longer wraps closures; it injects `alt.a =
+    appendAction(alt.a, '@bnf_userN')` (array-`a`), with the user fn(s) in
+    `spec.ref`. The alt's own action (closure **or** `$`-builtin) runs first.
+    Works in **both** modes now — the builtins-mode restriction is gone.
+  - `attachActionSlots(spec, refNames)`: injects `@<rule>:o|c:<mark>` ref *names*
+    into array-`a` **without** functions, for the serialized path. The grammar
+    stays pure data (`toPureSpec` passes — slot names are strings); the consumer
+    binds them at load via `gs.ref`.
+
+Verified: (A) live builtins-mode — `op="inc"/"dec"` with `builtins:true` +
+`attachActions({'@op:o:INC':r=>{r.node.delta=1}})` → `parse('inc')` has
+`rule:'op'` (tree via `@node$`) **and** `delta:1`. (B) serialized — same grammar
++ `attachActionSlots(['@op:o:INC'])` → `toPureSpec`/`toJsonic` (no `@bnf_`),
+reload with `gs.ref={'@op:o:INC':r=>{r.node.delta=7}}` → `delta:7`, tree intact.
+(C) hand-written `a:['@one','@two']` runs in order.
+
+## 9. Still design-only
+
 - Reserving `$` in user refs and accepting `:` directly in the engine `fnref`
-  reserved scan (currently the compiler translates `:`→`-` for phases).
+  reserved scan (the compiler currently translates `:`→`-` for rule phases;
+  unambiguous because `fnref` builds the key from the known rule name).
+- Serialized **rule-phase** slots (bo/ao/bc/ac bound at load). Alt-action slots
+  work; rule-phase still relies on `fnref` with functions in `gs.ref` keyed
+  `@<rule>-<phase>`, which is serializable-by-name but untested here.
 
 ---
 
-## 9. Verification log
+## 10. Verification log
 
 - `greet`/`pair`/`arith`/`probe`: full-mode pure-data tree `deepStrictEqual`
   live-plugin tree. ✓
@@ -234,5 +272,8 @@ the engine after editing it.
 - User actions: `@op:o:INC/DEC` set `node.delta` (compiler action first);
   multiple actions ordered; `@g:bo` fires on enter; bad refs throw
   `BnfActionError`. ✓ Marks are opt-in (default spec unchanged). ✓
-- Suites: `@tabnas/parser` 169/169; `@tabnas/bnf` 139 pass / 5 skipped / 0 fail
-  (`compile.test.js` 26/26). Node 22 locally (engines want ≥24; CI uses 24).
+- Builtins-mode composition: live `attachActions` over `@node$` → tree + user
+  action; serialized `attachActionSlots` → `toPureSpec` (no closures) → reload +
+  bind → tree + user action; array-`a` runs in order. ✓
+- Suites: `@tabnas/parser` 169/169; `@tabnas/bnf` 142 pass / 5 skipped / 0 fail
+  (`compile.test.js` 29/29). Node 22 locally (engines want ≥24; CI uses 24).

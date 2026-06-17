@@ -434,8 +434,9 @@ round-trips to identical trees (verified greet / pair / arith / probe).
 stamps user-rule alts; `tn.bnf(src,{actions})` binds `@<rule>:o|c:<mark>` (alt)
 and `@<rule>:bo|ao|bc|ac` (phase) user functions, composed after the compiler's
 own action (`attachActions`, with `BnfActionError` validation). CLI `--marks`
-lists them. Closure-mode only for now (composing user actions with `$`-builtin
-tree actions is the remaining engine item).
+lists them. Works in **both** closure and `builtins` (pure-data) mode via the
+engine's array-`a` composition; `attachActionSlots` injects load-time slots so a
+serialized grammar can carry user-action hooks bound by name at load.
 
 **`eager$` fidelity (§6.5.3) — fixed.** A sibling sentinel `@~/source/flags`
 carries the matcher's `eager$` flag through serialisation; `resolveFuncRefs`
