@@ -6,7 +6,7 @@
 
 import Fs from 'node:fs'
 
-import { bnfConvert } from '../bnf'
+import { bnfConvert, bnfCompile, markListing, BnfCompileError } from '../bnf'
 import { Tabnas } from '@tabnas/parser'
 
 
@@ -23,6 +23,13 @@ export async function run(argv: string[], console: Console) {
     // and report the tree (or an error) instead of the spec.
     parse: [] as string[],
     parseFiles: [] as string[],
+    // Compilation mode: emit a pure-data grammar as jsonic text.
+    compile: false,
+    // With --compile, emit the full AST grammar (tree builtins kept)
+    // instead of the recognition-only grammar.
+    full: false,
+    // List the marks the compiler assigns (for @rule:o|c:mark actions).
+    marks: false,
   }
 
   for (let aI = 2; aI < argv.length; aI++) {
@@ -39,6 +46,13 @@ export async function run(argv: string[], console: Console) {
       args.tag = argv[++aI]
     } else if ('--compact' === arg || '-c' === arg) {
       args.space = 0
+    } else if ('--compile' === arg || '-C' === arg) {
+      args.compile = true
+    } else if ('--full' === arg || '-F' === arg) {
+      args.compile = true
+      args.full = true
+    } else if ('--marks' === arg || '-m' === arg) {
+      args.marks = true
     } else if ('--parse' === arg || '-P' === arg) {
       args.parse.push(argv[++aI])
     } else if ('--parse-file' === arg) {
@@ -67,6 +81,37 @@ export async function run(argv: string[], console: Console) {
   }
 
   const spec = bnfConvert(src, { start: args.start, tag: args.tag })
+
+  // Marks mode: list the user-action marks the compiler assigns.
+  if (args.marks) {
+    console.log(markListing(bnfConvert(src, {
+      start: args.start, tag: args.tag, marks: true,
+    })))
+    return
+  }
+
+  // Compilation mode: emit a pure recognition grammar as jsonic text.
+  // No function references — recognition is fully structural. Grammars
+  // that need control functions (probe / unbounded lookahead) are
+  // refused until those ship as engine `$`-builtins.
+  if (args.compile) {
+    try {
+      console.log(bnfCompile(src, {
+        start: args.start,
+        tag: args.tag,
+        indent: args.space || 2,
+        recognition: !args.full,
+      }))
+    } catch (e: any) {
+      if (e instanceof BnfCompileError) {
+        console.error(e.message)
+        process.exitCode = 1
+        return
+      }
+      throw e
+    }
+    return
+  }
 
   // Parse-mode: validate the grammar against one or more sample
   // inputs and print their parse trees. Exits 1 if any sample fails.
@@ -141,6 +186,18 @@ Arguments:
 
   --compact              Emit single-line JSON (default indent is 2).
   -c
+
+  --compile              Compilation mode: emit a pure-data *recognition*
+  -C                       grammar as jsonic text (no closures; control
+                           and tree building reference engine
+                           \`$\`-builtins).
+
+  --full                 With compilation mode, emit the full AST
+  -F                       grammar (tree \`$\`-builtins retained) instead
+                           of recognition-only. Still pure data.
+
+  --marks                List the per-alt marks the compiler assigns,
+  -m                       usable as \`@<rule>:o|c:<mark>\` action refs.
 
   --parse <input>        Parse <input> against the generated grammar
   -P <input>               and print its parse tree. Repeatable.
