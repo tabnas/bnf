@@ -13,20 +13,38 @@ The engine diff is captured verbatim in
 
 ---
 
-## 0. Production status (2026-06-17)
+## 0. Production status (2026-06-17) — shipped, TS + Go
 
-The engine half **landed in `@tabnas/parser`** (production-hardened, not the
-verbatim patch): typed `BuiltinRef`, frozen `BUILTIN_REFS`, a
-`BUILTIN_SCHEMA_VERSION` + load-time version gate, `$`-namespace reservation,
-the array-`a` composition, and the `@~/` eager sentinel — with an engine-owned
-`builtins.test.js` (probe + eager exercised end-to-end via captured pure-data
-fixtures, so the engine is self-tested without `@tabnas/bnf`). The compiler now
-**emits `v:1`** in both recognition and full pure-data output and **reserves
-`$`** in user action refs (`attachActions`/`attachActionSlots`).
+The feature is **in production across both engines**.
 
-Still open: the Go-port parity (committed fast-follow), a *shared* AST-shape
-conformance fixture consumed by both repos, and the deferred items below
-(declarative phase guards, strict collision mode, serialized rule-phase slots).
+**Engine TS (`@tabnas/parser`):** production-hardened (not the verbatim patch):
+typed `BuiltinRef`, frozen `BUILTIN_REFS`, a `BUILTIN_SCHEMA_VERSION` + load-time
+version gate, `$`-namespace reservation, the array-`a` composition, and the
+`@~/` eager sentinel — with an engine-owned `builtins.test.js` (probe + eager
+exercised end-to-end via captured pure-data fixtures, so the engine is
+self-tested without `@tabnas/bnf`).
+
+**Compiler (`@tabnas/bnf`):** emits `v:1` in both recognition and full pure-data
+output and reserves `$` in user action refs (`attachActions`/`attachActionSlots`).
+
+**Engine Go (`@tabnas/parser/go`):** full parity — `builtins.go` (config read
+from `r.K`, since Go's `AltAction` has no 3rd `alt` arg), the `Grammar()` merge +
+`$`-reservation + `GrammarSpec.V` gate, array-`A`, and the `@~/` eager sentinel.
+Two serialization gaps surfaced and were fixed in `MapToOptions`/`ResolveFuncRefs`
+(not the builtins): (1) Go's RE2 needs `\x{HHHH}`, not the JS `\uHHHH` the
+compiler emits — `jsRegexToGo` rewrites it, and an uncompilable match-token regex
+now fails loud instead of being silently dropped; (2) `MapToOptions` must apply
+the `fixed.token` name→src map (e.g. `{"#T":"@"}`), not just `fixed.lex`, or a
+serialized grammar's fixed punctuation never registers. With both, a serialized
+probe grammar recognizes byte-for-byte like TS — verified by the same
+`parser/ts/test/{probe-grammar,eager-literal}.fixture.json` loaded into the Go
+suite.
+
+**Still open (genuinely deferred, not blocking):** a *shared* AST-shape
+conformance fixture **package** consumed by both repos (today each repo loads the
+fixtures independently — the parity is checked, just not from one published
+source), and the deferred design items below (declarative phase guards, strict
+collision mode, serialized rule-phase slots).
 
 ---
 
@@ -157,31 +175,35 @@ AST-shape contract between compiler and engine (see §4).
 
 ## 5. Productionising checklist (`@tabnas/parser`)
 
-The full engine prototype is in `engine-prototype.patch` (5 files: `builtins.ts`,
-`tabnas.ts`, `utility.ts`, `rules.ts`, `types.ts`).
+The full engine prototype was in `engine-prototype.patch` (5 files: `builtins.ts`,
+`tabnas.ts`, `utility.ts`, `rules.ts`, `types.ts`); the production form **landed**
+(reworked, not the verbatim patch) and is now on `main`.
 
-- [ ] Land `src/builtins.ts` + the `grammar()` merge (apply
-      `engine-prototype.patch`). Decide final home/name (`builtins.ts` vs
-      folding into `defaults.ts`/`utility.ts`).
-- [ ] Type the builtins properly (drop the `any` on `ctx`/`alt`; add a
-      `BuiltinRef` type and a `BUILTIN_REFS` export to the public surface if
-      plugins should extend it).
-- [ ] Decide whether `$`-builtins are always-on or opt-in via a setting.
-- [ ] Engine tests: load a hand-written function-free spec using each builtin;
-      assert trees. Don't depend on `@tabnas/bnf` (keep the engine self-tested).
+- [x] Land `src/builtins.ts` + the `grammar()` merge. Final home: a standalone
+      `builtins.ts` (not folded into defaults/utility).
+- [x] Type the builtins properly: `BuiltinRef = AltAction | AltCond`, frozen
+      `BUILTIN_REFS`, exported on the public surface (`./builtins` subpath) so
+      plugins can extend.
+- [x] `$`-builtins are **always-on** (a serialized grammar must load standalone);
+      the namespace is partitioned by the `$`-reservation below.
+- [x] Engine tests: `builtins.test.js` (TS) / `builtins_test.go` (Go) load
+      function-free specs + captured fixtures and assert each builtin — no
+      `@tabnas/bnf` dependency.
 - [x] **Array-`a` composition** (§8): `resolveFunctionRef` resolves an `a` array
-      into one ordered call; `AltSpec.a`/`GrammarAltSpec.a` typed. Prototyped +
-      tested. (Production: review error-token short-circuit semantics; decide if
-      `c`/other fields should ever accept arrays — currently `a`-only.)
+      into one ordered call; `AltSpec.a`/`GrammarAltSpec.a` typed; `a`-only;
+      error-token short-circuit (TS) / `ctx.ParseErr` (Go) reviewed.
 - [x] **`eager$` fidelity** (§7): `@~/src/flags` sentinel in `resolveFuncRefs`.
-- [ ] Reserve `$` in user-supplied refs (validate in `fnref`/`normalt`); error
-      clearly on collision.
-- [ ] Consider declarative phase guards (`c:{n:{pd_phase:N}}`) to shrink the
-      condition builtins to zero — requires `@probeDecide$`/`@probeInit$` to use
-      `n` counters instead of `r.k.pd_phase`. Verify counter semantics
-      (`$eq` etc., see `COND_OPS` in rules.ts).
-- [ ] Versioning policy for the config schema (§4.4).
-- [ ] Changelog: note the `grammar()` behaviour change (§4.5).
+- [x] Reserve `$` in user-supplied refs: enforced at `grammar()` load (engine,
+      both ports) and in the compiler's `attachActions`/`attachActionSlots`.
+- [ ] *(deferred)* Declarative phase guards (`c:{n:{pd_phase:N}}`) to shrink the
+      condition builtins to zero — the design's nested form is buggy as written
+      (needs a flat `n.pd_phase` path) and reworking probe state from `k` to `n`
+      is non-trivial; the three `@probePhase$` condition builtins ship as-is.
+- [x] Versioning policy (§4.4): grammar-level `GrammarSpec.v` +
+      `BUILTIN_SCHEMA_VERSION`; the loader refuses a newer schema. The compiler
+      emits `v:1`.
+- [x] Changelog: the `grammar()` behaviour change (always-merge + always-`fnref`)
+      is documented in the PR descriptions (parser #31 / Go #32).
 
 ## 6. `m`-mark user actions (now prototyped)
 
@@ -266,9 +288,12 @@ reload with `gs.ref={'@op:o:INC':r=>{r.node.delta=7}}` → `delta:7`, tree intac
 
 ## 9. Still design-only
 
-- Reserving `$` in user refs and accepting `:` directly in the engine `fnref`
-  reserved scan (the compiler currently translates `:`→`-` for rule phases;
-  unambiguous because `fnref` builds the key from the known rule name).
+- Accepting `:` **directly** in the engine `fnref` reserved scan. Decided to
+  keep the engine ignorant of `:`: the compiler translates `:`→`-` for rule
+  phases (unambiguous because `fnref` builds the key from the known rule name),
+  so no engine change buys anything here. (Reserving `$` in user refs — listed
+  here originally — **shipped**: enforced at `grammar()` load on both ports and
+  in the compiler.)
 - Serialized **rule-phase** slots (bo/ao/bc/ac bound at load). Alt-action slots
   work; rule-phase still relies on `fnref` with functions in `gs.ref` keyed
   `@<rule>-<phase>`, which is serializable-by-name but untested here.
