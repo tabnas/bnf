@@ -23,6 +23,12 @@ type AbnfConvertOptions struct {
 	Tag      string
 	Builtins bool
 	Marks    bool
+	// WordKeywords makes a literal ending in a word character match only as a
+	// whole word: it is emitted as an anchored regex with a trailing `\b`
+	// guard so e.g. `option` does not match inside `optional`. Mirrors the TS
+	// `wordKeywords` option (which uses a `(?![A-Za-z0-9_])` lookahead; the Go
+	// engine's RE2 has no lookahead, so `\b` — equivalent here — is used).
+	WordKeywords bool
 }
 
 // AbnfParseError is raised when the ABNF source itself can't be parsed.
@@ -362,7 +368,7 @@ func desugar(grammar *abnfGrammar) *abnfGrammar {
 	}
 	desugarElement = func(el *abnfElement) *abnfElement {
 		switch el.Kind {
-		case kindTerm, kindRef, kindRegex:
+		case kindTerm, kindRef, kindRegex, kindToken:
 			return el
 		case kindGroup:
 			innerAlts := make([]abnfSequence, len(el.Alts))
@@ -547,4 +553,73 @@ var escapeRe = regexp.MustCompile(`[\\^$.*+?()[\]{}|]`)
 
 func escapeRegexp(s string) string {
 	return escapeRe.ReplaceAllString(s, `\$0`)
+}
+
+// builtinTokens maps a bareword reference name to the engine builtin lexer
+// token it resolves to (unless a rule of the same name is defined). Mirrors
+// the TS BUILTIN_TOKENS: TX bareword/identifier, NR number, ST quoted string,
+// VL keyword value (true/false/null).
+var builtinTokens = map[string]string{
+	"TX": "#TX",
+	"NR": "#NR",
+	"ST": "#ST",
+	"VL": "#VL",
+}
+
+// normalizeBuiltinTokens rewrites every bareword reference whose name is a
+// builtin token AND is not a defined production into a kindToken element. Run
+// before any other pass so the rest of the pipeline treats these as ordinary
+// terminals. Go port of the TS normalizeBuiltinTokens.
+func normalizeBuiltinTokens(grammar *abnfGrammar) {
+	defined := map[string]bool{}
+	for _, p := range grammar.Productions {
+		defined[p.Name] = true
+	}
+	var walk func(el *abnfElement) *abnfElement
+	walk = func(el *abnfElement) *abnfElement {
+		switch el.Kind {
+		case kindRef:
+			if tok, ok := builtinTokens[el.Name]; ok && !defined[el.Name] {
+				return &abnfElement{Kind: kindToken, Name: tok}
+			}
+			return el
+		case kindOpt, kindStar, kindPlus, kindRep:
+			cp := *el
+			cp.Inner = walk(el.Inner)
+			return &cp
+		case kindGroup:
+			alts := make([]abnfSequence, len(el.Alts))
+			for i, a := range el.Alts {
+				na := make(abnfSequence, len(a))
+				for j, e := range a {
+					na[j] = walk(e)
+				}
+				alts[i] = na
+			}
+			return &abnfElement{Kind: kindGroup, Alts: alts}
+		}
+		return el
+	}
+	for _, prod := range grammar.Productions {
+		for ai, alt := range prod.Alts {
+			na := make(abnfSequence, len(alt))
+			for j, e := range alt {
+				na[j] = walk(e)
+			}
+			prod.Alts[ai] = na
+		}
+	}
+}
+
+// endsWithWordChar reports whether s ends in [A-Za-z0-9_] — the test the
+// wordKeywords option uses to decide a literal needs a `\b` boundary guard.
+func endsWithWordChar(s string) bool {
+	if s == "" {
+		return false
+	}
+	c := s[len(s)-1]
+	return c == '_' ||
+		('0' <= c && c <= '9') ||
+		('A' <= c && c <= 'Z') ||
+		('a' <= c && c <= 'z')
 }

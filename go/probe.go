@@ -45,6 +45,11 @@ func collectTerminalVocabElements(el *abnfElement, grammar *abnfGrammar,
 		if _, ok := out[k]; !ok {
 			out[k] = el
 		}
+	case kindToken:
+		// Key builtin tokens by their token name (e.g. "#TX").
+		if _, ok := out[el.Name]; !ok {
+			out[el.Name] = el
+		}
 	case kindRef:
 		if visited[el.Name] {
 			return
@@ -155,6 +160,8 @@ func rewriteProbeDispatches(grammar *abnfGrammar) *abnfGrammar {
 					dKey = termKey(disamb)
 				} else if disamb.Kind == kindRegex {
 					dKey = regexKey(disamb)
+				} else if disamb.Kind == kindToken {
+					dKey = disamb.Name
 				}
 				if dKey != "" {
 					delete(vocab, dKey)

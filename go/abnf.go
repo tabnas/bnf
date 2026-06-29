@@ -42,6 +42,11 @@ const (
 	kindPlus  elemKind = "plus"
 	kindRep   elemKind = "rep"
 	kindGroup elemKind = "group"
+	// kindToken is an engine builtin lexer token (e.g. #TX/#NR/#ST/#VL),
+	// produced by normalizeBuiltinTokens. Its token name is held in Name and
+	// is emitted verbatim into a rule's token sequence (no allocation, unlike
+	// a literal term).
+	kindToken elemKind = "token"
 )
 
 // abnfElement is one element of an ABNF sequence (a term, ref, regex, or

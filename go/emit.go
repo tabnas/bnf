@@ -34,6 +34,10 @@ func emitGrammarSpec(grammar *abnfGrammar, opts *AbnfConvertOptions) (*tabnas.Gr
 		tag = "abnf"
 	}
 
+	// Resolve bare builtin token names (TX/NR/ST/VL) to token terminals before
+	// any structural pass sees them as rule references.
+	normalizeBuiltinTokens(grammar)
+
 	grammar = eliminateLeftRecursion(grammar)
 	grammar = rewriteProbeDispatches(grammar)
 	grammar = desugar(grammar)
@@ -60,11 +64,22 @@ func emitGrammarSpec(grammar *abnfGrammar, opts *AbnfConvertOptions) (*tabnas.Gr
 		}
 		name := allocTokenName(el.Literal, usedNames)
 		literals[key] = name
-		if isEffectivelyCaseSensitive(el) {
+		// A word-keyword literal (ending in a word char) needs a trailing `\b`
+		// guard so it only matches as a whole word; that forces a regex token
+		// even when the literal is case-sensitive. Mirrors TS emitLiteralToken.
+		boundary := ""
+		if opts.WordKeywords && endsWithWordChar(el.Literal) {
+			boundary = `\b`
+		}
+		if isEffectivelyCaseSensitive(el) && boundary == "" {
 			lit := el.Literal
 			fixedTokens[name] = &lit
 		} else {
-			re := regexp.MustCompile("(?i)^" + escapeRegexp(el.Literal))
+			flags := "(?i)"
+			if isEffectivelyCaseSensitive(el) {
+				flags = ""
+			}
+			re := regexp.MustCompile(flags + "^" + escapeRegexp(el.Literal) + boundary)
 			matchTokens[name] = re
 			matchEager[name] = true
 			matchOrder = append(matchOrder, name)
@@ -190,6 +205,8 @@ func segmentize(alt abnfSequence, literals, regexTokens map[string]string) []seg
 			current.terms = append(current.terms, literals[termKey(el)])
 		case kindRegex:
 			current.terms = append(current.terms, regexTokens[regexKey(el)])
+		case kindToken:
+			current.terms = append(current.terms, el.Name)
 		case kindRef:
 			current.ref = el.Name
 			segs = append(segs, current)
@@ -213,7 +230,7 @@ func isSingleSegment(alt abnfSequence) bool {
 				return false
 			}
 			sawRef = true
-		case kindTerm, kindRegex:
+		case kindTerm, kindRegex, kindToken:
 			if sawRef {
 				return false
 			}
@@ -377,6 +394,12 @@ func altDiscriminator(alt abnfSequence, literals, regexTokens map[string]string)
 		return s
 	case kindRegex:
 		s := strings.TrimPrefix(regexTokens[regexKey(el)], "#")
+		if s == "" {
+			return "_"
+		}
+		return s
+	case kindToken:
+		s := strings.TrimPrefix(el.Name, "#")
 		if s == "" {
 			return "_"
 		}

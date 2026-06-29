@@ -89,7 +89,7 @@ func computeFirstSets(grammar *abnfGrammar, literals, regexTokens map[string]str
 			for _, alt := range prod.Alts {
 				altNullable := true
 				for _, el := range alt {
-					if el.Kind == kindTerm || el.Kind == kindRegex {
+					if el.Kind == kindTerm || el.Kind == kindRegex || el.Kind == kindToken {
 						tok := tokenForTerminal(el, literals, regexTokens)
 						if !first[tok] {
 							first[tok] = true
@@ -125,10 +125,14 @@ func computeFirstSets(grammar *abnfGrammar, literals, regexTokens map[string]str
 }
 
 func tokenForTerminal(el *abnfElement, literals, regexTokens map[string]string) string {
-	if el.Kind == kindTerm {
+	switch el.Kind {
+	case kindTerm:
 		return literals[termKey(el)]
+	case kindToken:
+		return el.Name
+	default:
+		return regexTokens[regexKey(el)]
 	}
-	return regexTokens[regexKey(el)]
 }
 
 // firstOfAlt returns the FIRST set for a specific alt, or nil if the alt
@@ -137,7 +141,7 @@ func firstOfAlt(alt abnfSequence, literals, regexTokens map[string]string,
 	firstSets map[string]map[string]bool, nullable map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	for _, el := range alt {
-		if el.Kind == kindTerm || el.Kind == kindRegex {
+		if el.Kind == kindTerm || el.Kind == kindRegex || el.Kind == kindToken {
 			out[tokenForTerminal(el, literals, regexTokens)] = true
 			return out
 		}
@@ -180,6 +184,9 @@ func altPrefixesRaw(alt abnfSequence, grammar *abnfGrammar, literals, regexToken
 			case kindRegex:
 				next = append(next, prefixPath{
 					tokens: appendStr(p.tokens, regexTokens[regexKey(el)]), done: false})
+			case kindToken:
+				next = append(next, prefixPath{
+					tokens: appendStr(p.tokens, el.Name), done: false})
 			case kindRef:
 				if visited[el.Name] {
 					next = append(next, prefixPath{tokens: p.tokens, done: true})
@@ -254,6 +261,8 @@ func emitProbeHelper(prod *abnfProduction, tag string, ruleSpec map[string]*tabn
 			tok = literals[termKey(el)]
 		} else if el.Kind == kindRegex {
 			tok = regexTokens[regexKey(el)]
+		} else if el.Kind == kindToken {
+			tok = el.Name
 		}
 		if tok != "" {
 			opens = append(opens, map[string]any{"s": tok, "r": prod.Name, "g": tag})
@@ -272,6 +281,8 @@ func emitProbeDispatch(prod *abnfProduction, tag string, ruleSpec map[string]*ta
 		disambiguatorToken = literals[termKey(pd.Disambiguator)]
 	} else if pd.Disambiguator.Kind == kindRegex {
 		disambiguatorToken = regexTokens[regexKey(pd.Disambiguator)]
+	} else if pd.Disambiguator.Kind == kindToken {
+		disambiguatorToken = pd.Disambiguator.Name
 	}
 	if disambiguatorToken == "" {
 		panic("abnf: probe-dispatch rule '" + prod.Name + "' has unresolvable disambiguator")
