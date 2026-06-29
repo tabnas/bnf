@@ -42,6 +42,15 @@ export type AbnfConvertOptions = {
   // `@<rule>:o|c:<mark>` user-action references. Off by default so the
   // emitted spec shape is unchanged unless marks are wanted.
   marks?: boolean
+  // Treat word-like string literals as whole-word keywords: a literal
+  // ending in `[A-Za-z0-9_]` only matches when not immediately followed
+  // by another word character. Without this, `"option"` would grab the
+  // `option` prefix of an identifier `optional`. Use for tokenised,
+  // keyword-rich languages (proto, SQL, …) that also use the whole-word
+  // `TX` token; leave off for scannerless/char-level grammars (a literal
+  // `"v"` before a hex digit in an RFC grammar must still match). Off by
+  // default so existing grammars are unchanged.
+  wordKeywords?: boolean
 }
 
 
@@ -1552,6 +1561,40 @@ function normalizeBuiltinTokens(grammar: AbnfGrammar): void {
 }
 
 
+// Allocate the lexer token for a string-literal terminal. A
+// case-sensitive literal is normally a fixed token and a case-insensitive
+// one an anchored `i`-flagged regex. When `wordKeywords` is set and the
+// literal ends in a word character, it is emitted as a regex with a
+// trailing `(?![A-Za-z0-9_])` guard so the keyword matches only as a whole
+// word (e.g. `option` won't match inside `optional`).
+function emitLiteralToken(
+  el: { literal: string; caseSensitive?: boolean },
+  name: string,
+  fixedTokens: Record<string, string>,
+  matchTokens: Record<string, RegExp>,
+  wordKeywords: boolean,
+): void {
+  const boundary =
+    wordKeywords && /[A-Za-z0-9_]$/.test(el.literal)
+      ? '(?![A-Za-z0-9_])'
+      : ''
+  if (isEffectivelyCaseSensitive(el) && boundary === '') {
+    fixedTokens[name] = el.literal
+    return
+  }
+  // Insensitive literal, or a word-keyword needing a boundary guard:
+  // emit as an anchored regex. Mark it `eager$` so the lexer fires it
+  // even when the current rule's tcol doesn't list its tin.
+  const flags = isEffectivelyCaseSensitive(el) ? '' : 'i'
+  const re = new RegExp(
+    '^' + escapeRegExp(el.literal) + boundary,
+    flags,
+  ) as RegExp & { eager$?: boolean }
+  re.eager$ = true
+  matchTokens[name] = re
+}
+
+
 // Convert an ABNF grammar AST into a tabnas GrammarSpec.
 function emitGrammarSpec(
   grammar: AbnfGrammar,
@@ -1559,6 +1602,7 @@ function emitGrammarSpec(
 ): GrammarSpec {
   const start = opts?.start ?? grammar.productions[0].name
   const tag = opts?.tag ?? 'abnf'
+  const wordKeywords = !!opts?.wordKeywords
 
   // Resolve bare built-in token names (`TX`/`NR`/`ST`/`VL`) to token
   // terminals before any structural pass sees them as rule references.
@@ -1590,20 +1634,7 @@ function emitGrammarSpec(
           if (!literals.has(key)) {
             const name = allocTokenName(el.literal, usedNames)
             literals.set(key, name)
-            if (isEffectivelyCaseSensitive(el)) {
-              fixedTokens[name] = el.literal
-            } else {
-              // Insensitive literal with at least one letter — emit
-              // as an anchored regex with the `i` flag. Mark the
-              // matcher `eager$` so tabnas's lexer fires it even
-              // when the current rule's tcol doesn't list its tin.
-              const re = new RegExp(
-                '^' + escapeRegExp(el.literal),
-                'i',
-              ) as RegExp & { eager$?: boolean }
-              re.eager$ = true
-              matchTokens[name] = re
-            }
+            emitLiteralToken(el, name, fixedTokens, matchTokens, wordKeywords)
           }
         } else if (el.kind === 'regex') {
           const key = regexKey(el)
@@ -1624,16 +1655,7 @@ function emitGrammarSpec(
           if (!literals.has(key)) {
             const name = allocTokenName(el.literal, usedNames)
             literals.set(key, name)
-            if (isEffectivelyCaseSensitive(el)) {
-              fixedTokens[name] = el.literal
-            } else {
-              const re = new RegExp(
-                '^' + escapeRegExp(el.literal),
-                'i',
-              ) as RegExp & { eager$?: boolean }
-              re.eager$ = true
-              matchTokens[name] = re
-            }
+            emitLiteralToken(el, name, fixedTokens, matchTokens, wordKeywords)
           }
         } else if (el.kind === 'regex') {
           const key = regexKey(el)

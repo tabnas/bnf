@@ -77,4 +77,19 @@ describe('built-in token terminals', () => {
     const out = make('path = TX *( "." TX )').parse('foo.bar.baz')
     assert.equal(out.src, 'foo.bar.baz')
   })
+
+  it('wordKeywords: a keyword does not grab the prefix of an identifier', () => {
+    // `map` is a prefix of the identifier `mapping`.
+    const G = 'decl = "map" name ";"\nname = TX'
+    const off = make(G) // default: no wordKeywords
+    const on = new Tabnas({ plugins: [abnfPlugin], rewind: { history: 4096 } })
+    on.abnf(G, { tag: 'tk', wordKeywords: true })
+
+    // Off: `map` greedily matches the prefix of `mapping`, name = `ping`.
+    assert.doesNotThrow(() => off.parse('mapping ;'))
+    // On: `map` only matches the whole word, so `mapping` is not `map …`.
+    assert.throws(() => on.parse('mapping ;'))
+    // On: a real `map` keyword followed by an identifier still works.
+    assert.equal(on.parse('map foo ;').src, 'mapfoo;')
+  })
 })

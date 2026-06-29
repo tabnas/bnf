@@ -82,6 +82,18 @@ the same convention abnf's own meta-grammar uses (`#TX` for rule names,
 `#ST` for string literals); it keeps lexical atoms in the simple lexer and
 structure in the grammar.
 
+### Whole-word keywords: `wordKeywords`
+
+In a tokenised grammar, string-literal keywords must align with the
+whole-word `TX` tokenisation. By default a literal matches greedily, so
+`"option"` would match the `option` prefix of the identifier `optional`.
+The `wordKeywords: true` convert option fixes this: a literal ending in a
+word character only matches when not immediately followed by another word
+character (`[A-Za-z0-9_]`). Turn it on for keyword-rich tokenised
+languages (proto, SQL); leave it off for char-level/scannerless grammars
+where a literal legitimately precedes a word character (e.g. `"v" 1*HEXDIG`
+in RFC 3986, where `v1f` must match `v` then `1f`).
+
 ## The meta-grammar: ABNF is parsed by tabnas itself
 
 The ABNF source is parsed by a tabnas instance whose grammar (the
