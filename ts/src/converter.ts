@@ -42,6 +42,15 @@ export type AbnfConvertOptions = {
   // `@<rule>:o|c:<mark>` user-action references. Off by default so the
   // emitted spec shape is unchanged unless marks are wanted.
   marks?: boolean
+  // Treat word-like string literals as whole-word keywords: a literal
+  // ending in `[A-Za-z0-9_]` only matches when not immediately followed
+  // by another word character. Without this, `"option"` would grab the
+  // `option` prefix of an identifier `optional`. Use for tokenised,
+  // keyword-rich languages (proto, SQL, …) that also use the whole-word
+  // `TX` token; leave off for scannerless/char-level grammars (a literal
+  // `"v"` before a hex digit in an RFC grammar must still match). Off by
+  // default so existing grammars are unchanged.
+  wordKeywords?: boolean
 }
 
 
@@ -57,6 +66,12 @@ type AbnfElement =
       caseSensitive?: boolean;
     }
   | { kind: 'ref'; name: string }
+  // A terminal that matches a built-in engine lexer token directly (e.g.
+  // `#TX`, `#NR`, `#ST`, `#VL`). Produced by normalising a bareword ref
+  // whose name is in BUILTIN_TOKENS and isn't a defined rule — letting a
+  // grammar reference the lexer's whole-word tokens (`ident = TX`) instead
+  // of re-deriving them char-by-char. `name` is the full token name incl. `#`.
+  | { kind: 'token'; name: string }
   | { kind: 'regex'; pattern: string; flags: string }  // internal: for future %x
   | { kind: 'opt'; inner: AbnfElement }     // [ A ]
   | { kind: 'star'; inner: AbnfElement }    // *A
@@ -847,7 +862,8 @@ function desugar(grammar: AbnfGrammar): AbnfGrammar {
   }
 
   function desugarElement(el: AbnfElement): AbnfElement {
-    if (el.kind === 'term' || el.kind === 'ref' || el.kind === 'regex') {
+    if (el.kind === 'term' || el.kind === 'ref' || el.kind === 'regex' ||
+        el.kind === 'token') {
       return el
     }
 
@@ -1167,7 +1183,8 @@ function isProbeableOpt(el: AbnfElement): null | {
   const seq = inner.alts[0]
   if (seq.length < 2) return null
   const last = seq[seq.length - 1]
-  if (last.kind !== 'term' && last.kind !== 'regex') return null
+  if (last.kind !== 'term' && last.kind !== 'regex' && last.kind !== 'token')
+    return null
   return { xSeq: seq.slice(0, -1), disambiguator: last }
 }
 
@@ -1190,6 +1207,10 @@ function collectTerminalVocabElements(
   if (el.kind === 'regex') {
     const k = regexKey(el)
     if (!out.has(k)) out.set(k, el)
+    return
+  }
+  if (el.kind === 'token') {
+    if (!out.has(el.name)) out.set(el.name, el)
     return
   }
   if (el.kind === 'ref') {
@@ -1287,6 +1308,7 @@ function rewriteProbeDispatches(grammar: AbnfGrammar): AbnfGrammar {
         const d = info.disambiguator
         const dKey = d.kind === 'term' ? termKey(d)
           : d.kind === 'regex' ? regexKey(d)
+          : d.kind === 'token' ? d.name
           : null
         if (dKey) vocab.delete(dKey)
 
@@ -1384,6 +1406,7 @@ function emitProbeHelper(
     const tok = el.kind === 'term'
       ? literals.get(termKey(el))
       : el.kind === 'regex' ? regexTokens.get(regexKey(el))
+      : el.kind === 'token' ? el.name
       : undefined
     if (tok) opens.push({ s: tok, r: prod.name, g: tag })
   }
@@ -1412,7 +1435,9 @@ function emitProbeDispatch(
       ? literals.get(termKey(disambiguator))
       : disambiguator.kind === 'regex'
         ? regexTokens.get(regexKey(disambiguator))
-        : undefined
+        : disambiguator.kind === 'token'
+          ? disambiguator.name
+          : undefined
   if (!disambiguatorToken) {
     throw new Error(
       `abnf: probe-dispatch rule '${prod.name}' has unresolvable ` +
@@ -1496,6 +1521,80 @@ function emitProbeDispatch(
 }
 
 
+// Built-in engine lexer tokens that an ABNF rule may reference by a bare
+// uppercase name, mapping the name to the token the lexer emits. This lets a
+// grammar say `ident = TX` to match the lexer's whole-word text token rather
+// than re-deriving identifiers char-by-char (which, since whitespace is
+// ignored between tokens, would greedily merge across spaces). A user (or
+// core) rule of the same name always wins.
+const BUILTIN_TOKENS: Record<string, string> = {
+  TX: '#TX',  // bareword / identifier (text matcher)
+  NR: '#NR',  // number (number matcher)
+  ST: '#ST',  // quoted string (string matcher)
+  VL: '#VL',  // keyword value: true / false / null (value matcher)
+}
+
+
+// Rewrite every bareword reference whose name is a built-in token AND is not a
+// defined production into a `token` terminal element. Run before any other
+// pass so the rest of the pipeline treats these as ordinary terminals.
+function normalizeBuiltinTokens(grammar: AbnfGrammar): void {
+  const defined = new Set(grammar.productions.map((p) => p.name))
+  const walk = (el: AbnfElement): AbnfElement => {
+    if (el.kind === 'ref') {
+      const tok = BUILTIN_TOKENS[el.name]
+      if (tok && !defined.has(el.name)) return { kind: 'token', name: tok }
+      return el
+    }
+    if (el.kind === 'opt' || el.kind === 'star' || el.kind === 'plus' ||
+        el.kind === 'rep') {
+      return { ...el, inner: walk(el.inner) }
+    }
+    if (el.kind === 'group') {
+      return { kind: 'group', alts: el.alts.map((a) => a.map(walk)) }
+    }
+    return el
+  }
+  for (const prod of grammar.productions) {
+    prod.alts = prod.alts.map((alt) => alt.map(walk))
+  }
+}
+
+
+// Allocate the lexer token for a string-literal terminal. A
+// case-sensitive literal is normally a fixed token and a case-insensitive
+// one an anchored `i`-flagged regex. When `wordKeywords` is set and the
+// literal ends in a word character, it is emitted as a regex with a
+// trailing `(?![A-Za-z0-9_])` guard so the keyword matches only as a whole
+// word (e.g. `option` won't match inside `optional`).
+function emitLiteralToken(
+  el: { literal: string; caseSensitive?: boolean },
+  name: string,
+  fixedTokens: Record<string, string>,
+  matchTokens: Record<string, RegExp>,
+  wordKeywords: boolean,
+): void {
+  const boundary =
+    wordKeywords && /[A-Za-z0-9_]$/.test(el.literal)
+      ? '(?![A-Za-z0-9_])'
+      : ''
+  if (isEffectivelyCaseSensitive(el) && boundary === '') {
+    fixedTokens[name] = el.literal
+    return
+  }
+  // Insensitive literal, or a word-keyword needing a boundary guard:
+  // emit as an anchored regex. Mark it `eager$` so the lexer fires it
+  // even when the current rule's tcol doesn't list its tin.
+  const flags = isEffectivelyCaseSensitive(el) ? '' : 'i'
+  const re = new RegExp(
+    '^' + escapeRegExp(el.literal) + boundary,
+    flags,
+  ) as RegExp & { eager$?: boolean }
+  re.eager$ = true
+  matchTokens[name] = re
+}
+
+
 // Convert an ABNF grammar AST into a tabnas GrammarSpec.
 function emitGrammarSpec(
   grammar: AbnfGrammar,
@@ -1503,6 +1602,11 @@ function emitGrammarSpec(
 ): GrammarSpec {
   const start = opts?.start ?? grammar.productions[0].name
   const tag = opts?.tag ?? 'abnf'
+  const wordKeywords = !!opts?.wordKeywords
+
+  // Resolve bare built-in token names (`TX`/`NR`/`ST`/`VL`) to token
+  // terminals before any structural pass sees them as rule references.
+  normalizeBuiltinTokens(grammar)
 
   // Eliminate direct left recursion (P → P α | β) by rewriting to
   // the equivalent right-recursive form P → β (α)*, then detect
@@ -1530,20 +1634,7 @@ function emitGrammarSpec(
           if (!literals.has(key)) {
             const name = allocTokenName(el.literal, usedNames)
             literals.set(key, name)
-            if (isEffectivelyCaseSensitive(el)) {
-              fixedTokens[name] = el.literal
-            } else {
-              // Insensitive literal with at least one letter — emit
-              // as an anchored regex with the `i` flag. Mark the
-              // matcher `eager$` so tabnas's lexer fires it even
-              // when the current rule's tcol doesn't list its tin.
-              const re = new RegExp(
-                '^' + escapeRegExp(el.literal),
-                'i',
-              ) as RegExp & { eager$?: boolean }
-              re.eager$ = true
-              matchTokens[name] = re
-            }
+            emitLiteralToken(el, name, fixedTokens, matchTokens, wordKeywords)
           }
         } else if (el.kind === 'regex') {
           const key = regexKey(el)
@@ -1564,16 +1655,7 @@ function emitGrammarSpec(
           if (!literals.has(key)) {
             const name = allocTokenName(el.literal, usedNames)
             literals.set(key, name)
-            if (isEffectivelyCaseSensitive(el)) {
-              fixedTokens[name] = el.literal
-            } else {
-              const re = new RegExp(
-                '^' + escapeRegExp(el.literal),
-                'i',
-              ) as RegExp & { eager$?: boolean }
-              re.eager$ = true
-              matchTokens[name] = re
-            }
+            emitLiteralToken(el, name, fixedTokens, matchTokens, wordKeywords)
           }
         } else if (el.kind === 'regex') {
           const key = regexKey(el)
@@ -1681,6 +1763,8 @@ function segmentize(
     } else if (el.kind === 'regex') {
       const key = regexKey(el)
       current.terms.push(regexTokens.get(key) as string)
+    } else if (el.kind === 'token') {
+      current.terms.push(el.name)
     } else if (el.kind === 'ref') {
       current.ref = el.name
       segs.push(current)
@@ -1710,7 +1794,8 @@ function isSingleSegment(alt: AbnfSequence): boolean {
     if (el.kind === 'ref') {
       if (sawRef) return false
       sawRef = true
-    } else if (el.kind === 'term' || el.kind === 'regex') {
+    } else if (el.kind === 'term' || el.kind === 'regex' ||
+               el.kind === 'token') {
       if (sawRef) return false // terminal after a ref — multi-segment
     } else {
       // Desugar should have eliminated sugar kinds.
@@ -1811,6 +1896,7 @@ function altDiscriminator(
   if (el.kind === 'regex') {
     return (regexTokens.get(regexKey(el)) || '').replace(/^#/, '') || '_'
   }
+  if (el.kind === 'token') return el.name.replace(/^#/, '') || '_'
   if (el.kind === 'ref') return el.name
   return '_'
 }
@@ -2177,10 +2263,13 @@ function computeFirstSets(
         // position is hit.
         let altNullable = true
         for (const el of alt) {
-          if (el.kind === 'term' || el.kind === 'regex') {
+          if (el.kind === 'term' || el.kind === 'regex' ||
+              el.kind === 'token') {
             const tok = el.kind === 'term'
               ? literals.get(termKey(el)) as string
-              : regexTokens.get(regexKey(el)) as string
+              : el.kind === 'token'
+                ? el.name
+                : regexTokens.get(regexKey(el)) as string
             if (!first.has(tok)) { first.add(tok); changed = true }
             altNullable = false
             break
@@ -2223,10 +2312,12 @@ function firstOfAlt(
 ): Set<string> | null {
   const out = new Set<string>()
   for (const el of alt) {
-    if (el.kind === 'term' || el.kind === 'regex') {
+    if (el.kind === 'term' || el.kind === 'regex' || el.kind === 'token') {
       const tok = el.kind === 'term'
         ? literals.get(termKey(el)) as string
-        : regexTokens.get(regexKey(el)) as string
+        : el.kind === 'token'
+          ? el.name
+          : regexTokens.get(regexKey(el)) as string
       out.add(tok)
       return out
     }
@@ -2290,6 +2381,8 @@ function altLiteralPrefix(
       out.push(literals.get(termKey(el)) as string)
     } else if (el.kind === 'regex') {
       out.push(regexTokens.get(regexKey(el)) as string)
+    } else if (el.kind === 'token') {
+      out.push(el.name)
     } else if (el.kind === 'ref') {
       const sub = ruleLiteralPrefix(
         el.name, grammar, literals, regexTokens, visited)
@@ -2341,6 +2434,8 @@ function altPrefixesRaw(
           tokens: [...p.tokens, regexTokens.get(regexKey(el)) as string],
           done: false,
         })
+      } else if (el.kind === 'token') {
+        next.push({ tokens: [...p.tokens, el.name], done: false })
       } else if (el.kind === 'ref') {
         if (visited.has(el.name)) {
           next.push({ tokens: p.tokens, done: true })
