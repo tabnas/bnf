@@ -109,6 +109,14 @@ type Production = {
   // the opt→group→push helper chain, so every iteration shares one
   // parent and the tree comes out flat.
   tailRepeat?: { sep: Sequence }
+  // Set by `desugar` on the generated helpers that terminate a
+  // repetition (`opt`/`star` and the tails of `plus`/`rep`). Their
+  // terminating alternative is empty, so it names no token — and the
+  // engine only offers a matcher at a position where the active rule
+  // names it. The emitter therefore guards that alternative with a
+  // FOLLOW-set peek, without which a repetition followed by a
+  // character class cannot terminate. See computeFollowSets.
+  repeatHelper?: boolean
   // Set on synthetic productions introduced by the probe-dispatch
   // rewriter. The emitter emits a phase-retry rule body instead of
   // compiling `alts` through the normal path.
@@ -597,7 +605,9 @@ function desugar(grammar: Grammar): Grammar {
     if (el.kind === 'opt') {
       // H ::= inner | (empty)
       const name = freshName('opt_' + hint)
-      extra.push({ name, alts: [[inner], []], nodeKind: 'helper' })
+      extra.push({
+        name, alts: [[inner], []], nodeKind: 'helper', repeatHelper: true,
+      })
       return { kind: 'ref', name }
     }
 
@@ -605,7 +615,12 @@ function desugar(grammar: Grammar): Grammar {
       // H = inner H / (empty)
       const name = freshName('star_' + hint)
       const selfRef: Element = { kind: 'ref', name }
-      extra.push({ name, alts: [[inner, selfRef], []], nodeKind: 'helper' })
+      extra.push({
+        name,
+        alts: [[inner, selfRef], []],
+        nodeKind: 'helper',
+        repeatHelper: true,
+      })
       return { kind: 'ref', name }
     }
 
@@ -618,6 +633,7 @@ function desugar(grammar: Grammar): Grammar {
         name: tailName,
         alts: [[inner, tailRef], []],
         nodeKind: 'helper',
+        repeatHelper: true,
       })
       extra.push({
         name: plusName,
@@ -649,6 +665,7 @@ function desugar(grammar: Grammar): Grammar {
         name: tailStarName,
         alts: [[inner, tailStarRef], []],
         nodeKind: 'helper',
+        repeatHelper: true,
       })
       repAlt.push(tailStarRef)
     } else {
@@ -677,6 +694,7 @@ function desugar(grammar: Grammar): Grammar {
           name: optName,
           alts: [[groupRef], []],
           nodeKind: 'helper',
+          repeatHelper: true,
         })
         nestedRef = { kind: 'ref', name: optName }
       }
@@ -1575,6 +1593,8 @@ function emitGrammarSpec(
   const knownRules = new Set(grammar.productions.map((p) => p.name))
   const { firstSets, nullable } = computeFirstSets(
     grammar, literals, regexTokens)
+  const followSets = computeFollowSets(
+    grammar, literals, regexTokens, firstSets, nullable, start)
   const refs = new RefRegistry()
   refs.useBuiltins = !!opts?.builtins
   refs.emitMarks = !!opts?.marks
@@ -1595,7 +1615,7 @@ function emitGrammarSpec(
     // directly; multi-segment alts emit a chain of aux rules.
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
-      firstSets, nullable, refs,
+      firstSets, nullable, refs, followSets,
     )
   }
 
@@ -1991,6 +2011,7 @@ function emitProduction(
   firstSets: Map<string, Set<string>>,
   nullable: Set<string>,
   refs: RefRegistry,
+  followSets: Map<string, Set<string>>,
 ) {
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
@@ -2055,6 +2076,17 @@ function emitProduction(
       }
       const o = segmentToAlt(seg, tag, refs, true, prod.name, prodKind)
       if (mark) o.m = mark
+      // The terminating alternative of a repetition helper names no
+      // token, so the lexer is never asked to produce whatever follows
+      // the repetition. Re-issue that alternative once per FOLLOW
+      // token, peeking and pushing straight back (`b: 1`) so the token
+      // column widens without anything extra being consumed. The bare
+      // alternative stays last as the fallback.
+      if (alt.length === 0 && prod.repeatHelper) {
+        for (const tok of followSets.get(prod.name) ?? []) {
+          opens.push({ ...o, s: tok, b: 1 })
+        }
+      }
       opens.push(o)
     }
 
@@ -2172,6 +2204,12 @@ function emitProduction(
       g: tag,
     }
     if (dispatchMarks) o.m = '_'
+    // Same FOLLOW guard as the single-segment path above.
+    if (prod.repeatHelper) {
+      for (const tok of followSets.get(prod.name) ?? []) {
+        dispatchOpen.push({ ...o, s: tok, b: 1 })
+      }
+    }
     dispatchOpen.push(o)
   }
 
@@ -2301,6 +2339,98 @@ function computeFirstSets(
   }
 
   return { firstSets, nullable }
+}
+
+
+// FIRST of a sequence, reporting nullability separately rather than
+// collapsing it to `null` the way `firstOfAlt` does. FOLLOW needs both
+// halves of the answer: the tokens a suffix can start with, *and*
+// whether that suffix can vanish (in which case the enclosing rule's
+// FOLLOW carries through).
+function firstOfSeq(
+  seq: Sequence,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+  firstSets: Map<string, Set<string>>,
+  nullable: Set<string>,
+): { tokens: Set<string>; nullable: boolean } {
+  const tokens = new Set<string>()
+  for (const el of seq) {
+    if (el.kind === 'term' || el.kind === 'regex' || el.kind === 'token') {
+      tokens.add(el.kind === 'term'
+        ? literals.get(termKey(el)) as string
+        : el.kind === 'token'
+          ? el.name
+          : regexTokens.get(regexKey(el)) as string)
+      return { tokens, nullable: false }
+    }
+    if (el.kind === 'ref') {
+      for (const tok of firstSets.get(el.name) ?? []) tokens.add(tok)
+      if (!nullable.has(el.name)) return { tokens, nullable: false }
+      continue
+    }
+    throw new Error(
+      `${diagName()}: internal — unexpected kind in firstOfSeq: ${el.kind}`)
+  }
+  return { tokens, nullable: true }
+}
+
+
+// FOLLOW sets — the tokens that may legitimately appear immediately
+// after each production.
+//
+// This exists for one reason: the engine lexes *under the direction of
+// the active rule*. A matcher-backed token (a character class) is only
+// offered at a position where the current rule names it. A generated
+// repetition helper ends on an empty alternative, which names nothing,
+// so at the moment the loop could terminate the following token is not
+// on offer and the lex fails instead. `root ::= sign? [0-9]+` dies one
+// character in for exactly this reason.
+//
+// Naming FOLLOW on that terminating alternative puts those tokens back
+// in the rule's token column. The guard alternatives peek and push the
+// token straight back (`b: 1`), so they accept nothing extra — they
+// only widen what the lexer is willing to produce there.
+function computeFollowSets(
+  grammar: Grammar,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+  firstSets: Map<string, Set<string>>,
+  nullable: Set<string>,
+  start: string,
+): Map<string, Set<string>> {
+  const follow = new Map<string, Set<string>>()
+  for (const p of grammar.productions) follow.set(p.name, new Set())
+  // End-of-source can follow the start rule.
+  follow.get(start)?.add('#ZZ')
+
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const prod of grammar.productions) {
+      const prodFollow = follow.get(prod.name) as Set<string>
+      for (const alt of prod.alts) {
+        for (let i = 0; i < alt.length; i++) {
+          const el = alt[i]
+          if (el.kind !== 'ref') continue
+          const target = follow.get(el.name)
+          if (!target) continue
+          const add = (tok: string) => {
+            if (!target.has(tok)) { target.add(tok); changed = true }
+          }
+          const rest = firstOfSeq(
+            alt.slice(i + 1), literals, regexTokens, firstSets, nullable)
+          for (const tok of rest.tokens) add(tok)
+          // Nothing (or nothing mandatory) follows this reference inside
+          // the alternative, so whatever can follow the enclosing
+          // production can follow the reference too.
+          if (rest.nullable) for (const tok of prodFollow) add(tok)
+        }
+      }
+    }
+  }
+
+  return follow
 }
 
 

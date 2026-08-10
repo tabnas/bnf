@@ -106,6 +106,75 @@ describe('bnf', () => {
     assert.ok(0 < text.length)
   })
 
+  it('guards a repetition helper with its FOLLOW set', () => {
+    // A repetition helper terminates on an empty alternative, which
+    // names no token. The engine only offers a matcher where the active
+    // rule names it, so without a guard the token that follows the
+    // repetition is never lexed and the parse dies at the loop exit.
+    // See issue #3.
+    //
+    //   root = star D    where   star = *W
+    //
+    // The generated `_gen1_star_W` must name `#D` on its terminating
+    // alternative, peeking and pushing straight back so nothing extra
+    // is consumed.
+    const spec = emitGrammarSpec({
+      productions: [
+        {
+          name: 'root',
+          alts: [[{ kind: 'star', inner: ref('W') }, ref('D')]],
+        },
+        { name: 'W', alts: [[{ kind: 'regex', pattern: '[ ]', flags: '' }]] },
+        { name: 'D', alts: [[{ kind: 'regex', pattern: '[0-9]', flags: '' }]] },
+      ],
+    }, { tag: 'demo' })
+
+    // The helper itself, not its `$alt0`/`$step1` chain rules.
+    const starRule = Object.entries(spec.rule)
+      .find(([name]) => /^_gen\d+_star_/.test(name) && !name.includes('$'))
+    assert.ok(starRule, 'expected a generated star helper')
+
+    const [, rs] = starRule
+    const dToken = spec.rule.D.open[0].s
+    const guards = rs.open.filter((alt) => alt.s === dToken)
+    assert.equal(
+      guards.length, 1,
+      'the star helper must name D on its terminating alternative')
+    assert.equal(
+      guards[0].b, 1,
+      'the FOLLOW guard must push its peeked token back')
+    assert.ok(
+      !guards[0].p && !guards[0].r,
+      'the FOLLOW guard must not push or replace a rule')
+    // The unguarded empty alternative stays last as the fallback.
+    const last = rs.open[rs.open.length - 1]
+    assert.equal(last.s, undefined, 'expected a bare fallback alternative')
+  })
+
+  it('carries FOLLOW through a nullable suffix', () => {
+    // `root = star X Y` where X is nullable: what follows the star is
+    // FIRST(X) *and* FIRST(Y), because X can vanish.
+    const spec = emitGrammarSpec({
+      productions: [
+        {
+          name: 'root',
+          alts: [[{ kind: 'star', inner: ref('W') }, ref('X'), ref('Y')]],
+        },
+        { name: 'W', alts: [[{ kind: 'regex', pattern: '[ ]', flags: '' }]] },
+        { name: 'X', alts: [[token('#NR')], []] },
+        { name: 'Y', alts: [[token('#TX')]] },
+      ],
+    }, { tag: 'demo' })
+
+    const [, rs] = Object.entries(spec.rule)
+      .find(([name]) => /^_gen\d+_star_/.test(name) && !name.includes('$'))
+    const guarded = new Set(rs.open.map((alt) => alt.s).filter(Boolean))
+    assert.ok(guarded.has('#NR'), 'expected FIRST(X) in the guard')
+    assert.ok(
+      guarded.has('#TX'),
+      'expected FIRST(Y) in the guard, since X is nullable')
+  })
+
   it('exports a semver-shaped VERSION matching package.json', () => {
     assert.match(VERSION, /^\d+\.\d+\.\d+/)
     assert.equal(VERSION, require('../package.json').version)
