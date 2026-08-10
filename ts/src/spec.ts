@@ -26,6 +26,7 @@ import type { GrammarSpec } from '@tabnas/parser'
 import { BUILTIN_SCHEMA_VERSION } from '@tabnas/parser'
 
 import type { ConvertOptions } from './compiler'
+import { diagName } from './compiler'
 
 
 // Hook fields whose string value is a `@`-ref into `spec.ref`. These
@@ -128,7 +129,7 @@ export function toRecognitionSpec(spec: GrammarSpec): GrammarSpec {
   const offenders = controlRefRules(spec, isRef)
   if (offenders.length > 0) {
     throw new CompileError(
-      'abnf: grammar needs control functions (probe / unbounded ' +
+      `${diagName()}: grammar needs control functions (probe / unbounded ` +
       'lookahead) and cannot be emitted as a pure recognition grammar; ' +
       'recompile with `builtins: true`. Offending rule(s): ' +
       offenders.join(', '),
@@ -155,8 +156,9 @@ export function toPureSpec(spec: GrammarSpec): GrammarSpec {
   const closures = Object.keys(ref)
   if (closures.length > 0) {
     throw new CompileError(
-      'abnf: spec still contains closures; convert with `builtins: true` ' +
-      'for pure-data output. Stray ref(s): ' + closures.slice(0, 3).join(', '),
+      `${diagName()}: spec still contains closures; convert with ` +
+      '`builtins: true` for pure-data output. Stray ref(s): ' +
+      closures.slice(0, 3).join(', '),
       [],
     )
   }
@@ -276,13 +278,13 @@ function resolveTarget(
   // spec.ref keys at load — fail early here with a clearer message.
   if (key.includes('$')) {
     throw new ActionError(
-      `abnf: '$' is reserved for engine builtins; user action ref ` +
+      `${diagName()}: '$' is reserved for engine builtins; user action ref ` +
       `'${key}' may not contain '$'`)
   }
   const m = /^@([^:]+):(.+)$/.exec(key)
   if (!m) {
     throw new ActionError(
-      `abnf: malformed action ref '${key}' ` +
+      `${diagName()}: malformed action ref '${key}' ` +
       `(expected @rule:phase or @rule:o|c:mark)`)
   }
   const rule = m[1]
@@ -290,18 +292,18 @@ function resolveTarget(
   const rules = (spec.rule ?? {}) as any
   if (!rules[rule]) {
     throw new ActionError(
-      `abnf: action ref '${key}' targets unknown rule '${rule}'`)
+      `${diagName()}: action ref '${key}' targets unknown rule '${rule}'`)
   }
   if (PHASES.has(sel)) return { phase: sel }
 
   const pm = /^([oc]):(.+)$/.exec(sel)
-  if (!pm) throw new ActionError(`abnf: malformed action ref '${key}'`)
+  if (!pm) throw new ActionError(`${diagName()}: malformed action ref '${key}'`)
   const phase = 'o' === pm[1] ? 'open' : 'close'
   const mark = pm[2]
   const alts = altListOf(rules[rule][phase]).filter((a) => a && a.m === mark)
   if (0 === alts.length) {
     throw new ActionError(
-      `abnf: action ref '${key}' matches no ${phase} alt with mark ` +
+      `${diagName()}: action ref '${key}' matches no ${phase} alt with mark ` +
       `'${mark}' in rule '${rule}'`)
   }
   return { alts, rule }
@@ -334,7 +336,7 @@ export function attachActions(spec: GrammarSpec, actions: ActionsMap): GrammarSp
     }
 
     for (const alt of target.alts) {
-      const userRef = `@abnf_user${counter++}`
+      const userRef = `@bnf_user${counter++}`
       ref[userRef] = seqActions(fns)
       alt.a = appendAction(alt.a, userRef)
     }
@@ -352,7 +354,7 @@ export function attachActionSlots(spec: GrammarSpec, refNames: string[]): Gramma
     const target = resolveTarget(spec, name)
     if ('phase' in target) {
       throw new ActionError(
-        `abnf: slot '${name}' is a rule-phase ref; slots are for ` +
+        `${diagName()}: slot '${name}' is a rule-phase ref; slots are for ` +
         `@rule:o|c:mark alt actions`)
     }
     for (const alt of target.alts) alt.a = appendAction(alt.a, name)

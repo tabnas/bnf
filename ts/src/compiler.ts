@@ -459,7 +459,7 @@ function eliminateDirectLeftRec(prod: Production): Production {
   }
   if (seeds.length === 0) {
     throw new Error(
-      `abnf: rule '${prod.name}' is purely left-recursive ` +
+      `${diagName()}: rule '${prod.name}' is purely left-recursive ` +
       `(no seed alternative); cannot eliminate`)
   }
 
@@ -571,7 +571,7 @@ function desugar(grammar: Grammar): Grammar {
       // Unreachable: `resolveProseTerminals` drops every prose element
       // (or throws) before desugaring runs.
       throw new Error(
-        `abnf: internal: unresolved prose terminal '<${el.text}>'`)
+        `${diagName()}: internal: unresolved prose terminal '<${el.text}>'`)
     }
 
     if (el.kind === 'group') {
@@ -1025,7 +1025,7 @@ function emitProbeDispatch(
           : undefined
   if (!disambiguatorToken) {
     throw new Error(
-      `abnf: probe-dispatch rule '${prod.name}' has unresolvable ` +
+      `${diagName()}: probe-dispatch rule '${prod.name}' has unresolvable ` +
       `disambiguator (kind=${disambiguator.kind})`)
   }
 
@@ -1170,7 +1170,7 @@ function resolveProseTerminals(grammar: Grammar): void {
     // into a token literally named `#<all>`.
     if (isProseName(prod.name) && !onlyProse) {
       throw new Error(
-        `abnf: '${prod.name}' is prose, and prose is only valid as a ` +
+        `${diagName()}: '${prod.name}' is prose, and prose is only valid as a ` +
         `production name for the removal directive '<all> = <remove>'.`)
     }
 
@@ -1189,7 +1189,7 @@ function resolveProseTerminals(grammar: Grammar): void {
           const target = prod.name.slice(1, -1).trim().toLowerCase()
           if (REMOVE_ALL !== target) {
             throw new Error(
-              `abnf: '<${target}>' is not a removal target. The only prose ` +
+              `${diagName()}: '<${target}>' is not a removal target. The only prose ` +
               `name is '<all>', as in '<all> = <remove>', which clears the ` +
               `whole grammar. To remove one rule or token, name it directly: ` +
               `'${target} = <remove>'.`)
@@ -1204,13 +1204,13 @@ function resolveProseTerminals(grammar: Grammar): void {
 
       if (isProseName(prod.name)) {
         throw new Error(
-          `abnf: '${prod.name}' is prose, and prose is only valid as a ` +
+          `${diagName()}: '${prod.name}' is prose, and prose is only valid as a ` +
           `production name for the removal directive '<all> = <remove>'.`)
       }
 
       if (BUILTIN_TOKENS[prod.name]) continue // informational — the lexer defines it
       throw new Error(
-        `abnf: rule '${prod.name}' is defined only by prose ('<${text}>'), ` +
+        `${diagName()}: rule '${prod.name}' is defined only by prose ('<${text}>'), ` +
         `which describes a terminal but does not define one. Prose is ` +
         `allowed only for built-in lexer tokens (${
           Object.keys(BUILTIN_TOKENS).join(', ')
@@ -1242,7 +1242,7 @@ function resolveProseTerminals(grammar: Grammar): void {
         const stray = findStray(el)
         if (stray) {
           throw new Error(
-            `abnf: rule '${prod.name}' uses prose ('<${stray.text}>') inside an ` +
+            `${diagName()}: rule '${prod.name}' uses prose ('<${stray.text}>') inside an ` +
             `expression; prose may only stand alone as the whole definition ` +
             `of a built-in lexer token.`)
         }
@@ -1254,7 +1254,7 @@ function resolveProseTerminals(grammar: Grammar): void {
   if (kept.length === 0 && !grammar.clearAll &&
     (undefined === grammar.remove || 0 === grammar.remove.length)) {
     throw new Error(
-      'abnf: grammar defines no rules — only informational prose terminals.')
+      `${diagName()}: grammar defines no rules — only informational prose terminals.`)
   }
 
   grammar.productions = kept
@@ -1281,7 +1281,7 @@ const isMatcherTokenName = (name: string): boolean => {
   const fn = (engineUtil as any).isMatcherToken
   if ('function' !== typeof fn) {
     throw new Error(
-      'abnf: this @tabnas/parser is too old — it does not export ' +
+      `${diagName()}: this @tabnas/parser is too old — it does not export ` +
       'util.isMatcherToken, which the compiler needs to tell a fixed ' +
       'token from a matcher-owned one. Upgrade @tabnas/parser.')
   }
@@ -1462,6 +1462,18 @@ function emitLiteralToken(
 // caller's AST. The passes below replace `productions`, `alts` and the
 // individual sequences, but treat elements as immutable (each rewriting
 // walk returns fresh element objects), so sharing elements is safe.
+// Diagnostics name the NOTATION the grammar was written in, not this
+// package: a front-end's users should not see "bnf:" on an error about
+// their own syntax. `emitGrammarSpec` sets this from `opts.tag` (which
+// each front-end supplies) for the duration of one emit; the pipeline is
+// synchronous, so a module-scoped value is safe and avoids threading a
+// prefix through every pass.
+let _diagName = 'bnf'
+
+function diagName(): string {
+  return _diagName
+}
+
 function cloneGrammar(grammar: Grammar): Grammar {
   return {
     productions: grammar.productions.map((p) => ({
@@ -1497,6 +1509,7 @@ function emitGrammarSpec(
 
   const start = opts?.start ?? grammar.productions[0].name
   const tag = opts?.tag ?? 'bnf'
+  _diagName = tag
   const wordKeywords = !!opts?.wordKeywords
 
   // Turn single-literal productions (`PL = "+"`) into named lexer
@@ -1679,7 +1692,7 @@ function segmentize(
       // `opt`, `star`, `plus`, `group` must have been desugared
       // before reaching the emitter.
       throw new Error(
-        `abnf: internal — unexpected element kind '${el.kind}' in emitter`)
+        `${diagName()}: internal — unexpected element kind '${el.kind}' in emitter`)
     }
   }
   if (current.terms.length > 0 || segs.length === 0) {
@@ -1720,7 +1733,7 @@ function validateRefs(
   for (const el of alt) {
     if (el.kind === 'ref' && !knownRules.has(el.name)) {
       throw new Error(
-        `abnf: rule '${ruleName}' references unknown rule '${el.name}'`)
+        `${diagName()}: rule '${ruleName}' references unknown rule '${el.name}'`)
     }
   }
 }
@@ -1740,7 +1753,7 @@ class RefRegistry {
   // When set, the emitter stamps user-rule alts with a `m` mark.
   emitMarks = false
   register(fn: Function): `@${string}` {
-    const name = `@abnf_a${this.counter++}` as `@${string}`
+    const name = `@bnf_a${this.counter++}` as `@${string}`
     this.refs[name] = fn
     return name
   }
@@ -2133,7 +2146,7 @@ function emitProduction(
         alt, literals, regexTokens, firstSets, nullable)
       if (firstTokens === null) {
         throw new Error(
-          `abnf: rule '${prod.name}' alternative ${i} is nullable ` +
+          `${diagName()}: rule '${prod.name}' alternative ${i} is nullable ` +
           `but is not the only empty alt; FIRST set is ambiguous`)
       }
       for (const tok of firstTokens) {
@@ -2277,7 +2290,7 @@ function computeFirstSets(
             continue
           }
           // Desugar should have eliminated other kinds.
-          throw new Error(`abnf: internal — unexpected kind in FIRST: ${el.kind}`)
+          throw new Error(`${diagName()}: internal — unexpected kind in FIRST: ${el.kind}`)
         }
         if (altNullable && !nullable.has(prod.name)) {
           nullable.add(prod.name)
@@ -2319,7 +2332,7 @@ function firstOfAlt(
       // else keep walking into the next element
       continue
     }
-    throw new Error(`abnf: internal — unexpected kind in firstOfAlt: ${el.kind}`)
+    throw new Error(`${diagName()}: internal — unexpected kind in firstOfAlt: ${el.kind}`)
   }
   // Alt is nullable — no non-empty prefix.
   return null
@@ -2549,6 +2562,7 @@ function allocTokenName(
 // (`refsIn` to collect references, `escapeRegExp` for literal-to-regex,
 // `BUILTIN_TOKENS` to recognise engine token names).
 export {
+  diagName,
   emitGrammarSpec,
   eliminateLeftRecursion,
   refsIn,
