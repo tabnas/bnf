@@ -16,6 +16,8 @@ const {
   escapeRegExp,
   BUILTIN_TOKENS,
   toJsonic,
+  attachActions,
+  markListing,
   VERSION,
 } = require('../dist/bnf')
 
@@ -173,6 +175,126 @@ describe('bnf', () => {
     assert.ok(
       guarded.has('#TX'),
       'expected FIRST(Y) in the guard, since X is nullable')
+  })
+
+  it('groups a regex before anchoring it', () => {
+    // `^` binds tighter than `|`, so `^a|bc` anchors only the first
+    // branch and the second can match anywhere in the input, producing
+    // a token from the wrong position. Issue #2 defect 2.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[{ kind: 'regex', pattern: 'a|bc', flags: '' }]] },
+      ],
+    }, { tag: 'demo' })
+
+    const re = Object.values(spec.options.match.token)[0]
+    assert.equal(re.source, '^(?:a|bc)')
+    // The point of the grouping: the second branch must not match at a
+    // non-zero offset.
+    assert.equal(re.test('xbc'), false)
+    assert.equal(re.test('bc'), true)
+  })
+
+  it('keeps grammar-level remove/clearAll across the internal clone', () => {
+    // `emitGrammarSpec` clones the grammar and then reads these fields
+    // off the clone, so a clone that copied only `productions` dropped
+    // them silently. Issue #2 defect 3.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[token('#NR')]] },
+        { name: 'gone', alts: [[token('#TX')]] },
+      ],
+      remove: ['gone'],
+      clearAll: true,
+    }, { tag: 'demo', start: 'top' })
+
+    assert.equal(spec.rule.gone, undefined, 'expected `gone` to be removed')
+    assert.equal(spec.clear, true, 'expected clearAll to set spec.clear')
+  })
+
+  it('does not overwrite a user rule named __start__', () => {
+    // The IR reserves no names, so a grammar may legitimately contain a
+    // production called `__start__`. Issue #2 defect 4.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: '__start__', alts: [[token('#NR')]] },
+      ],
+    }, { tag: 'demo' })
+
+    const start = spec.options.rule.start
+    assert.notEqual(
+      start, '__start__',
+      'the wrapper must not take the user rule\'s name')
+    // The user's rule survives, and the wrapper pushes it rather than
+    // pushing itself.
+    assert.deepEqual(spec.rule.__start__.open[0].s, '#NR')
+    assert.equal(spec.rule[start].open[0].p, '__start__')
+  })
+
+  it('escapes every control character in strict jsonic output', () => {
+    // Strict mode promises valid JSON; a raw tab or CR inside a string
+    // makes JSON.parse reject it. Issue #2 defect 5.
+    const text = toJsonic({ s: 'a\tb\rcd' }, { strict: true })
+    assert.doesNotThrow(() => JSON.parse(text))
+    assert.equal(JSON.parse(text).s, 'a\tb\rcd')
+  })
+
+  it('allocates fresh action refs on a second attachActions call', () => {
+    // The counter used to reset per call, so the second call reused
+    // `@bnf_user0` and clobbered the first. Issue #2 defect 6.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[term('x')], [term('y')]] },
+      ],
+    }, { tag: 'demo', marks: true })
+
+    // markListing renders `<rule>  o:<mark>  …`; the action ref for an
+    // alt is `@<rule>:<phase>:<mark>`.
+    const marks = markListing(spec)
+      .split('\n')
+      .map((line) => /^(\S+)\s+([oc]):(\S+)/.exec(line))
+      .filter(Boolean)
+      .filter((m) => m[1] === 'top' && m[3] !== '_')
+      .map((m) => `@${m[1]}:${m[2]}:${m[3]}`)
+    assert.ok(2 <= marks.length, 'expected at least two marked alts')
+
+    attachActions(spec, { [marks[0]]: () => 'first' })
+    attachActions(spec, { [marks[1]]: () => 'second' })
+
+    const refs = Object.entries(spec.ref)
+      .filter(([k]) => k.startsWith('@bnf_user'))
+    assert.equal(refs.length, 2, 'expected two distinct action refs')
+    assert.equal(
+      new Set(refs.map(([k]) => k)).size, 2, 'ref names must be distinct')
+  })
+
+  it('eliminates left recursion hidden behind nullable sugar', () => {
+    // `A = ["x"] A "y"` is left-recursive whenever the optional takes
+    // its empty branch, but elimination runs before desugar and so only
+    // sees a leading `opt`, not a leading ref. Issue #2 defect 1.
+    const grammar = {
+      productions: [{
+        name: 'A',
+        alts: [
+          [{ kind: 'opt', inner: term('x') }, ref('A'), term('y')],
+          [term('z')],
+        ],
+      }],
+    }
+
+    const out = eliminateLeftRecursion(grammar)
+    const a = out.productions.find((p) => p.name === 'A')
+    // No surviving alternative may re-enter A at the same position:
+    // every alt either starts with something that must consume input,
+    // or does not reference A first.
+    for (const alt of a.alts) {
+      const leads = alt.length > 0 && alt[0].kind === 'ref' &&
+        alt[0].name === 'A'
+      assert.equal(leads, false, 'A still re-enters itself immediately')
+      const hidden = alt.length > 1 && alt[0].kind === 'opt' &&
+        alt[1].kind === 'ref' && alt[1].name === 'A'
+      assert.equal(hidden, false, 'A still re-enters itself behind an opt')
+    }
   })
 
   it('exports a semver-shaped VERSION matching package.json', () => {

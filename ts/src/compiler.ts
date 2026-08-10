@@ -202,6 +202,82 @@ type AmbiguityReport = {
 // grammars will enlarge — caller is expected to keep the grammar
 // reasonably small (this is a first-step converter, not a full
 // toolchain).
+// Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
+// Returns the element sequence for the branch where the sugar *does*
+// match at least once, or null if the element is not nullable sugar.
+//
+// This is deliberately narrow. A nullable *reference* (`A = b A`, `b =
+// "y" /`) is already handled by Paull's substitution below; what that
+// machinery cannot see is sugar, because it inspects `ref` elements and
+// this pass runs before `desugar`.
+function nullableSugarPresent(el: Element): Sequence | null {
+  if (el.kind === 'opt') return [el.inner]
+  if (el.kind === 'star') return [el.inner, el]
+  if (el.kind === 'rep' && el.min === 0) {
+    if (el.max === 0) return null
+    if (el.max === Infinity) return [el.inner, el]
+    if (el.max === 1) return [el.inner]
+    return [el.inner, { kind: 'rep', min: 0, max: el.max - 1, inner: el.inner }]
+  }
+  return null
+}
+
+
+// Does this alternative re-enter `name` at the same input position —
+// reachable only because everything before the self-reference can match
+// nothing? `A = ["x"] A "y"` is the shape: skip the leading nullable
+// sugar and the next element is a reference back to A.
+// Direct left recursion (`A = A "y"`) is excluded: there is no sugar to
+// split, and `eliminateDirectLeftRec` already removes it.
+function isHiddenLeftRecursive(alt: Sequence, name: string): boolean {
+  let sawSugar = false
+  for (const el of alt) {
+    if (el.kind === 'ref') return sawSugar && el.name === name
+    if (nullableSugarPresent(el) === null) return false
+    sawSugar = true
+  }
+  return false
+}
+
+
+// Split leading nullable sugar into explicit present/absent
+// alternatives, so that hidden left recursion becomes *direct* left
+// recursion that `eliminateDirectLeftRec` can then remove.
+//
+//   A = ["x"] A "y" / "z"    becomes    A = "x" A "y" / A "y" / "z"
+//
+// Without this the recursion survives into the emitted grammar: the
+// generated optional helper takes its empty branch and exposes A again
+// at the same source position, so the parse loops or rejects strings
+// the IR accepts. `eliminateLeftRecursion` runs before `desugar` (it
+// has to — substitution works on the authored shape), so it never sees
+// the sugar as the nullable thing it is.
+//
+// Only alternatives that are actually hidden-left-recursive are
+// touched, so a grammar that compiles correctly today is unchanged.
+function expandNullableLeftPrefixes(prods: Production[]): Production[] {
+  return prods.map((p) => {
+    let alts = p.alts
+    // Each expansion shortens the leading sugar run of the alternative
+    // it splits, so this terminates; the guard is belt-and-braces.
+    const guard = alts.reduce((n, a) => n + a.length, 0) + 1
+    for (let round = 0; round < guard; round++) {
+      const idx = alts.findIndex((a) => isHiddenLeftRecursive(a, p.name))
+      if (idx < 0) break
+      const alt = alts[idx]
+      const present = nullableSugarPresent(alt[0]) as Sequence
+      alts = [
+        ...alts.slice(0, idx),
+        [...present, ...alt.slice(1)],
+        alt.slice(1),
+        ...alts.slice(idx + 1),
+      ]
+    }
+    return alts === p.alts ? p : { ...p, alts }
+  })
+}
+
+
 function eliminateLeftRecursion(grammar: Grammar): Grammar {
   const originalOrder = grammar.productions.map((p) => p.name)
 
@@ -211,11 +287,13 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
   // dependencies first is what makes nullable-prefixed hidden left
   // recursion reachable by the substitution step.
   let prods = topoOrderForPaull(
-    grammar.productions.map((p) => ({
-      name: p.name,
-      alts: p.alts.map((a) => a.slice()),
-      nodeKind: p.nodeKind,
-    })),
+    expandNullableLeftPrefixes(
+      grammar.productions.map((p) => ({
+        name: p.name,
+        alts: p.alts.map((a) => a.slice()),
+        nodeKind: p.nodeKind,
+      })),
+    ),
   )
 
   // Substitution normally runs for every production, even a cycle-free
@@ -1492,8 +1570,48 @@ function diagName(): string {
   return _diagName
 }
 
+// Wrap a pattern in a non-capturing group if — and only if — it has
+// top-level alternation.
+//
+// `^` binds tighter than `|`, so `^a|bc` means "starts with a" OR
+// "contains bc": the second branch is unanchored and can match at any
+// offset, producing a token from the wrong position. Grouping fixes
+// that. This matters far more now than it did for ABNF's `%x` ranges,
+// because GBNF alternation arrives as `regex` elements.
+//
+// The grouping is conditional rather than unconditional because
+// downstream front-ends read the emitted matcher's `source` to decide
+// whether a token is a plain character class — gbnf's eager-lexing pass
+// is one — and wrapping every pattern breaks that recognition.
+function hasTopLevelAlternation(pattern: string): boolean {
+  let inClass = false
+  let depth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '\\') { i++; continue }
+    if (inClass) { if (c === ']') inClass = false; continue }
+    if (c === '[') { inClass = true; continue }
+    if (c === '(') { depth++; continue }
+    if (c === ')') { if (depth > 0) depth--; continue }
+    if (c === '|' && depth === 0) return true
+  }
+  return false
+}
+
+function anchorable(pattern: string): string {
+  return hasTopLevelAlternation(pattern) ? '(?:' + pattern + ')' : pattern
+}
+
+
 function cloneGrammar(grammar: Grammar): Grammar {
+  // Spread the grammar, not just its productions. `emitGrammarSpec`
+  // reads `remove`/`clearAll` off the clone, so copying `productions`
+  // alone silently discarded them for any front-end that set those
+  // fields directly on the IR — a documented part of the `Grammar`
+  // contract. ABNF happened not to notice because it populates them via
+  // `resolveProseTerminals`, which runs on the clone.
   return {
+    ...grammar,
     productions: grammar.productions.map((p) => ({
       ...p,
       alts: p.alts.map((alt) => alt.slice()),
@@ -1585,7 +1703,7 @@ function emitGrammarSpec(
       if (!regexTokens.has(key)) {
         const name = allocTokenName('rx_' + el.pattern, usedNames)
         regexTokens.set(key, name)
-        matchTokens[name] = new RegExp('^' + el.pattern, el.flags)
+        matchTokens[name] = new RegExp('^' + anchorable(el.pattern), el.flags)
       }
     }
   }
@@ -1624,7 +1742,18 @@ function emitGrammarSpec(
   // without matching the end-of-source token lets trailing content
   // slip past tabnas's post-loop endtkn check (the lookahead buffer
   // outlives the parse loop).
-  const startWrapper = '__start__'
+  // Normally `__start__`, but the IR reserves no names, so a grammar is
+  // free to contain a production actually called that. Assigning
+  // unconditionally would overwrite the user's rule — and if it were
+  // also the start rule, the wrapper would push itself forever. Fall
+  // back to a numbered variant, the way the other synthetic passes
+  // allocate.
+  let startWrapper = '__start__'
+  if (knownRules.has(startWrapper)) {
+    let n = 2
+    while (knownRules.has(`__start${n}__`)) n++
+    startWrapper = `__start${n}__`
+  }
   ruleSpec[startWrapper] = {
     open: [{
       p: start,

@@ -185,11 +185,21 @@ export function toJsonic(value: any, opts: JsonicOptions = {}): string {
   const sep = strict ? ',\n' : '\n'
   const pad = (n: number) => ' '.repeat(ind * n)
 
+  // Every C0 control character has to be escaped, not just newline:
+  // strict mode promises valid JSON, and a raw tab, CR, backspace or
+  // form feed inside a string makes `JSON.parse` reject the output.
+  // Fixed-token literals can contain them.
+  const CTRL: Record<string, string> = {
+    '\b': '\\b', '\t': '\\t', '\n': '\\n', '\f': '\\f', '\r': '\\r',
+  }
+  const escCtrl = (c: string) =>
+    CTRL[c] ?? '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')
+
   const quote = (s: string, ch: string) =>
     ch + s
       .replace(/\\/g, '\\\\')
       .replace(new RegExp(ch, 'g'), '\\' + ch)
-      .replace(/\n/g, '\\n') + ch
+      .replace(/[\u0000-\u001f]/g, escCtrl) + ch
 
   const dq = (s: string) => quote(s, '"')
   const str = (s: string) => strict ? dq(s) : quote(s, "'")
@@ -319,7 +329,13 @@ function resolveTarget(
 export function attachActions(spec: GrammarSpec, actions: ActionsMap): GrammarSpec {
   const ref: Record<string, any> =
     ((spec as any).ref = (spec as any).ref ?? {})
+  // Start past whatever the ref map already holds. Resetting to 0 on
+  // every call meant a second `attachActions` reused `@bnf_user0`,
+  // overwrote the first call's function, and left the earlier alt
+  // pointing at the replacement — so one action ran twice and the other
+  // never ran at all.
   let counter = 0
+  while (`@bnf_user${counter}` in ref) counter++
 
   for (const key of Object.keys(actions)) {
     const fns = ([] as ActionFn[]).concat(actions[key] as any)
