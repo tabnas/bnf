@@ -109,6 +109,14 @@ type Production = {
   // the opt→group→push helper chain, so every iteration shares one
   // parent and the tree comes out flat.
   tailRepeat?: { sep: Sequence }
+  // Set by `desugar` on the generated helpers that terminate a
+  // repetition (`opt`/`star` and the tails of `plus`/`rep`). Their
+  // terminating alternative is empty, so it names no token — and the
+  // engine only offers a matcher at a position where the active rule
+  // names it. The emitter therefore guards that alternative with a
+  // FOLLOW-set peek, without which a repetition followed by a
+  // character class cannot terminate. See computeFollowSets.
+  repeatHelper?: boolean
   // Set on synthetic productions introduced by the probe-dispatch
   // rewriter. The emitter emits a phase-retry rule body instead of
   // compiling `alts` through the normal path.
@@ -194,6 +202,82 @@ type AmbiguityReport = {
 // grammars will enlarge — caller is expected to keep the grammar
 // reasonably small (this is a first-step converter, not a full
 // toolchain).
+// Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
+// Returns the element sequence for the branch where the sugar *does*
+// match at least once, or null if the element is not nullable sugar.
+//
+// This is deliberately narrow. A nullable *reference* (`A = b A`, `b =
+// "y" /`) is already handled by Paull's substitution below; what that
+// machinery cannot see is sugar, because it inspects `ref` elements and
+// this pass runs before `desugar`.
+function nullableSugarPresent(el: Element): Sequence | null {
+  if (el.kind === 'opt') return [el.inner]
+  if (el.kind === 'star') return [el.inner, el]
+  if (el.kind === 'rep' && el.min === 0) {
+    if (el.max === 0) return null
+    if (el.max === Infinity) return [el.inner, el]
+    if (el.max === 1) return [el.inner]
+    return [el.inner, { kind: 'rep', min: 0, max: el.max - 1, inner: el.inner }]
+  }
+  return null
+}
+
+
+// Does this alternative re-enter `name` at the same input position —
+// reachable only because everything before the self-reference can match
+// nothing? `A = ["x"] A "y"` is the shape: skip the leading nullable
+// sugar and the next element is a reference back to A.
+// Direct left recursion (`A = A "y"`) is excluded: there is no sugar to
+// split, and `eliminateDirectLeftRec` already removes it.
+function isHiddenLeftRecursive(alt: Sequence, name: string): boolean {
+  let sawSugar = false
+  for (const el of alt) {
+    if (el.kind === 'ref') return sawSugar && el.name === name
+    if (nullableSugarPresent(el) === null) return false
+    sawSugar = true
+  }
+  return false
+}
+
+
+// Split leading nullable sugar into explicit present/absent
+// alternatives, so that hidden left recursion becomes *direct* left
+// recursion that `eliminateDirectLeftRec` can then remove.
+//
+//   A = ["x"] A "y" / "z"    becomes    A = "x" A "y" / A "y" / "z"
+//
+// Without this the recursion survives into the emitted grammar: the
+// generated optional helper takes its empty branch and exposes A again
+// at the same source position, so the parse loops or rejects strings
+// the IR accepts. `eliminateLeftRecursion` runs before `desugar` (it
+// has to — substitution works on the authored shape), so it never sees
+// the sugar as the nullable thing it is.
+//
+// Only alternatives that are actually hidden-left-recursive are
+// touched, so a grammar that compiles correctly today is unchanged.
+function expandNullableLeftPrefixes(prods: Production[]): Production[] {
+  return prods.map((p) => {
+    let alts = p.alts
+    // Each expansion shortens the leading sugar run of the alternative
+    // it splits, so this terminates; the guard is belt-and-braces.
+    const guard = alts.reduce((n, a) => n + a.length, 0) + 1
+    for (let round = 0; round < guard; round++) {
+      const idx = alts.findIndex((a) => isHiddenLeftRecursive(a, p.name))
+      if (idx < 0) break
+      const alt = alts[idx]
+      const present = nullableSugarPresent(alt[0]) as Sequence
+      alts = [
+        ...alts.slice(0, idx),
+        [...present, ...alt.slice(1)],
+        alt.slice(1),
+        ...alts.slice(idx + 1),
+      ]
+    }
+    return alts === p.alts ? p : { ...p, alts }
+  })
+}
+
+
 function eliminateLeftRecursion(grammar: Grammar): Grammar {
   const originalOrder = grammar.productions.map((p) => p.name)
 
@@ -203,11 +287,13 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
   // dependencies first is what makes nullable-prefixed hidden left
   // recursion reachable by the substitution step.
   let prods = topoOrderForPaull(
-    grammar.productions.map((p) => ({
-      name: p.name,
-      alts: p.alts.map((a) => a.slice()),
-      nodeKind: p.nodeKind,
-    })),
+    expandNullableLeftPrefixes(
+      grammar.productions.map((p) => ({
+        name: p.name,
+        alts: p.alts.map((a) => a.slice()),
+        nodeKind: p.nodeKind,
+      })),
+    ),
   )
 
   // Substitution normally runs for every production, even a cycle-free
@@ -597,7 +683,9 @@ function desugar(grammar: Grammar): Grammar {
     if (el.kind === 'opt') {
       // H ::= inner | (empty)
       const name = freshName('opt_' + hint)
-      extra.push({ name, alts: [[inner], []], nodeKind: 'helper' })
+      extra.push({
+        name, alts: [[inner], []], nodeKind: 'helper', repeatHelper: true,
+      })
       return { kind: 'ref', name }
     }
 
@@ -605,7 +693,12 @@ function desugar(grammar: Grammar): Grammar {
       // H = inner H / (empty)
       const name = freshName('star_' + hint)
       const selfRef: Element = { kind: 'ref', name }
-      extra.push({ name, alts: [[inner, selfRef], []], nodeKind: 'helper' })
+      extra.push({
+        name,
+        alts: [[inner, selfRef], []],
+        nodeKind: 'helper',
+        repeatHelper: true,
+      })
       return { kind: 'ref', name }
     }
 
@@ -618,6 +711,7 @@ function desugar(grammar: Grammar): Grammar {
         name: tailName,
         alts: [[inner, tailRef], []],
         nodeKind: 'helper',
+        repeatHelper: true,
       })
       extra.push({
         name: plusName,
@@ -649,6 +743,7 @@ function desugar(grammar: Grammar): Grammar {
         name: tailStarName,
         alts: [[inner, tailStarRef], []],
         nodeKind: 'helper',
+        repeatHelper: true,
       })
       repAlt.push(tailStarRef)
     } else {
@@ -677,6 +772,7 @@ function desugar(grammar: Grammar): Grammar {
           name: optName,
           alts: [[groupRef], []],
           nodeKind: 'helper',
+          repeatHelper: true,
         })
         nestedRef = { kind: 'ref', name: optName }
       }
@@ -1474,8 +1570,48 @@ function diagName(): string {
   return _diagName
 }
 
+// Wrap a pattern in a non-capturing group if — and only if — it has
+// top-level alternation.
+//
+// `^` binds tighter than `|`, so `^a|bc` means "starts with a" OR
+// "contains bc": the second branch is unanchored and can match at any
+// offset, producing a token from the wrong position. Grouping fixes
+// that. This matters far more now than it did for ABNF's `%x` ranges,
+// because GBNF alternation arrives as `regex` elements.
+//
+// The grouping is conditional rather than unconditional because
+// downstream front-ends read the emitted matcher's `source` to decide
+// whether a token is a plain character class — gbnf's eager-lexing pass
+// is one — and wrapping every pattern breaks that recognition.
+function hasTopLevelAlternation(pattern: string): boolean {
+  let inClass = false
+  let depth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '\\') { i++; continue }
+    if (inClass) { if (c === ']') inClass = false; continue }
+    if (c === '[') { inClass = true; continue }
+    if (c === '(') { depth++; continue }
+    if (c === ')') { if (depth > 0) depth--; continue }
+    if (c === '|' && depth === 0) return true
+  }
+  return false
+}
+
+function anchorable(pattern: string): string {
+  return hasTopLevelAlternation(pattern) ? '(?:' + pattern + ')' : pattern
+}
+
+
 function cloneGrammar(grammar: Grammar): Grammar {
+  // Spread the grammar, not just its productions. `emitGrammarSpec`
+  // reads `remove`/`clearAll` off the clone, so copying `productions`
+  // alone silently discarded them for any front-end that set those
+  // fields directly on the IR — a documented part of the `Grammar`
+  // contract. ABNF happened not to notice because it populates them via
+  // `resolveProseTerminals`, which runs on the clone.
   return {
+    ...grammar,
     productions: grammar.productions.map((p) => ({
       ...p,
       alts: p.alts.map((alt) => alt.slice()),
@@ -1567,7 +1703,7 @@ function emitGrammarSpec(
       if (!regexTokens.has(key)) {
         const name = allocTokenName('rx_' + el.pattern, usedNames)
         regexTokens.set(key, name)
-        matchTokens[name] = new RegExp('^' + el.pattern, el.flags)
+        matchTokens[name] = new RegExp('^' + anchorable(el.pattern), el.flags)
       }
     }
   }
@@ -1575,6 +1711,8 @@ function emitGrammarSpec(
   const knownRules = new Set(grammar.productions.map((p) => p.name))
   const { firstSets, nullable } = computeFirstSets(
     grammar, literals, regexTokens)
+  const followSets = computeFollowSets(
+    grammar, literals, regexTokens, firstSets, nullable, start)
   const refs = new RefRegistry()
   refs.useBuiltins = !!opts?.builtins
   refs.emitMarks = !!opts?.marks
@@ -1595,7 +1733,7 @@ function emitGrammarSpec(
     // directly; multi-segment alts emit a chain of aux rules.
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
-      firstSets, nullable, refs,
+      firstSets, nullable, refs, followSets,
     )
   }
 
@@ -1604,7 +1742,18 @@ function emitGrammarSpec(
   // without matching the end-of-source token lets trailing content
   // slip past tabnas's post-loop endtkn check (the lookahead buffer
   // outlives the parse loop).
-  const startWrapper = '__start__'
+  // Normally `__start__`, but the IR reserves no names, so a grammar is
+  // free to contain a production actually called that. Assigning
+  // unconditionally would overwrite the user's rule — and if it were
+  // also the start rule, the wrapper would push itself forever. Fall
+  // back to a numbered variant, the way the other synthetic passes
+  // allocate.
+  let startWrapper = '__start__'
+  if (knownRules.has(startWrapper)) {
+    let n = 2
+    while (knownRules.has(`__start${n}__`)) n++
+    startWrapper = `__start${n}__`
+  }
   ruleSpec[startWrapper] = {
     open: [{
       p: start,
@@ -1991,6 +2140,7 @@ function emitProduction(
   firstSets: Map<string, Set<string>>,
   nullable: Set<string>,
   refs: RefRegistry,
+  followSets: Map<string, Set<string>>,
 ) {
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
@@ -2055,6 +2205,17 @@ function emitProduction(
       }
       const o = segmentToAlt(seg, tag, refs, true, prod.name, prodKind)
       if (mark) o.m = mark
+      // The terminating alternative of a repetition helper names no
+      // token, so the lexer is never asked to produce whatever follows
+      // the repetition. Re-issue that alternative once per FOLLOW
+      // token, peeking and pushing straight back (`b: 1`) so the token
+      // column widens without anything extra being consumed. The bare
+      // alternative stays last as the fallback.
+      if (alt.length === 0 && prod.repeatHelper) {
+        for (const tok of followSets.get(prod.name) ?? []) {
+          opens.push({ ...o, s: tok, b: 1 })
+        }
+      }
       opens.push(o)
     }
 
@@ -2172,6 +2333,12 @@ function emitProduction(
       g: tag,
     }
     if (dispatchMarks) o.m = '_'
+    // Same FOLLOW guard as the single-segment path above.
+    if (prod.repeatHelper) {
+      for (const tok of followSets.get(prod.name) ?? []) {
+        dispatchOpen.push({ ...o, s: tok, b: 1 })
+      }
+    }
     dispatchOpen.push(o)
   }
 
@@ -2301,6 +2468,98 @@ function computeFirstSets(
   }
 
   return { firstSets, nullable }
+}
+
+
+// FIRST of a sequence, reporting nullability separately rather than
+// collapsing it to `null` the way `firstOfAlt` does. FOLLOW needs both
+// halves of the answer: the tokens a suffix can start with, *and*
+// whether that suffix can vanish (in which case the enclosing rule's
+// FOLLOW carries through).
+function firstOfSeq(
+  seq: Sequence,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+  firstSets: Map<string, Set<string>>,
+  nullable: Set<string>,
+): { tokens: Set<string>; nullable: boolean } {
+  const tokens = new Set<string>()
+  for (const el of seq) {
+    if (el.kind === 'term' || el.kind === 'regex' || el.kind === 'token') {
+      tokens.add(el.kind === 'term'
+        ? literals.get(termKey(el)) as string
+        : el.kind === 'token'
+          ? el.name
+          : regexTokens.get(regexKey(el)) as string)
+      return { tokens, nullable: false }
+    }
+    if (el.kind === 'ref') {
+      for (const tok of firstSets.get(el.name) ?? []) tokens.add(tok)
+      if (!nullable.has(el.name)) return { tokens, nullable: false }
+      continue
+    }
+    throw new Error(
+      `${diagName()}: internal — unexpected kind in firstOfSeq: ${el.kind}`)
+  }
+  return { tokens, nullable: true }
+}
+
+
+// FOLLOW sets — the tokens that may legitimately appear immediately
+// after each production.
+//
+// This exists for one reason: the engine lexes *under the direction of
+// the active rule*. A matcher-backed token (a character class) is only
+// offered at a position where the current rule names it. A generated
+// repetition helper ends on an empty alternative, which names nothing,
+// so at the moment the loop could terminate the following token is not
+// on offer and the lex fails instead. `root ::= sign? [0-9]+` dies one
+// character in for exactly this reason.
+//
+// Naming FOLLOW on that terminating alternative puts those tokens back
+// in the rule's token column. The guard alternatives peek and push the
+// token straight back (`b: 1`), so they accept nothing extra — they
+// only widen what the lexer is willing to produce there.
+function computeFollowSets(
+  grammar: Grammar,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+  firstSets: Map<string, Set<string>>,
+  nullable: Set<string>,
+  start: string,
+): Map<string, Set<string>> {
+  const follow = new Map<string, Set<string>>()
+  for (const p of grammar.productions) follow.set(p.name, new Set())
+  // End-of-source can follow the start rule.
+  follow.get(start)?.add('#ZZ')
+
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const prod of grammar.productions) {
+      const prodFollow = follow.get(prod.name) as Set<string>
+      for (const alt of prod.alts) {
+        for (let i = 0; i < alt.length; i++) {
+          const el = alt[i]
+          if (el.kind !== 'ref') continue
+          const target = follow.get(el.name)
+          if (!target) continue
+          const add = (tok: string) => {
+            if (!target.has(tok)) { target.add(tok); changed = true }
+          }
+          const rest = firstOfSeq(
+            alt.slice(i + 1), literals, regexTokens, firstSets, nullable)
+          for (const tok of rest.tokens) add(tok)
+          // Nothing (or nothing mandatory) follows this reference inside
+          // the alternative, so whatever can follow the enclosing
+          // production can follow the reference too.
+          if (rest.nullable) for (const tok of prodFollow) add(tok)
+        }
+      }
+    }
+  }
+
+  return follow
 }
 
 
@@ -2522,6 +2781,19 @@ function escapeRegExp(s: string): string {
 }
 
 
+// Token names the engine's own matchers own. A lifted literal that
+// would land on one — `NR = "NR"` wants `#NR`, `end = "ZZ"` wants `#ZZ`
+// — must be renamed instead: the engine rejects a `fixed.token` entry
+// under a matcher-owned name at configuration time, so emitting it
+// turns an otherwise ordinary grammar into a hard failure before
+// parsing starts. Falling through to the numbered form (`#NR1`) costs
+// nothing but a less pretty name.
+function isEngineOwnedToken(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_TOKENS, name.slice(1)) ||
+    '#ZZ' === name || '#SP' === name || '#LN' === name || '#CM' === name
+}
+
+
 function allocTokenName(
   literal: string,
   used: Set<string>,
@@ -2531,7 +2803,7 @@ function allocTokenName(
   // name, so the emitted grammar reads `PL` rather than `T`.
   if (preferred) {
     const want = '#' + preferred
-    if (!used.has(want)) {
+    if (!used.has(want) && !isEngineOwnedToken(want)) {
       used.add(want)
       return want
     }
@@ -2541,7 +2813,7 @@ function allocTokenName(
     .toUpperCase()
     .replace(/^_+|_+$/g, '')
   const candidate = base.length > 0 ? '#' + base : '#T'
-  if (!used.has(candidate)) {
+  if (!used.has(candidate) && !isEngineOwnedToken(candidate)) {
     used.add(candidate)
     return candidate
   }

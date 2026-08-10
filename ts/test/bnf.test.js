@@ -16,6 +16,8 @@ const {
   escapeRegExp,
   BUILTIN_TOKENS,
   toJsonic,
+  attachActions,
+  markListing,
   VERSION,
 } = require('../dist/bnf')
 
@@ -104,6 +106,223 @@ describe('bnf', () => {
     const text = toJsonic(spec)
     assert.equal(typeof text, 'string')
     assert.ok(0 < text.length)
+  })
+
+  it('guards a repetition helper with its FOLLOW set', () => {
+    // A repetition helper terminates on an empty alternative, which
+    // names no token. The engine only offers a matcher where the active
+    // rule names it, so without a guard the token that follows the
+    // repetition is never lexed and the parse dies at the loop exit.
+    // See issue #3.
+    //
+    //   root = star D    where   star = *W
+    //
+    // The generated `_gen1_star_W` must name `#D` on its terminating
+    // alternative, peeking and pushing straight back so nothing extra
+    // is consumed.
+    const spec = emitGrammarSpec({
+      productions: [
+        {
+          name: 'root',
+          alts: [[{ kind: 'star', inner: ref('W') }, ref('D')]],
+        },
+        { name: 'W', alts: [[{ kind: 'regex', pattern: '[ ]', flags: '' }]] },
+        { name: 'D', alts: [[{ kind: 'regex', pattern: '[0-9]', flags: '' }]] },
+      ],
+    }, { tag: 'demo' })
+
+    // The helper itself, not its `$alt0`/`$step1` chain rules.
+    const starRule = Object.entries(spec.rule)
+      .find(([name]) => /^_gen\d+_star_/.test(name) && !name.includes('$'))
+    assert.ok(starRule, 'expected a generated star helper')
+
+    const [, rs] = starRule
+    const dToken = spec.rule.D.open[0].s
+    const guards = rs.open.filter((alt) => alt.s === dToken)
+    assert.equal(
+      guards.length, 1,
+      'the star helper must name D on its terminating alternative')
+    assert.equal(
+      guards[0].b, 1,
+      'the FOLLOW guard must push its peeked token back')
+    assert.ok(
+      !guards[0].p && !guards[0].r,
+      'the FOLLOW guard must not push or replace a rule')
+    // The unguarded empty alternative stays last as the fallback.
+    const last = rs.open[rs.open.length - 1]
+    assert.equal(last.s, undefined, 'expected a bare fallback alternative')
+  })
+
+  it('carries FOLLOW through a nullable suffix', () => {
+    // `root = star X Y` where X is nullable: what follows the star is
+    // FIRST(X) *and* FIRST(Y), because X can vanish.
+    const spec = emitGrammarSpec({
+      productions: [
+        {
+          name: 'root',
+          alts: [[{ kind: 'star', inner: ref('W') }, ref('X'), ref('Y')]],
+        },
+        { name: 'W', alts: [[{ kind: 'regex', pattern: '[ ]', flags: '' }]] },
+        { name: 'X', alts: [[token('#NR')], []] },
+        { name: 'Y', alts: [[token('#TX')]] },
+      ],
+    }, { tag: 'demo' })
+
+    const [, rs] = Object.entries(spec.rule)
+      .find(([name]) => /^_gen\d+_star_/.test(name) && !name.includes('$'))
+    const guarded = new Set(rs.open.map((alt) => alt.s).filter(Boolean))
+    assert.ok(guarded.has('#NR'), 'expected FIRST(X) in the guard')
+    assert.ok(
+      guarded.has('#TX'),
+      'expected FIRST(Y) in the guard, since X is nullable')
+  })
+
+  it('groups a regex before anchoring it', () => {
+    // `^` binds tighter than `|`, so `^a|bc` anchors only the first
+    // branch and the second can match anywhere in the input, producing
+    // a token from the wrong position. Issue #2 defect 2.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[{ kind: 'regex', pattern: 'a|bc', flags: '' }]] },
+      ],
+    }, { tag: 'demo' })
+
+    const re = Object.values(spec.options.match.token)[0]
+    assert.equal(re.source, '^(?:a|bc)')
+    // The point of the grouping: the second branch must not match at a
+    // non-zero offset.
+    assert.equal(re.test('xbc'), false)
+    assert.equal(re.test('bc'), true)
+  })
+
+  it('keeps grammar-level remove/clearAll across the internal clone', () => {
+    // `emitGrammarSpec` clones the grammar and then reads these fields
+    // off the clone, so a clone that copied only `productions` dropped
+    // them silently. Issue #2 defect 3.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[token('#NR')]] },
+        { name: 'gone', alts: [[token('#TX')]] },
+      ],
+      remove: ['gone'],
+      clearAll: true,
+    }, { tag: 'demo', start: 'top' })
+
+    assert.equal(spec.rule.gone, undefined, 'expected `gone` to be removed')
+    assert.equal(spec.clear, true, 'expected clearAll to set spec.clear')
+  })
+
+  it('does not overwrite a user rule named __start__', () => {
+    // The IR reserves no names, so a grammar may legitimately contain a
+    // production called `__start__`. Issue #2 defect 4.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: '__start__', alts: [[token('#NR')]] },
+      ],
+    }, { tag: 'demo' })
+
+    const start = spec.options.rule.start
+    assert.notEqual(
+      start, '__start__',
+      'the wrapper must not take the user rule\'s name')
+    // The user's rule survives, and the wrapper pushes it rather than
+    // pushing itself.
+    assert.deepEqual(spec.rule.__start__.open[0].s, '#NR')
+    assert.equal(spec.rule[start].open[0].p, '__start__')
+  })
+
+  it('escapes every control character in strict jsonic output', () => {
+    // Strict mode promises valid JSON; a raw tab or CR inside a string
+    // makes JSON.parse reject it. Issue #2 defect 5.
+    const text = toJsonic({ s: 'a\tb\rcd' }, { strict: true })
+    assert.doesNotThrow(() => JSON.parse(text))
+    assert.equal(JSON.parse(text).s, 'a\tb\rcd')
+  })
+
+  it('allocates fresh action refs on a second attachActions call', () => {
+    // The counter used to reset per call, so the second call reused
+    // `@bnf_user0` and clobbered the first. Issue #2 defect 6.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[term('x')], [term('y')]] },
+      ],
+    }, { tag: 'demo', marks: true })
+
+    // markListing renders `<rule>  o:<mark>  …`; the action ref for an
+    // alt is `@<rule>:<phase>:<mark>`.
+    const marks = markListing(spec)
+      .split('\n')
+      .map((line) => /^(\S+)\s+([oc]):(\S+)/.exec(line))
+      .filter(Boolean)
+      .filter((m) => m[1] === 'top' && m[3] !== '_')
+      .map((m) => `@${m[1]}:${m[2]}:${m[3]}`)
+    assert.ok(2 <= marks.length, 'expected at least two marked alts')
+
+    attachActions(spec, { [marks[0]]: () => 'first' })
+    attachActions(spec, { [marks[1]]: () => 'second' })
+
+    const refs = Object.entries(spec.ref)
+      .filter(([k]) => k.startsWith('@bnf_user'))
+    assert.equal(refs.length, 2, 'expected two distinct action refs')
+    assert.equal(
+      new Set(refs.map(([k]) => k)).size, 2, 'ref names must be distinct')
+  })
+
+  it('eliminates left recursion hidden behind nullable sugar', () => {
+    // `A = ["x"] A "y"` is left-recursive whenever the optional takes
+    // its empty branch, but elimination runs before desugar and so only
+    // sees a leading `opt`, not a leading ref. Issue #2 defect 1.
+    const grammar = {
+      productions: [{
+        name: 'A',
+        alts: [
+          [{ kind: 'opt', inner: term('x') }, ref('A'), term('y')],
+          [term('z')],
+        ],
+      }],
+    }
+
+    const out = eliminateLeftRecursion(grammar)
+    const a = out.productions.find((p) => p.name === 'A')
+    // No surviving alternative may re-enter A at the same position:
+    // every alt either starts with something that must consume input,
+    // or does not reference A first.
+    for (const alt of a.alts) {
+      const leads = alt.length > 0 && alt[0].kind === 'ref' &&
+        alt[0].name === 'A'
+      assert.equal(leads, false, 'A still re-enters itself immediately')
+      const hidden = alt.length > 1 && alt[0].kind === 'opt' &&
+        alt[1].kind === 'ref' && alt[1].name === 'A'
+      assert.equal(hidden, false, 'A still re-enters itself behind an opt')
+    }
+  })
+
+  it('never allocates a lifted literal an engine-owned token name', () => {
+    // `NR = "NR"` wanted `#NR`, which the lexer's number matcher owns.
+    // The engine rejects a fixed.token entry under a matcher-owned name
+    // at configuration time, so this turned an ordinary grammar into a
+    // hard failure before parsing began. Issue #2, footer note.
+    const lift = (lit) => emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[ref(lit)]] },
+        {
+          name: lit,
+          alts: [[{ kind: 'term', literal: lit, caseSensitive: true }]],
+        },
+      ],
+    }, { tag: 'demo' }).options.fixed.token
+
+    for (const owned of ['NR', 'TX', 'ST', 'VL', 'ZZ', 'SP', 'LN', 'CM']) {
+      const fixed = lift(owned)
+      assert.ok(
+        !Object.prototype.hasOwnProperty.call(fixed, '#' + owned),
+        `#${owned} is engine-owned and must not be allocated to a literal`)
+      // The literal still gets a token, just under a free name.
+      assert.deepEqual(Object.values(fixed), [owned])
+    }
+
+    // A name the engine does not own is still used as-is.
+    assert.deepEqual(lift('PL'), { '#PL': 'PL' })
   })
 
   it('exports a semver-shaped VERSION matching package.json', () => {
