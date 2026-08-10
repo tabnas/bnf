@@ -1,0 +1,38 @@
+# Publishes this repo's @tabnas/* package to npm on a `ts/v*` tag push, via
+# GitHub OIDC Trusted Publishing (no token). The build runs against the
+# ALREADY-PUBLISHED dependency versions (npm i resolves them), so a failing
+# build never publishes. The full test suite is gated separately: the
+# orchestrator (admin/publish.sh) verifies build+test locally against
+# published deps and requires a green main CI (polyglot-ci) before tagging.
+# Tests are not re-run here because some suites load sibling packages by path
+# (e.g. debug -> abnf), which don't exist in this standalone publish env.
+# Go modules are served by the module proxy from the `go/v*` tag directly.
+name: release
+
+on:
+  push:
+    tags:
+      - 'ts/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Build and publish to npm (OIDC trusted publishing)
+        working-directory: ts
+        run: |
+          npm install -g npm@latest
+          npm i
+          npm run build --if-present
+          npm publish --access public

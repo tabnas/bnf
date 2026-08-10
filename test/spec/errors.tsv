@@ -1,0 +1,2 @@
+input	expected	opts
+{ a = 1 }	ERROR
