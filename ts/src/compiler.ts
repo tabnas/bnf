@@ -2781,6 +2781,19 @@ function escapeRegExp(s: string): string {
 }
 
 
+// Token names the engine's own matchers own. A lifted literal that
+// would land on one — `NR = "NR"` wants `#NR`, `end = "ZZ"` wants `#ZZ`
+// — must be renamed instead: the engine rejects a `fixed.token` entry
+// under a matcher-owned name at configuration time, so emitting it
+// turns an otherwise ordinary grammar into a hard failure before
+// parsing starts. Falling through to the numbered form (`#NR1`) costs
+// nothing but a less pretty name.
+function isEngineOwnedToken(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_TOKENS, name.slice(1)) ||
+    '#ZZ' === name || '#SP' === name || '#LN' === name || '#CM' === name
+}
+
+
 function allocTokenName(
   literal: string,
   used: Set<string>,
@@ -2790,7 +2803,7 @@ function allocTokenName(
   // name, so the emitted grammar reads `PL` rather than `T`.
   if (preferred) {
     const want = '#' + preferred
-    if (!used.has(want)) {
+    if (!used.has(want) && !isEngineOwnedToken(want)) {
       used.add(want)
       return want
     }
@@ -2800,7 +2813,7 @@ function allocTokenName(
     .toUpperCase()
     .replace(/^_+|_+$/g, '')
   const candidate = base.length > 0 ? '#' + base : '#T'
-  if (!used.has(candidate)) {
+  if (!used.has(candidate) && !isEngineOwnedToken(candidate)) {
     used.add(candidate)
     return candidate
   }

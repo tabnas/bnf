@@ -297,6 +297,34 @@ describe('bnf', () => {
     }
   })
 
+  it('never allocates a lifted literal an engine-owned token name', () => {
+    // `NR = "NR"` wanted `#NR`, which the lexer's number matcher owns.
+    // The engine rejects a fixed.token entry under a matcher-owned name
+    // at configuration time, so this turned an ordinary grammar into a
+    // hard failure before parsing began. Issue #2, footer note.
+    const lift = (lit) => emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[ref(lit)]] },
+        {
+          name: lit,
+          alts: [[{ kind: 'term', literal: lit, caseSensitive: true }]],
+        },
+      ],
+    }, { tag: 'demo' }).options.fixed.token
+
+    for (const owned of ['NR', 'TX', 'ST', 'VL', 'ZZ', 'SP', 'LN', 'CM']) {
+      const fixed = lift(owned)
+      assert.ok(
+        !Object.prototype.hasOwnProperty.call(fixed, '#' + owned),
+        `#${owned} is engine-owned and must not be allocated to a literal`)
+      // The literal still gets a token, just under a free name.
+      assert.deepEqual(Object.values(fixed), [owned])
+    }
+
+    // A name the engine does not own is still used as-is.
+    assert.deepEqual(lift('PL'), { '#PL': 'PL' })
+  })
+
   it('exports a semver-shaped VERSION matching package.json', () => {
     assert.match(VERSION, /^\d+\.\d+\.\d+/)
     assert.equal(VERSION, require('../package.json').version)
