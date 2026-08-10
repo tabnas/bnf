@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-func ref(name string) *Element { return &Element{Kind: kindRef, Name: name} }
-func tok(name string) *Element { return &Element{Kind: kindToken, Name: name} }
+func ref(name string) *Element { return &Element{Kind: KindRef, Name: name} }
+func tok(name string) *Element { return &Element{Kind: KindToken, Name: name} }
 func term(lit string) *Element {
-	return &Element{Kind: kindTerm, Literal: lit}
+	return &Element{Kind: KindTerm, Literal: lit}
 }
 
 func TestCompilesMinimalGrammar(t *testing.T) {
@@ -78,7 +78,7 @@ func TestEliminatesLeftRecursion(t *testing.T) {
 			continue
 		}
 		for _, alt := range p.Alts {
-			if len(alt) > 0 && alt[0].Kind == kindRef && alt[0].Name == "expr" {
+			if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == "expr" {
 				t.Error("expr must no longer start with itself")
 			}
 		}

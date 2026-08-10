@@ -155,14 +155,14 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 	// bare `"+"` shows up).
 	named := []*Element{}
 	for _, el := range terminals {
-		if el.Kind == kindTerm && el.TokenName != "" {
+		if el.Kind == KindTerm && el.TokenName != "" {
 			named = append(named, el)
 		}
 	}
 	for _, el := range append(named, terminals...) {
-		if el.Kind == kindTerm {
+		if el.Kind == KindTerm {
 			allocTerm(el)
-		} else if el.Kind == kindRegex {
+		} else if el.Kind == KindRegex {
 			allocRegex(el)
 		}
 	}
@@ -260,13 +260,13 @@ func segmentize(alt Sequence, literals, regexTokens map[string]string) []segment
 	current := segment{}
 	for _, el := range alt {
 		switch el.Kind {
-		case kindTerm:
+		case KindTerm:
 			current.terms = append(current.terms, literals[termKey(el)])
-		case kindRegex:
+		case KindRegex:
 			current.terms = append(current.terms, regexTokens[regexKey(el)])
-		case kindToken:
+		case KindToken:
 			current.terms = append(current.terms, el.Name)
-		case kindRef:
+		case KindRef:
 			current.ref = el.Name
 			segs = append(segs, current)
 			current = segment{}
@@ -284,12 +284,12 @@ func isSingleSegment(alt Sequence) bool {
 	sawRef := false
 	for _, el := range alt {
 		switch el.Kind {
-		case kindRef:
+		case KindRef:
 			if sawRef {
 				return false
 			}
 			sawRef = true
-		case kindTerm, kindRegex, kindToken:
+		case KindTerm, KindRegex, KindToken:
 			if sawRef {
 				return false
 			}
@@ -302,7 +302,7 @@ func isSingleSegment(alt Sequence) bool {
 
 func validateRefs(alt Sequence, knownRules map[string]bool, ruleName string) error {
 	for _, el := range alt {
-		if el.Kind == kindRef && !knownRules[el.Name] {
+		if el.Kind == KindRef && !knownRules[el.Name] {
 			return fmt.Errorf(diagName()+": rule '%s' references unknown rule '%s'", ruleName, el.Name)
 		}
 	}
@@ -491,25 +491,25 @@ func altDiscriminator(alt Sequence, literals, regexTokens map[string]string) str
 	}
 	el := alt[0]
 	switch el.Kind {
-	case kindTerm:
+	case KindTerm:
 		s := strings.TrimPrefix(literals[termKey(el)], "#")
 		if s == "" {
 			return "_"
 		}
 		return s
-	case kindRegex:
+	case KindRegex:
 		s := strings.TrimPrefix(regexTokens[regexKey(el)], "#")
 		if s == "" {
 			return "_"
 		}
 		return s
-	case kindToken:
+	case KindToken:
 		s := strings.TrimPrefix(el.Name, "#")
 		if s == "" {
 			return "_"
 		}
 		return s
-	case kindRef:
+	case KindRef:
 		return el.Name
 	}
 	return "_"
@@ -838,7 +838,7 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 
 func allRefs(alt Sequence) bool {
 	for _, el := range alt {
-		if el.Kind != kindRef {
+		if el.Kind != KindRef {
 			return false
 		}
 	}
@@ -848,7 +848,7 @@ func allRefs(alt Sequence) bool {
 func anyHasRef(alts []Sequence) bool {
 	for _, alt := range alts {
 		for _, el := range alt {
-			if el.Kind == kindRef {
+			if el.Kind == KindRef {
 				return true
 			}
 		}

@@ -17,27 +17,27 @@ import (
 type ElemKind string
 
 const (
-	kindTerm  ElemKind = "term"
-	kindRef   ElemKind = "ref"
-	kindRegex ElemKind = "regex"
-	kindOpt   ElemKind = "opt"
-	kindStar  ElemKind = "star"
-	kindPlus  ElemKind = "plus"
-	kindRep   ElemKind = "rep"
-	kindGroup ElemKind = "group"
-	// kindToken is an engine builtin lexer token (e.g. #TX/#NR/#ST/#VL),
+	KindTerm  ElemKind = "term"
+	KindRef   ElemKind = "ref"
+	KindRegex ElemKind = "regex"
+	KindOpt   ElemKind = "opt"
+	KindStar  ElemKind = "star"
+	KindPlus  ElemKind = "plus"
+	KindRep   ElemKind = "rep"
+	KindGroup ElemKind = "group"
+	// KindToken is an engine builtin lexer token (e.g. #TX/#NR/#ST/#VL),
 	// produced by normalizeBuiltinTokens. Its token name is held in Name and
 	// is emitted verbatim into a rule's token sequence (no allocation, unlike
 	// a literal term).
-	kindToken ElemKind = "token"
-	// kindProse is an RFC 5234 prose-val (`<free text>`). Prose is
+	KindToken ElemKind = "token"
+	// KindProse is an RFC 5234 prose-val (`<free text>`). Prose is
 	// informational: it describes a terminal in English rather than defining
 	// one. The converter accepts it only as the entire body of a production
 	// naming a builtin lexer token (`NR = <number>`), where it documents the
 	// token the lexer already provides; resolveProseTerminals then drops the
 	// production so refs resolve to that builtin. Anywhere else there is
 	// nothing to compile, and it is an error. Text holds the prose body.
-	kindProse ElemKind = "prose"
+	KindProse ElemKind = "prose"
 )
 
 // Element is one element of an ABNF sequence (a term, ref, regex, or

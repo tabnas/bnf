@@ -89,7 +89,7 @@ func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string)
 			for _, alt := range prod.Alts {
 				altNullable := true
 				for _, el := range alt {
-					if el.Kind == kindTerm || el.Kind == kindRegex || el.Kind == kindToken {
+					if el.Kind == KindTerm || el.Kind == KindRegex || el.Kind == KindToken {
 						tok := tokenForTerminal(el, literals, regexTokens)
 						if !first[tok] {
 							first[tok] = true
@@ -98,7 +98,7 @@ func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string)
 						altNullable = false
 						break
 					}
-					if el.Kind == kindRef {
+					if el.Kind == KindRef {
 						refFirst := firstSets[el.Name]
 						for tok := range refFirst {
 							if !first[tok] {
@@ -126,9 +126,9 @@ func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string)
 
 func tokenForTerminal(el *Element, literals, regexTokens map[string]string) string {
 	switch el.Kind {
-	case kindTerm:
+	case KindTerm:
 		return literals[termKey(el)]
-	case kindToken:
+	case KindToken:
 		return el.Name
 	default:
 		return regexTokens[regexKey(el)]
@@ -141,11 +141,11 @@ func firstOfAlt(alt Sequence, literals, regexTokens map[string]string,
 	firstSets map[string]map[string]bool, nullable map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	for _, el := range alt {
-		if el.Kind == kindTerm || el.Kind == kindRegex || el.Kind == kindToken {
+		if el.Kind == KindTerm || el.Kind == KindRegex || el.Kind == KindToken {
 			out[tokenForTerminal(el, literals, regexTokens)] = true
 			return out
 		}
-		if el.Kind == kindRef {
+		if el.Kind == KindRef {
 			for tok := range firstSets[el.Name] {
 				out[tok] = true
 			}
@@ -178,16 +178,16 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 				continue
 			}
 			switch el.Kind {
-			case kindTerm:
+			case KindTerm:
 				next = append(next, prefixPath{
 					tokens: appendStr(p.tokens, literals[termKey(el)]), done: false})
-			case kindRegex:
+			case KindRegex:
 				next = append(next, prefixPath{
 					tokens: appendStr(p.tokens, regexTokens[regexKey(el)]), done: false})
-			case kindToken:
+			case KindToken:
 				next = append(next, prefixPath{
 					tokens: appendStr(p.tokens, el.Name), done: false})
-			case kindRef:
+			case KindRef:
 				if visited[el.Name] {
 					next = append(next, prefixPath{tokens: p.tokens, done: true})
 					continue
@@ -257,11 +257,11 @@ func emitProbeHelper(prod *Production, tag string, ruleSpec map[string]*tabnas.G
 	opens := []map[string]any{}
 	for _, el := range elems {
 		var tok string
-		if el.Kind == kindTerm {
+		if el.Kind == KindTerm {
 			tok = literals[termKey(el)]
-		} else if el.Kind == kindRegex {
+		} else if el.Kind == KindRegex {
 			tok = regexTokens[regexKey(el)]
-		} else if el.Kind == kindToken {
+		} else if el.Kind == KindToken {
 			tok = el.Name
 		}
 		if tok != "" {
@@ -277,11 +277,11 @@ func emitProbeDispatch(prod *Production, tag string, ruleSpec map[string]*tabnas
 	refs *refRegistry, literals, regexTokens map[string]string, useBuiltins bool) {
 	pd := prod.ProbeDisp
 	var disambiguatorToken string
-	if pd.Disambiguator.Kind == kindTerm {
+	if pd.Disambiguator.Kind == KindTerm {
 		disambiguatorToken = literals[termKey(pd.Disambiguator)]
-	} else if pd.Disambiguator.Kind == kindRegex {
+	} else if pd.Disambiguator.Kind == KindRegex {
 		disambiguatorToken = regexTokens[regexKey(pd.Disambiguator)]
-	} else if pd.Disambiguator.Kind == kindToken {
+	} else if pd.Disambiguator.Kind == KindToken {
 		disambiguatorToken = pd.Disambiguator.Name
 	}
 	if disambiguatorToken == "" {
