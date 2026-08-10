@@ -1,118 +1,108 @@
-# @tabnas/zon
+# @tabnas/bnf
 
-<!-- tabnas-badges -->
-[![npm](https://tabnas.github.io/status/badges/zon-npm.svg)](https://www.npmjs.com/package/@tabnas/zon)
-[![CI](https://github.com/tabnas/zon/actions/workflows/ci.yml/badge.svg)](https://github.com/tabnas/zon/actions/workflows/ci.yml)
-[![go](https://tabnas.github.io/status/badges/zon-go.svg)](https://pkg.go.dev/github.com/tabnas/zon/go)
-[![tabnas standard](https://tabnas.github.io/status/badges/zon-standard.svg)](https://tabnas.github.io/status/)
-<!-- /tabnas-badges -->
+The shared compiler behind the BNF-family grammar front-ends for the
+[tabnas](https://github.com/tabnas/parser) parsing engine.
 
-A grammar plugin that teaches the [Tabnas](https://github.com/tabnas/parser)
-parser to read [Zig Object Notation (ZON)](https://ziglang.org/documentation/master/#ZON) —
-the anonymous-struct data format used for `build.zig.zon` manifests.
-Available for both TypeScript and Go, built on the same grammar.
+This package holds **no notation of its own**. It defines an intermediate
+representation — a `Grammar` of `Production`s over `Element`s — and
+compiles that IR into a tabnas `GrammarSpec`. Each front-end parses one
+concrete syntax into the IR:
 
-ZON looks like this:
+| Front-end | Notation |
+|---|---|
+| [`@tabnas/abnf`](https://github.com/tabnas/abnf) | RFC 5234 ABNF |
+| [`@tabnas/gbnf`](https://github.com/tabnas/gbnf) | llama.cpp GBNF |
+| [`@tabnas/ebnf`](https://github.com/tabnas/ebnf) | EBNF (best effort) |
 
-```zon
-.{
-    .name = "example",
-    .version = "0.0.1",
-    .dependencies = .{
-        .foo = .{ .url = "https://example.com/foo.tar.gz", .hash = "1220deadbeef" },
-    },
-    .paths = .{ "build.zig", "src" },
+```
+ABNF / GBNF / EBNF text ──front-end──▶ Grammar ──emitGrammarSpec──▶ GrammarSpec
+```
+
+Everything hard about that second arrow lives here, and is shared:
+
+- **desugaring** repetition (`*A`, `1*A`, `m*nA`, `[A]`) into helper rules;
+- **left-recursion elimination**, rewriting a left-recursive rule into
+  iterative form so it runs on a push-down engine;
+- **tail-repeat rewriting**, turning `X = prefix [ sep X ]` into a
+  same-depth close-phase loop so iterations share one parent;
+- **probe dispatch**, the mark/rewind machinery for optional prefixes that
+  exceed the engine's bounded lookahead;
+- **literal lifting**, turning single-literal productions (`PL = "+"`)
+  into named lexer tokens (`#PL`);
+- **token allocation**, **first-set analysis**, and **chain emission**
+  through synthetic `$stepN` continuation rules.
+
+Writing a new front-end therefore means writing a parser for your
+notation that produces `Production[]` — and nothing else.
+
+## The IR
+
+```ts
+type Element =
+  | { kind: 'term'; literal: string; caseSensitive?: boolean; tokenName?: string }
+  | { kind: 'ref'; name: string }
+  | { kind: 'token'; name: string }        // an engine lexer token: #TX, #NR, …
+  | { kind: 'prose'; text: string }        // informational: `NR = <number>`
+  | { kind: 'regex'; pattern: string; flags: string }
+  | { kind: 'opt'; inner: Element }        // [ A ]
+  | { kind: 'star'; inner: Element }       // *A
+  | { kind: 'plus'; inner: Element }       // 1*A
+  | { kind: 'rep'; min: number; max: number; inner: Element }
+  | { kind: 'group'; alts: Sequence[] }
+
+type Sequence = Element[]
+
+type Production = {
+  name: string
+  alts: Sequence[]
+  nodeKind?: 'user' | 'core' | 'helper'
 }
+
+type Grammar = { productions: Production[] }
 ```
 
-## Install
+`caseSensitive` exists because ABNF quoted strings are case-*insensitive*
+by default while GBNF's are case-sensitive: the front-end states the
+intent and the emitter lowers it (case-folding regex, or a plain fixed
+token). `regex` is how character classes arrive — GBNF's `[a-z]`,
+ABNF's `%x41-5A` — since the engine matches those with a lexer matcher
+rather than a rule per character.
 
-```bash
-# TypeScript / JavaScript
-npm install @tabnas/parser @tabnas/jsonic @tabnas/zon
-
-# Go
-go get github.com/tabnas/zon/go@latest
-```
-
-## One tiny example
-
-**TypeScript** — the plugin layers onto a Tabnas engine:
+## Usage
 
 ```js
-import { Tabnas } from '@tabnas/parser'
-import { jsonic } from '@tabnas/jsonic'
-import { Zon } from '@tabnas/zon'
+const { emitGrammarSpec } = require('@tabnas/bnf')
 
-const j = new Tabnas().use(jsonic).use(Zon)
+// A front-end would build this from its own syntax.
+const grammar = {
+  productions: [
+    { name: 'val', alts: [[{ kind: 'ref', name: 'add' }]] },
+    { name: 'add', alts: [[{ kind: 'token', name: '#NR' }]] },
+  ],
+}
 
-j.parse('.{ .name = "Alice", .age = 30 }') // => { name: 'Alice', age: 30 }
-j.parse('.{ 1, 2, 3 }')                     // => [1, 2, 3]
+const spec = emitGrammarSpec(grammar, { tag: 'demo' })
+Object.keys(spec.rule).includes('val')   // => true
 ```
 
-**Go** — `tabnaszon.Parse` is the one-call entry point:
+## Options
 
-```go
-import tabnaszon "github.com/tabnas/zon/go"
+| Option | Effect |
+|---|---|
+| `start` | Start rule name (default: the first production). |
+| `tag` | Group tag stamped on every emitted alt (default `'bnf'`; front-ends pass their own, e.g. `'abnf'`). |
+| `builtins` | Emit probe dispatch and tree building as engine `$`-builtin refs instead of closures, keeping the spec function-free and serializable. |
+| `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
+| `wordKeywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. For tokenised, keyword-rich languages; leave off for char-level grammars. |
 
-result, _ := tabnaszon.Parse(`.{ .name = "Alice", .age = 30 }`)
-// map[string]any{"name": "Alice", "age": float64(30)}
-```
+## Provenance
 
-## Conformance
-
-`@tabnas/zon` accepts exactly the documents **ziglang/zig 0.16.0** accepts,
-and produces the same value for each. The reference implementation is the
-judge, not this repo: `scripts/fetch-zigzon.sh` downloads a pinned zig 0.16.0,
-builds a small oracle around the compiler's own `std.zig.Ast` + `std.zig.ZonGen`,
-and has it rule on every ZON document in the zig tree.
-
-| Corpus | Documents | Accepted correctly | Rejected correctly |
-|---|---|---|---|
-| Every `.zon` file in the zig tree, plus every snippet in `lib/std/zon/parse.zig` | 222 | 178 / 178 | 44 / 44 |
-| Leniency probes (`test/strictness/inputs.txt`), judged by the same oracle | 117 | 45 / 45 | 72 / 72 |
-
-Identical in both runtimes. Two documented deviations, both about
-representing a value that Zig resolves against a target type:
-
-- an integer literal too large for an exact IEEE-754 double is returned as a
-  `bigint` (TypeScript) / `*big.Int` (Go) rather than silently rounded;
-- `.{}` parses as the empty **list**, since an empty anonymous literal is both
-  an empty struct and an empty tuple until a type says otherwise.
-
-See [`AGENTS.md`](AGENTS.md#conformance-claim) for the full details.
-
-## Documentation
-
-Full documentation follows the [Diátaxis](https://diataxis.fr)
-framework — one file per quadrant, per language:
-
-| | TypeScript | Go |
-|---|---|---|
-| **Tutorial** (learning) | [ts/doc/tutorial.md](ts/doc/tutorial.md) | [go/doc/tutorial.md](go/doc/tutorial.md) |
-| **How-to guide** (tasks) | [ts/doc/guide.md](ts/doc/guide.md) | [go/doc/guide.md](go/doc/guide.md) |
-| **Reference** (API + options + syntax) | [ts/doc/reference.md](ts/doc/reference.md) | [go/doc/reference.md](go/doc/reference.md) |
-| **Concepts** (explanation) | [ts/doc/concepts.md](ts/doc/concepts.md) | [go/doc/concepts.md](go/doc/concepts.md) |
-
-Per-language hubs: [`ts/README.md`](ts/README.md),
-[`go/README.md`](go/README.md).
-
-## Grammar diagram
-
-The grammar is defined once in the top-level
-[`zon-grammar.jsonic`](zon-grammar.jsonic) and embedded into both
-implementations — TypeScript ([`ts/src/zon.ts`](ts/src/zon.ts)) and Go
-([`go/zon.go`](go/zon.go)) — by [`ts/embed-grammar.js`](ts/embed-grammar.js)
-during the TypeScript build. Edit the grammar there, not in the
-generated sources.
-
-As a railroad/syntax diagram, generated from the live grammar with
-[`@tabnas/railroad`](https://github.com/tabnas/railroad):
-
-![zon grammar railroad diagram](ts/doc/grammar.svg)
-
-ASCII version: [`ts/doc/grammar.txt`](ts/doc/grammar.txt).
+This code was extracted from `@tabnas/abnf`, where it grew up alongside
+the ABNF parser. The split is verified by that package's own suite: after
+moving ~2,500 lines here and rebuilding ABNF as a front-end, all 300 of
+its tests still pass, including the conformance run over 68 third-party
+`.abnf` files.
 
 ## License
 
-MIT. Copyright (c) Richard Rodger.
+MIT. Copyright (c) 2026 tabnas.
