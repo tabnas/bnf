@@ -1,4 +1,4 @@
-module github.com/tabnas/zon/go
+module github.com/tabnas/bnf/go
 
 go 1.24.7
 
