@@ -13,11 +13,11 @@ import "strconv"
 // isProbeableOpt: element is `[ X D ]` where X is one or more elements
 // and D is a terminal literal or a regex terminal. Returns (xSeq, D).
 func isProbeableOpt(el *Element) (Sequence, *Element, bool) {
-	if el.Kind != kindOpt {
+	if el.Kind != KindOpt {
 		return nil, nil, false
 	}
 	inner := el.Inner
-	if inner.Kind != kindGroup || len(inner.Alts) != 1 {
+	if inner.Kind != KindGroup || len(inner.Alts) != 1 {
 		return nil, nil, false
 	}
 	seq := inner.Alts[0]
@@ -25,7 +25,7 @@ func isProbeableOpt(el *Element) (Sequence, *Element, bool) {
 		return nil, nil, false
 	}
 	last := seq[len(seq)-1]
-	if last.Kind != kindTerm && last.Kind != kindRegex {
+	if last.Kind != KindTerm && last.Kind != KindRegex {
 		return nil, nil, false
 	}
 	xSeq := append(Sequence{}, seq[:len(seq)-1]...)
@@ -35,22 +35,22 @@ func isProbeableOpt(el *Element) (Sequence, *Element, bool) {
 func collectTerminalVocabElements(el *Element, grammar *Grammar,
 	out map[string]*Element, visited map[string]bool) {
 	switch el.Kind {
-	case kindTerm:
+	case KindTerm:
 		k := termKey(el)
 		if _, ok := out[k]; !ok {
 			out[k] = el
 		}
-	case kindRegex:
+	case KindRegex:
 		k := regexKey(el)
 		if _, ok := out[k]; !ok {
 			out[k] = el
 		}
-	case kindToken:
+	case KindToken:
 		// Key builtin tokens by their token name (e.g. "#TX").
 		if _, ok := out[el.Name]; !ok {
 			out[el.Name] = el
 		}
-	case kindRef:
+	case KindRef:
 		if visited[el.Name] {
 			return
 		}
@@ -64,9 +64,9 @@ func collectTerminalVocabElements(el *Element, grammar *Grammar,
 				collectTerminalVocabElements(sub, grammar, out, visited)
 			}
 		}
-	case kindOpt, kindStar, kindPlus, kindRep:
+	case KindOpt, KindStar, KindPlus, KindRep:
 		collectTerminalVocabElements(el.Inner, grammar, out, visited)
-	case kindGroup:
+	case KindGroup:
 		for _, alt := range el.Alts {
 			for _, sub := range alt {
 				collectTerminalVocabElements(sub, grammar, out, visited)
@@ -156,11 +156,11 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 				addVocab(xVocab, &vocabOrder)
 				addVocab(yVocab, &vocabOrder)
 				var dKey string
-				if disamb.Kind == kindTerm {
+				if disamb.Kind == KindTerm {
 					dKey = termKey(disamb)
-				} else if disamb.Kind == kindRegex {
+				} else if disamb.Kind == KindRegex {
 					dKey = regexKey(disamb)
-				} else if disamb.Kind == kindToken {
+				} else if disamb.Kind == KindToken {
 					dKey = disamb.Name
 				}
 				if dKey != "" {
@@ -195,8 +195,8 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 				extra = append(extra, &Production{
 					Name: dispatchName,
 					Alts: []Sequence{
-						{{Kind: kindRef, Name: withName}},
-						{{Kind: kindRef, Name: noName}},
+						{{Kind: KindRef, Name: withName}},
+						{{Kind: KindRef, Name: noName}},
 					},
 					ProbeDisp: &ProbeDispatchSpec{
 						ProbeRule:     probeName,
@@ -212,7 +212,7 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 					Reason: "optional prefix shares vocabulary with tail", Resolved: true,
 				})
 
-				resultAlt = append(resultAlt, &Element{Kind: kindRef, Name: dispatchName})
+				resultAlt = append(resultAlt, &Element{Kind: KindRef, Name: dispatchName})
 				i = len(alt)
 				touched = true
 			}

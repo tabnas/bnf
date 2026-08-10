@@ -13,11 +13,11 @@ import (
 func refsIn(alt Sequence, out map[string]bool) {
 	for _, el := range alt {
 		switch el.Kind {
-		case kindRef:
+		case KindRef:
 			out[el.Name] = true
-		case kindOpt, kindStar, kindPlus, kindRep:
+		case KindOpt, KindStar, KindPlus, KindRep:
 			refsIn(Sequence{el.Inner}, out)
-		case kindGroup:
+		case KindGroup:
 			for _, a := range el.Alts {
 				refsIn(a, out)
 			}
@@ -84,7 +84,7 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 	cyclic := findLeadingRefCycleMembers(prods)
 	isExemptAlias := func(p *Production) bool {
 		return len(p.Alts) == 1 && len(p.Alts[0]) == 1 &&
-			p.Alts[0][0].Kind == kindRef &&
+			p.Alts[0][0].Kind == KindRef &&
 			!cyclic[p.Name] && !cyclic[p.Alts[0][0].Name]
 	}
 
@@ -162,7 +162,7 @@ func findLeadingRefCycleMembers(prods []*Production) map[string]bool {
 			if len(alt) == 0 {
 				continue
 			}
-			if first := alt[0]; first.Kind == kindRef {
+			if first := alt[0]; first.Kind == KindRef {
 				if _, ok := byName[first.Name]; ok {
 					out = append(out, first.Name)
 				}
@@ -255,7 +255,7 @@ func topoOrderForPaull(prods []*Production) []*Production {
 		p := byName[name]
 		if p != nil {
 			for _, alt := range p.Alts {
-				if len(alt) > 0 && alt[0].Kind == kindRef {
+				if len(alt) > 0 && alt[0].Kind == KindRef {
 					if _, ok := byName[alt[0].Name]; ok {
 						visit(alt[0].Name)
 					}
@@ -278,7 +278,7 @@ func topoOrderForPaull(prods []*Production) []*Production {
 // the TS hasLeadingRefTo.
 func hasLeadingRefTo(prod *Production, name string) bool {
 	for _, alt := range prod.Alts {
-		if len(alt) > 0 && alt[0].Kind == kindRef && alt[0].Name == name {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == name {
 			return true
 		}
 	}
@@ -288,7 +288,7 @@ func hasLeadingRefTo(prod *Production, name string) bool {
 func substituteLeadingRef(target, source *Production) *Production {
 	newAlts := []Sequence{}
 	for _, alt := range target.Alts {
-		if len(alt) > 0 && alt[0].Kind == kindRef && alt[0].Name == source.Name {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == source.Name {
 			tail := append(Sequence{}, alt[1:]...)
 			for _, srcAlt := range source.Alts {
 				combined := append(append(Sequence{}, srcAlt...), tail...)
@@ -305,7 +305,7 @@ func eliminateDirectLeftRec(prod *Production) *Production {
 	recursive := []Sequence{}
 	seeds := []Sequence{}
 	for _, alt := range prod.Alts {
-		if len(alt) > 0 && alt[0].Kind == kindRef && alt[0].Name == prod.Name {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == prod.Name {
 			recursive = append(recursive, append(Sequence{}, alt[1:]...))
 		} else {
 			seeds = append(seeds, alt)
@@ -329,17 +329,17 @@ func eliminateDirectLeftRec(prod *Production) *Production {
 	if len(seeds) == 1 && len(seeds[0]) == 1 {
 		seedElement = seeds[0][0]
 	} else {
-		seedElement = &Element{Kind: kindGroup, Alts: seeds}
+		seedElement = &Element{Kind: KindGroup, Alts: seeds}
 	}
 	var tailInner *Element
 	if len(nonTrivial) == 1 && len(nonTrivial[0]) == 1 {
 		tailInner = nonTrivial[0][0]
 	} else {
-		tailInner = &Element{Kind: kindGroup, Alts: nonTrivial}
+		tailInner = &Element{Kind: KindGroup, Alts: nonTrivial}
 	}
 	return &Production{
 		Name:     prod.Name,
-		Alts:     []Sequence{{seedElement, {Kind: kindStar, Inner: tailInner}}},
+		Alts:     []Sequence{{seedElement, {Kind: KindStar, Inner: tailInner}}},
 		NodeKind: prod.NodeKind,
 	}
 }
@@ -360,7 +360,7 @@ func eliminateDirectLeftRec(prod *Production) *Production {
 // identical (the alignment TSVs pin the emitted shape cross-engine).
 func rewriteTailRepeats(grammar *Grammar, start string) *Grammar {
 	isTerminal := func(el *Element) bool {
-		return el.Kind == kindTerm || el.Kind == kindToken || el.Kind == kindRegex
+		return el.Kind == KindTerm || el.Kind == KindToken || el.Kind == KindRegex
 	}
 	allTerminal := func(seq Sequence) bool {
 		for _, el := range seq {
@@ -386,14 +386,14 @@ func rewriteTailRepeats(grammar *Grammar, start string) *Grammar {
 			continue
 		}
 		last := alt[len(alt)-1]
-		if last.Kind != kindOpt {
+		if last.Kind != KindOpt {
 			continue
 		}
 
 		// Normalize the option body to a sequence: `[ a b ]` parses as
 		// opt(group([[a, b]])); `[ a ]` as opt(a).
 		var seq Sequence
-		if last.Inner.Kind == kindGroup {
+		if last.Inner.Kind == KindGroup {
 			if len(last.Inner.Alts) != 1 {
 				continue
 			}
@@ -406,7 +406,7 @@ func rewriteTailRepeats(grammar *Grammar, start string) *Grammar {
 		}
 
 		tail := seq[len(seq)-1]
-		if tail.Kind != kindRef || tail.Name != prod.Name {
+		if tail.Kind != KindRef || tail.Name != prod.Name {
 			continue
 		}
 		sep := seq[:len(seq)-1]
@@ -455,20 +455,20 @@ func desugar(grammar *Grammar) *Grammar {
 	}
 	desugarElement = func(el *Element) *Element {
 		switch el.Kind {
-		case kindTerm, kindRef, kindRegex, kindToken:
+		case KindTerm, KindRef, KindRegex, KindToken:
 			return el
-		case kindProse:
+		case KindProse:
 			// Unreachable: resolveProseTerminals drops every prose element
 			// (or errors) before desugaring runs.
 			panic(fmt.Sprintf(diagName()+": internal: unresolved prose terminal '<%s>'", el.Text))
-		case kindGroup:
+		case KindGroup:
 			innerAlts := make([]Sequence, len(el.Alts))
 			for i, a := range el.Alts {
 				innerAlts[i] = desugarAlt(a)
 			}
 			name := freshName("group")
 			extra = append(extra, &Production{Name: name, Alts: innerAlts, NodeKind: "helper"})
-			return &Element{Kind: kindRef, Name: name}
+			return &Element{Kind: KindRef, Name: name}
 		}
 
 		inner := desugarElement(el.Inner)
@@ -477,41 +477,41 @@ func desugar(grammar *Grammar) *Grammar {
 		// builtin token carries its own, so `*PL` still yields
 		// `_genN_star_PL` rather than an anonymous `_genN_star_term`.
 		hint := "x"
-		if inner.Kind == kindRef {
+		if inner.Kind == KindRef {
 			hint = inner.Name
-		} else if inner.Kind == kindTerm {
+		} else if inner.Kind == KindTerm {
 			hint = "term"
 			if inner.TokenName != "" {
 				hint = inner.TokenName
 			}
-		} else if inner.Kind == kindToken {
+		} else if inner.Kind == KindToken {
 			hint = strings.TrimPrefix(inner.Name, "#")
 		}
 
 		switch el.Kind {
-		case kindOpt:
+		case KindOpt:
 			name := freshName("opt_" + hint)
 			extra = append(extra, &Production{
 				Name: name, Alts: []Sequence{{inner}, {}}, NodeKind: "helper"})
-			return &Element{Kind: kindRef, Name: name}
-		case kindStar:
+			return &Element{Kind: KindRef, Name: name}
+		case KindStar:
 			name := freshName("star_" + hint)
-			selfRef := &Element{Kind: kindRef, Name: name}
+			selfRef := &Element{Kind: KindRef, Name: name}
 			extra = append(extra, &Production{
 				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper"})
-			return &Element{Kind: kindRef, Name: name}
-		case kindPlus:
+			return &Element{Kind: KindRef, Name: name}
+		case KindPlus:
 			tailName := freshName("star_" + hint)
 			plusName := freshName("plus_" + hint)
-			tailRef := &Element{Kind: kindRef, Name: tailName}
+			tailRef := &Element{Kind: KindRef, Name: tailName}
 			extra = append(extra, &Production{
 				Name: tailName, Alts: []Sequence{{inner, tailRef}, {}}, NodeKind: "helper"})
 			extra = append(extra, &Production{
 				Name: plusName, Alts: []Sequence{{inner, tailRef}}, NodeKind: "helper"})
-			return &Element{Kind: kindRef, Name: plusName}
+			return &Element{Kind: KindRef, Name: plusName}
 		}
 
-		// kindRep — bounded m*n.
+		// KindRep — bounded m*n.
 		min, max := el.Min, el.Max
 		repName := freshName("rep_" + hint)
 		repAlt := Sequence{}
@@ -520,7 +520,7 @@ func desugar(grammar *Grammar) *Grammar {
 		}
 		if max == MaxInfinity {
 			tailStarName := freshName("star_" + hint)
-			tailStarRef := &Element{Kind: kindRef, Name: tailStarName}
+			tailStarRef := &Element{Kind: KindRef, Name: tailStarName}
 			extra = append(extra, &Production{
 				Name: tailStarName, Alts: []Sequence{{inner, tailStarRef}, {}}, NodeKind: "helper"})
 			repAlt = append(repAlt, tailStarRef)
@@ -547,12 +547,12 @@ func desugar(grammar *Grammar) *Grammar {
 				groupName := freshName("group")
 				extra = append(extra, &Production{
 					Name: groupName, Alts: []Sequence{seq}, NodeKind: "helper"})
-				groupRef := &Element{Kind: kindRef, Name: groupName}
+				groupRef := &Element{Kind: KindRef, Name: groupName}
 				optName := freshName("opt_" + groupName)
 				extra = append(extra, &Production{
 					Name: optName,
 					Alts: []Sequence{{groupRef}, {}}, NodeKind: "helper"})
-				nestedRef = &Element{Kind: kindRef, Name: optName}
+				nestedRef = &Element{Kind: KindRef, Name: optName}
 			}
 			if nestedRef != nil {
 				repAlt = append(repAlt, nestedRef)
@@ -560,7 +560,7 @@ func desugar(grammar *Grammar) *Grammar {
 		}
 		extra = append(extra, &Production{
 			Name: repName, Alts: []Sequence{desugarAlt(repAlt)}, NodeKind: "helper"})
-		return &Element{Kind: kindRef, Name: repName}
+		return &Element{Kind: KindRef, Name: repName}
 	}
 
 	rewritten := []*Production{}
@@ -717,11 +717,11 @@ func resolveProseTerminals(grammar *Grammar) error {
 	var findStray func(el *Element) *Element
 	findStray = func(el *Element) *Element {
 		switch el.Kind {
-		case kindProse:
+		case KindProse:
 			return el
-		case kindOpt, kindStar, kindPlus, kindRep:
+		case KindOpt, KindStar, KindPlus, KindRep:
 			return findStray(el.Inner)
-		case kindGroup:
+		case KindGroup:
 			for _, alt := range el.Alts {
 				for _, inner := range alt {
 					if hit := findStray(inner); hit != nil {
@@ -735,7 +735,7 @@ func resolveProseTerminals(grammar *Grammar) error {
 
 	for _, prod := range grammar.Productions {
 		onlyProse := len(prod.Alts) == 1 && len(prod.Alts[0]) == 1 &&
-			prod.Alts[0][0].Kind == kindProse
+			prod.Alts[0][0].Kind == KindProse
 
 		// A prose name is only ever the removal directive. Checked here as
 		// well as in the prose-body branch below, because `<all> = "x"` has a
@@ -865,7 +865,7 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 			continue
 		}
 		el := prod.Alts[0][0]
-		if el.Kind != kindTerm {
+		if el.Kind != KindTerm {
 			continue
 		}
 		// `path-empty = ""` (RFC 3986) matches the empty string — a rule that
@@ -885,7 +885,7 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 	byLiteral := map[string][]string{}
 	for _, name := range order {
 		lit := lifted[name]
-		key := termKey(&Element{Kind: kindTerm, Literal: lit.literal,
+		key := termKey(&Element{Kind: KindTerm, Literal: lit.literal,
 			CaseSensitive: lit.caseSensitive, HasCaseSens: lit.HasCaseSens})
 		byLiteral[key] = append(byLiteral[key], name)
 	}
@@ -901,7 +901,7 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 	}
 
 	mk := func(name string, lit liftedLit) *Element {
-		return &Element{Kind: kindTerm, Literal: lit.literal,
+		return &Element{Kind: KindTerm, Literal: lit.literal,
 			CaseSensitive: lit.caseSensitive, HasCaseSens: lit.HasCaseSens,
 			TokenName: name}
 	}
@@ -909,16 +909,16 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 	var walk func(el *Element) *Element
 	walk = func(el *Element) *Element {
 		switch el.Kind {
-		case kindRef:
+		case KindRef:
 			if lit, ok := lifted[el.Name]; ok {
 				return mk(el.Name, lit)
 			}
 			return el
-		case kindOpt, kindStar, kindPlus, kindRep:
+		case KindOpt, KindStar, KindPlus, KindRep:
 			cp := *el
 			cp.Inner = walk(el.Inner)
 			return &cp
-		case kindGroup:
+		case KindGroup:
 			alts := make([]Sequence, len(el.Alts))
 			for i, a := range el.Alts {
 				na := make(Sequence, len(a))
@@ -927,7 +927,7 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 				}
 				alts[i] = na
 			}
-			return &Element{Kind: kindGroup, Alts: alts}
+			return &Element{Kind: KindGroup, Alts: alts}
 		}
 		return el
 	}
@@ -962,7 +962,7 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 }
 
 // normalizeBuiltinTokens rewrites every bareword reference whose name is a
-// builtin token AND is not a defined production into a kindToken element. Run
+// builtin token AND is not a defined production into a KindToken element. Run
 // before any other pass so the rest of the pipeline treats these as ordinary
 // terminals. Go port of the TS normalizeBuiltinTokens.
 func normalizeBuiltinTokens(grammar *Grammar) {
@@ -973,16 +973,16 @@ func normalizeBuiltinTokens(grammar *Grammar) {
 	var walk func(el *Element) *Element
 	walk = func(el *Element) *Element {
 		switch el.Kind {
-		case kindRef:
+		case KindRef:
 			if tok, ok := builtinTokens[el.Name]; ok && !defined[el.Name] {
-				return &Element{Kind: kindToken, Name: tok}
+				return &Element{Kind: KindToken, Name: tok}
 			}
 			return el
-		case kindOpt, kindStar, kindPlus, kindRep:
+		case KindOpt, KindStar, KindPlus, KindRep:
 			cp := *el
 			cp.Inner = walk(el.Inner)
 			return &cp
-		case kindGroup:
+		case KindGroup:
 			alts := make([]Sequence, len(el.Alts))
 			for i, a := range el.Alts {
 				na := make(Sequence, len(a))
@@ -991,7 +991,7 @@ func normalizeBuiltinTokens(grammar *Grammar) {
 				}
 				alts[i] = na
 			}
-			return &Element{Kind: kindGroup, Alts: alts}
+			return &Element{Kind: KindGroup, Alts: alts}
 		}
 		return el
 	}
