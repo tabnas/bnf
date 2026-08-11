@@ -670,6 +670,80 @@ function seqEqual(a: Sequence, b: Sequence): boolean {
   return a.length === b.length && a.every((el, i) => elemEqual(el, b[i]))
 }
 
+// The most tokens a sequence can span, for deciding whether the
+// dispatcher's K-token lookahead can see past it. Runs on the raw IR —
+// left factoring precedes desugaring, so the sugar kinds are still
+// here and each has to be counted on its own terms. Returns Infinity
+// for anything unbounded (a star/plus, an unbounded rep, a cycle) or
+// unknown (prose), which is what makes factoring the only remedy.
+//
+// This must NOT be approximated by asking altPrefixesRaw: that walker
+// treats every element it does not recognise as a truncation, and
+// before desugar it recognises none of the sugar — so a bounded `("a")`
+// or `["-"]` read as unbounded and got factored, collapsing
+// alternatives the dispatcher separates perfectly well (and, with
+// `marks: true`, silently merging their user-visible marks).
+function seqTokenSpan(
+  seq: Sequence,
+  grammar: Grammar,
+  visited: Set<string>,
+): number {
+  let total = 0
+  for (const el of seq) {
+    total += elementTokenSpan(el, grammar, visited)
+    if (LOOKAHEAD_K < total) return Infinity
+  }
+  return total
+}
+
+function elementTokenSpan(
+  el: Element,
+  grammar: Grammar,
+  visited: Set<string>,
+): number {
+  switch (el.kind) {
+    case 'term':
+    case 'regex':
+    case 'token':
+      return 1
+    case 'prose':
+      return Infinity
+    case 'opt':
+      // Absent contributes 0, present contributes the inner span; the
+      // MOST it can span is the inner span.
+      return elementTokenSpan(el.inner, grammar, visited)
+    case 'star':
+    case 'plus':
+      return Infinity
+    case 'rep':
+      return Infinity === el.max
+        ? Infinity
+        : el.max * elementTokenSpan(el.inner, grammar, visited)
+    case 'group': {
+      let most = 0
+      for (const alt of el.alts) {
+        const n = seqTokenSpan(alt, grammar, visited)
+        if (most < n) most = n
+      }
+      return most
+    }
+    case 'ref': {
+      if (visited.has(el.name)) return Infinity
+      const target = grammar.productions.find((p) => p.name === el.name)
+      if (!target || 0 === target.alts.length) return Infinity
+      const sub = new Set(visited)
+      sub.add(el.name)
+      let most = 0
+      for (const alt of target.alts) {
+        const n = seqTokenSpan(alt, grammar, sub)
+        if (most < n) most = n
+      }
+      return most
+    }
+  }
+}
+
+
 // First-character coverage of an element, from the raw IR (token
 // allocation has not happened when left factoring runs). Returns null
 // when coverage cannot be established — a nullable element leaks its
@@ -818,12 +892,8 @@ function factorOnce(
 ): Sequence[] | null {
   const views = alts.map(unwrapAlt)
 
-  // Token allocation has not happened yet, so prefix length is probed
-  // with empty token maps — only path lengths and truncation matter.
-  const noLit = new Map<string, string>()
   const prefixBeyondLookahead = (prefix: Sequence): boolean =>
-    altPrefixesRaw(prefix, grammar, noLit, noLit, LOOKAHEAD_K).some(
-      (p) => p.done || p.tokens.length >= LOOKAHEAD_K)
+    LOOKAHEAD_K < seqTokenSpan(prefix, grammar, new Set())
 
   for (let i = 0; i < alts.length - 1; i++) {
     if (0 === views[i].length) continue
@@ -2069,6 +2139,16 @@ function emitGrammarSpec(
         const m = /^\(\?:(.*)\)$/.exec(src)
         if (m) src = m[1]
         r = patternCharRanges(src)
+        // A case-insensitive matcher covers both cases of every letter
+        // it names, and the pattern text only spells one of them. ABNF
+        // literals are case-insensitive by default, so without this an
+        // unquoted `"GET"` reads as covering `G` alone — no contest is
+        // detected against a lowercase identifier class, no guards are
+        // emitted, and a valid sentence is rejected. Keeps this in step
+        // with firstCharRangesOfElement, which folds case already.
+        if (null != r && re.flags.includes('i')) {
+          r = foldCaseRanges(r)
+        }
       }
     }
     rangeCache.set(tok, r)
@@ -2683,7 +2763,15 @@ function emitProduction(
       if (null == ri) continue
       for (let j = 0; j < entries.length; j++) {
         if (j === i || null == heads[j]) continue
-        if (entries[j].o.p === entries[i].o.p) continue
+        // Same descent target: the order between them is moot. Only
+        // when a descent EXISTS, though — terminal-only alternatives
+        // all carry `p: undefined`, and reading those as "same target"
+        // excludes the whole rule from the permutation, so
+        // `[0-9] / [2] [0-3]` keeps its 1-token entry first and
+        // misparses `23`.
+        if (null != entries[i].o.p && entries[j].o.p === entries[i].o.p) {
+          continue
+        }
         const rj = tokenRangesOf(heads[j] as string)
         if (null != rj && charRangesOverlap(ri, rj)) {
           idxs.push(i)
@@ -2692,9 +2780,21 @@ function emitProduction(
       }
     }
     if (idxs.length < 2) return
+    // How much the alternative behind an entry can consume in total.
+    // Two contested entries can carry the SAME lookahead length when
+    // the prefix walk was truncated by a descent (`[0-9]` beside
+    // `[1-9] [0-9]{0,15}`, both fanning out to one token), and then
+    // lookahead alone cannot rank them. The longer alternative is the
+    // more specific one, so it goes first — maximal munch again, one
+    // level up.
+    const spanKey = (e: { o: any; alt: Sequence | null }): number => {
+      if (null == e.alt) return 0
+      const n = seqTokenSpan(e.alt, grammar, new Set())
+      return Number.isFinite(n) ? n : 1e9
+    }
     const sorted = idxs
       .map((i) => entries[i])
-      .sort((a, b) => sLen(b.o) - sLen(a.o))
+      .sort((a, b) => sLen(b.o) - sLen(a.o) || spanKey(b) - spanKey(a))
     idxs.forEach((slot, k) => { entries[slot] = sorted[k] })
   }
 
@@ -3431,6 +3531,29 @@ function patternCharRanges(
     if (hi + 1 > next) next = hi + 1
   }
   if (next <= 0x10FFFF) out.push([next, 0x10FFFF])
+  return out
+}
+
+
+// Widen character ranges to cover both cases of every ASCII letter in
+// them, for matchers carrying the `i` flag. ASCII only: the ranges feed
+// contest detection between a keyword and a character class, and both
+// sides of that contest are ASCII in every notation this compiler
+// targets. A non-ASCII letter simply keeps its own case, which is the
+// conservative answer (a missed contest emits no guard).
+function foldCaseRanges(
+  ranges: Array<[number, number]>,
+): Array<[number, number]> {
+  const out: Array<[number, number]> = [...ranges]
+  const A = 0x41, Z = 0x5a, a = 0x61, z = 0x7a
+  const DELTA = a - A
+  for (const [lo, hi] of ranges) {
+    // Uppercase portion of the range -> its lowercase image, and back.
+    const uLo = Math.max(lo, A), uHi = Math.min(hi, Z)
+    if (uLo <= uHi) out.push([uLo + DELTA, uHi + DELTA])
+    const lLo = Math.max(lo, a), lHi = Math.min(hi, z)
+    if (lLo <= lHi) out.push([lLo - DELTA, lHi - DELTA])
+  }
   return out
 }
 
