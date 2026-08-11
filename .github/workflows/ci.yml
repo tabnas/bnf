@@ -13,8 +13,4 @@ jobs:
   ci:
     uses: tabnas/.github/.github/workflows/polyglot-ci.yml@main
     with:
-      deps: "parser debug json abnf railroad jsonic"
-      # abnf is a smoke-test dependent: it compiles against this repo's
-      # source, so this repo must build first (same inversion parser's
-      # caller documents).
-      build-order: "parser debug json jsonic bnf abnf railroad"
+      deps: "parser"
