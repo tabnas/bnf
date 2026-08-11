@@ -2151,8 +2151,25 @@ function emitGrammarSpec(
         }
       }
     }
-    rangeCache.set(tok, r)
-    return r
+    rangeCache.set(tok, null == r ? null : normalizeRanges(r))
+    return rangeCache.get(tok) as any
+  }
+
+  // Do two tokens' character coverages intersect? Memoised on the token
+  // PAIR, because the contest checks below are quadratic in dispatch
+  // entries while the distinct token pairs behind them are few — a
+  // grammar with hundreds of entries per rule asks the same handful of
+  // questions over and over.
+  const overlapCache = new Map<string, boolean>()
+  const tokensOverlap = (a: string, b: string): boolean => {
+    const key = a < b ? a + ' ' + b : b + ' ' + a
+    const hit = overlapCache.get(key)
+    if (undefined !== hit) return hit
+    const ra = tokenRangesOf(a)
+    const rb = tokenRangesOf(b)
+    const out = null != ra && null != rb && charRangesOverlap(ra, rb)
+    overlapCache.set(key, out)
+    return out
   }
 
   const refs = new RefRegistry()
@@ -2176,6 +2193,7 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
+      tokensOverlap,
     )
   }
 
@@ -2585,6 +2603,7 @@ function emitProduction(
   followSets: Map<string, Set<string>>,
   followPairs: Map<string, Map<string, Set<string>>>,
   tokenRangesOf: (tok: string) => Array<[number, number]> | null,
+  tokensOverlap: (a: string, b: string) => boolean,
 ) {
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
@@ -2611,13 +2630,11 @@ function emitProduction(
     const seen = new Set<string>()
     for (const [t, us] of pairs) {
       if (0 === us.size) continue
-      const tr = tokenRangesOf(t)
-      if (null == tr) continue
+      if (null == tokenRangesOf(t)) continue
       let contested = false
       for (const f of contFirst) {
         if (f === t) continue
-        const fr = tokenRangesOf(f)
-        if (null != fr && charRangesOverlap(tr, fr)) {
+        if (tokensOverlap(t, f)) {
           contested = true
           break
         }
@@ -2675,17 +2692,39 @@ function emitProduction(
   ): any[] => {
     const litToks = new Set(literals.values())
     const classToks = new Set(regexTokens.values())
-    const firstTokOf = (o: any): string | null =>
-      'string' === typeof o.s && 0 < o.s.length ? o.s.split(' ')[0] : null
-    const sLen = (o: any): number =>
-      'string' === typeof o.s ? o.s.split(' ').length : 0
 
-    const classIdx: number[] = []
-    for (let i = 0; i < entries.length; i++) {
-      const f = firstTokOf(entries[i].o)
-      if (null != f && classToks.has(f) && null != tokenRangesOf(f)) {
-        classIdx.push(i)
+    // Head token and lookahead length, resolved ONCE per entry. A
+    // dispatch list can hold hundreds of entries whose `s` is a
+    // four-token prefix, and this loop is quadratic in them — splitting
+    // those strings per comparison dominated compile time (a 332-rule
+    // grammar took a minute).
+    const N = entries.length
+    const heads: Array<string | null> = new Array(N)
+    const sLens: number[] = new Array(N)
+    for (let i = 0; i < N; i++) {
+      const s = entries[i].o.s
+      if ('string' !== typeof s || 0 === s.length) {
+        heads[i] = null
+        sLens[i] = 0
+        continue
       }
+      const sp = s.indexOf(' ')
+      heads[i] = -1 === sp ? s : s.substring(0, sp)
+      let n = 1
+      for (let k = 0; k < s.length; k++) if (32 === s.charCodeAt(k)) n++
+      sLens[i] = n
+    }
+
+    // Class-headed entries, with their character coverage resolved once.
+    const classIdx: number[] = []
+    const classRanges: Array<Array<[number, number]>> = []
+    for (let i = 0; i < N; i++) {
+      const f = heads[i]
+      if (null == f || !classToks.has(f)) continue
+      const r = tokenRangesOf(f)
+      if (null == r) continue
+      classIdx.push(i)
+      classRanges.push(r)
     }
     if (0 === classIdx.length) return entries.map((e) => e.o)
 
@@ -2694,26 +2733,46 @@ function emitProduction(
     let seq = 0
     const put = (o: any, rank: number) => placed.push({ o, rank, seq: seq++ })
 
-    for (let i = 0; i < entries.length; i++) {
+    // Which class entries a given literal head contests, decided once
+    // per distinct head token. Entries repeat their head heavily (one
+    // per lookahead prefix of the same alternative), and the scan below
+    // is quadratic, so without this the coverage test runs on every
+    // pair. A literal head is never itself a class head — the two token
+    // name sets are disjoint — so `c === i` cannot arise here.
+    const contestsByHead = new Map<string, Uint8Array>()
+
+    for (let i = 0; i < N; i++) {
       const { o, alt } = entries[i]
-      const f = firstTokOf(o)
+      const f = heads[i]
       const fr = null != f && litToks.has(f) ? tokenRangesOf(f) : null
-      const contesting = (null == fr || null == alt)
-        ? []
-        : classIdx.filter((c) => {
-          if (c === i) return false
-          const co = entries[c].o
+
+      // First and last contesting class entry, in one pass.
+      let firstC = -1
+      let lastC = -1
+      if (null != fr && null != alt) {
+        let hits = contestsByHead.get(f as string)
+        if (undefined === hits) {
+          hits = new Uint8Array(classIdx.length)
+          for (let k = 0; k < classIdx.length; k++) {
+            hits[k] = charRangesOverlap(fr, classRanges[k]) ? 1 : 0
+          }
+          contestsByHead.set(f as string, hits)
+        }
+        for (let k = 0; k < classIdx.length; k++) {
+          if (0 === hits[k]) continue
+          const c = classIdx[k]
           // Same descent target either way — order is moot.
-          if (null != o.p && co.p === o.p) return false
-          const cr = tokenRangesOf(firstTokOf(co) as string)
-          return null != cr && charRangesOverlap(fr, cr)
-        })
+          if (null != o.p && entries[c].o.p === o.p) continue
+          if (-1 === firstC) firstC = c
+          lastC = c
+        }
+      }
 
-      if (0 === contesting.length) { put(o, i); continue }
-      const front = contesting[0] - 0.5
-      const back = contesting[contesting.length - 1] + 0.5
+      if (-1 === firstC) { put(o, i); continue }
+      const front = firstC - 0.5
+      const back = lastC + 0.5
 
-      if (2 <= sLen(o)) {
+      if (2 <= sLens[i]) {
         // Already carries its own lookahead — just outrank the class.
         put(o, Math.min(i, front))
         continue
@@ -2748,21 +2807,39 @@ function emitProduction(
     entries: Array<{ o: any; alt: Sequence | null }>,
   ): void => {
     const classToks = new Set(regexTokens.values())
-    const sLen = (o: any): number =>
-      'string' === typeof o.s ? o.s.split(' ').length : 0
-    const heads: Array<string | null> = entries.map(({ o, alt }) => {
-      if (null == alt) return null
-      const f = 'string' === typeof o.s && 0 < o.s.length
-        ? o.s.split(' ')[0] : null
-      return null != f && classToks.has(f) ? f : null
-    })
+    // Head token and lookahead length once per entry — the loop below
+    // is quadratic, and re-splitting multi-token `s` strings inside it
+    // is what made large grammars slow.
+    const N = entries.length
+    const sLens: number[] = new Array(N)
+    const heads: Array<string | null> = new Array(N)
+    for (let i = 0; i < N; i++) {
+      const { o, alt } = entries[i]
+      const s = o.s
+      if ('string' !== typeof s || 0 === s.length) {
+        heads[i] = null
+        sLens[i] = 0
+        continue
+      }
+      let n = 1
+      for (let k = 0; k < s.length; k++) if (32 === s.charCodeAt(k)) n++
+      sLens[i] = n
+      if (null == alt) { heads[i] = null; continue }
+      const sp = s.indexOf(' ')
+      const f = -1 === sp ? s : s.substring(0, sp)
+      heads[i] = classToks.has(f) ? f : null
+    }
+    // Coverage per candidate head, resolved once.
+    const ranges: Array<Array<[number, number]> | null> = new Array(N)
+    for (let i = 0; i < N; i++) {
+      ranges[i] = null == heads[i] ? null : tokenRangesOf(heads[i] as string)
+    }
     const idxs: number[] = []
-    for (let i = 0; i < entries.length; i++) {
-      if (null == heads[i]) continue
-      const ri = tokenRangesOf(heads[i] as string)
+    for (let i = 0; i < N; i++) {
+      const ri = ranges[i]
       if (null == ri) continue
-      for (let j = 0; j < entries.length; j++) {
-        if (j === i || null == heads[j]) continue
+      for (let j = 0; j < N; j++) {
+        if (j === i || null == ranges[j]) continue
         // Same descent target: the order between them is moot. Only
         // when a descent EXISTS, though — terminal-only alternatives
         // all carry `p: undefined`, and reading those as "same target"
@@ -2772,8 +2849,7 @@ function emitProduction(
         if (null != entries[i].o.p && entries[j].o.p === entries[i].o.p) {
           continue
         }
-        const rj = tokenRangesOf(heads[j] as string)
-        if (null != rj && charRangesOverlap(ri, rj)) {
+        if (charRangesOverlap(ri, ranges[j] as Array<[number, number]>)) {
           idxs.push(i)
           break
         }
@@ -2787,14 +2863,19 @@ function emitProduction(
     // lookahead alone cannot rank them. The longer alternative is the
     // more specific one, so it goes first — maximal munch again, one
     // level up.
-    const spanKey = (e: { o: any; alt: Sequence | null }): number => {
-      if (null == e.alt) return 0
-      const n = seqTokenSpan(e.alt, grammar, new Set())
-      return Number.isFinite(n) ? n : 1e9
+    // Computed once per contested entry, not inside the comparator.
+    const spans = new Map<number, number>()
+    for (const i of idxs) {
+      const alt = entries[i].alt
+      const n = null == alt ? 0 : seqTokenSpan(alt, grammar, new Set())
+      spans.set(i, Number.isFinite(n) ? n : 1e9)
     }
     const sorted = idxs
+      .slice()
+      .sort((a, b) =>
+        sLens[b] - sLens[a] ||
+        (spans.get(b) as number) - (spans.get(a) as number))
       .map((i) => entries[i])
-      .sort((a, b) => sLen(b.o) - sLen(a.o) || spanKey(b) - spanKey(a))
     idxs.forEach((slot, k) => { entries[slot] = sorted[k] })
   }
 
@@ -2810,12 +2891,9 @@ function emitProduction(
     if (null == mine) return false
     const fol = followSets.get(prod.name) ?? new Set<string>()
     for (const t of mine) {
-      const rt = tokenRangesOf(t)
       for (const f of fol) {
         if (f === t) return true
-        if (null == rt) continue
-        const rf = tokenRangesOf(f)
-        if (null != rf && charRangesOverlap(rt, rf)) return true
+        if (tokensOverlap(t, f)) return true
       }
     }
     return false
@@ -2837,11 +2915,8 @@ function emitProduction(
         other, literals, regexTokens, firstSets, nullable)
       if (null == theirs) continue
       for (const t of mine) {
-        const rt = tokenRangesOf(t)
-        if (null == rt) continue
         for (const u of theirs) {
-          const ru = tokenRangesOf(u)
-          if (null != ru && charRangesOverlap(rt, ru)) return true
+          if (tokensOverlap(t, u)) return true
         }
       }
     }
@@ -3558,14 +3633,45 @@ function foldCaseRanges(
 }
 
 
+// Sort by low bound and merge touching/overlapping spans, so the
+// overlap test below can sweep both sides once instead of comparing
+// every pair. Called from tokenRangesOf, whose result is cached, so
+// each token pays for this at most once.
+function normalizeRanges(
+  r: Array<[number, number]>,
+): Array<[number, number]> {
+  if (r.length < 2) return r
+  const sorted = r.slice().sort((x, y) => x[0] - y[0] || x[1] - y[1])
+  const out: Array<[number, number]> = [sorted[0]]
+  for (let i = 1; i < sorted.length; i++) {
+    const last = out[out.length - 1]
+    const cur = sorted[i]
+    if (cur[0] <= last[1] + 1) {
+      if (last[1] < cur[1]) last[1] = cur[1]
+    } else {
+      out.push(cur)
+    }
+  }
+  return out
+}
+
+
+// Do two coverages share a character? Both sides come from
+// tokenRangesOf and are therefore sorted and merged, so one linear
+// sweep decides it. This runs inside the quadratic contest loops, and
+// a pairwise scan here is what made a 332-rule grammar take a minute.
 function charRangesOverlap(
   a: Array<[number, number]>,
   b: Array<[number, number]>,
 ): boolean {
-  for (const [alo, ahi] of a) {
-    for (const [blo, bhi] of b) {
-      if (alo <= bhi && blo <= ahi) return true
-    }
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    const ai = a[i]
+    const bj = b[j]
+    if (ai[0] <= bj[1] && bj[0] <= ai[1]) return true
+    if (ai[1] < bj[1]) i++
+    else j++
   }
   return false
 }
