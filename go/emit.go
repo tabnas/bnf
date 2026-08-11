@@ -645,16 +645,41 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		}
 	}
 
-	// Suffix-debt guard for a contested left-recursion tail loop: the loop
-	// may only keep going while no enclosing frame owes the token it repeats.
-	// Applies to the continue alternatives and never to the empty fallback,
-	// which is what lets the loop yield rather than fail. The value is the
-	// scalar `$eq` shorthand, which both runtimes accept. See
-	// resolveSuffixDebts.
+	// Suffix-debt guard for a contested left-recursion tail loop: a branch
+	// that would eat a token an enclosing frame still owes may only run while
+	// the debt is zero. Applies to the continue alternatives and never to the
+	// empty fallback, which is what lets the loop yield rather than fail.
+	//
+	// Only the branches whose head token is contested are guarded. A loop
+	// built from several tails repeats several tokens, and the ones the suffix
+	// does not compete for must stay open at any debt — otherwise
+	// `A = A "y" / A "w" / "x" A "y" / "z"` rejects `xzwy`, where the inner A
+	// must consume the `w` before yielding the `y`.
+	//
+	// The value is the scalar `$eq` shorthand, which both runtimes accept.
+	// See resolveSuffixDebts.
+	owed := map[string]bool{}
+	for _, t := range prod.DebtOwed {
+		owed[t] = true
+	}
 	debtGuard := func(o map[string]any) map[string]any {
-		if prod.DebtGuard != "" {
-			o["c"] = map[string]any{"n." + prod.DebtGuard: 0}
+		if prod.DebtGuard == "" || len(owed) == 0 {
+			return o
 		}
+		// Entries are keyed by the token sequence they peek, so the head token
+		// says which branch this is. A continue alternative always names one;
+		// if it somehow does not, guard it — that is the direction that keeps
+		// the loop from starving its parent.
+		if s, ok := o["s"].(string); ok {
+			head := s
+			if i := strings.IndexByte(s, ' '); i >= 0 {
+				head = s[:i]
+			}
+			if !owed[head] {
+				return o
+			}
+		}
+		o["c"] = map[string]any{"n." + prod.DebtGuard: 0}
 		return o
 	}
 

@@ -139,6 +139,13 @@ type Production = {
   // derived from, and confirmed by `resolveSuffixDebts`. Names the
   // counter whose value must be zero for the loop to keep going.
   debtGuard?: string
+  // The loop's own FIRST tokens that an enclosing suffix can actually
+  // compete for, set by `resolveSuffixDebts` alongside `debtGuard`. Only
+  // the branches that could eat one of these are guarded: a multi-tail
+  // loop (`A = A "y" / A "w" / "x" A "y" / "z"`) owes a `"y"` and
+  // nothing else, so blocking its `"w"` branch as well would reject
+  // `xzwy`.
+  debtOwed?: string[]
   // Set on synthetic productions introduced by the probe-dispatch
   // rewriter. The emitter emits a phase-retry rule body instead of
   // compiling `alts` through the normal path.
@@ -544,7 +551,10 @@ function substituteLeadingRef(
 // identifier avoids quoting — so reduce the rule name to word
 // characters and disambiguate against what has already been handed out.
 function freshDebtCounter(ruleName: string, used: Set<string>): string {
-  const base = 'debt_' + ruleName.replace(/[^A-Za-z0-9_]/g, '_')
+  // Unicode-aware, so an astral rule name reduces to one underscore per
+  // code point rather than one per UTF-16 surrogate half — the Go port
+  // iterates runes, and the two must agree on the name they mint.
+  const base = 'debt_' + ruleName.replace(/[^A-Za-z0-9_]/gu, '_')
   let name = base
   let i = 0
   while (used.has(name)) name = base + '_' + (++i)
@@ -553,23 +563,21 @@ function freshDebtCounter(ruleName: string, used: Set<string>): string {
 }
 
 
-// Does any seed alternative re-enter this rule at a non-leading
-// position with something mandatory left to match after it? That is
-// the shape whose inner tail loop competes with the enclosing
-// alternative's suffix — see `resolveSuffixDebts`, which decides
-// whether the competition is real once FIRST sets exist.
+// Does any seed alternative re-enter this rule at all? A seed that does
+// is the shape whose inner tail loop can compete with the enclosing
+// alternative's suffix.
 //
-// Only the top level of each seed is inspected: a self-reference
-// buried inside a group is not seen here, and is not seen by
-// `isHiddenLeftRecursive` either.
-function hasSelfRefWithSuffix(seeds: Sequence[], name: string): boolean {
-  for (const alt of seeds) {
-    for (let i = 0; i < alt.length - 1; i++) {
-      const el = alt[i]
-      if (el.kind === 'ref' && el.name === name) return true
-    }
-  }
-  return false
+// This is only a cheap pre-filter: it decides whether to allocate a
+// counter, not whether one is warranted. `resolveSuffixDebts` does the
+// real analysis on the desugared grammar — where a self-reference buried
+// in a group has become an ordinary reference in an ordinary production
+// — and drops the flag again when nothing turns out to compete. So the
+// filter can afford to say yes broadly, and has to: reading only the top
+// level of each seed missed `A = A "y" / ( "x" A "y" / "z" )` entirely.
+function seedsReferenceSelf(seeds: Sequence[], name: string): boolean {
+  const refs = new Set<string>()
+  for (const alt of seeds) refsIn(alt, refs)
+  return refs.has(name)
 }
 
 
@@ -641,7 +649,7 @@ function eliminateDirectLeftRec(
   // collide (`A = A "w" / "(" A ")" / "z"` — `")"` never contests
   // `"w"`). Issue #6.
   const star: Element = { kind: 'star', inner: tailInner }
-  if (hasSelfRefWithSuffix(seeds, prod.name)) {
+  if (seedsReferenceSelf(seeds, prod.name)) {
     star.debtGuard = freshDebtCounter(prod.name, debtNames)
   }
 
@@ -2223,12 +2231,6 @@ function emitGrammarSpec(
   const knownRules = new Set(grammar.productions.map((p) => p.name))
   const { firstSets, nullable } = computeFirstSets(
     grammar, literals, regexTokens)
-  // Settle the contested left-recursion tail loops flagged during
-  // elimination, now that FIRST sets can say whether the competition
-  // is real. Runs on the desugared grammar because the loop is a
-  // helper production by this point, and before FOLLOW because it may
-  // drop a flag but never changes the language.
-  resolveSuffixDebts(grammar, literals, regexTokens, firstSets, nullable)
   const followSets = computeFollowSets(
     grammar, literals, regexTokens, firstSets, nullable, start)
   const followPairs = computeFollowPairs(
@@ -2287,6 +2289,15 @@ function emitGrammarSpec(
     overlapCache.set(key, out)
     return out
   }
+
+  // Settle the contested left-recursion tail loops flagged during
+  // elimination, now that FIRST sets can say whether the competition is
+  // real and `tokensOverlap` can say so at the character level. Runs on
+  // the desugared grammar, because the loop is a helper production by
+  // this point, and only annotates — it never changes the language the
+  // grammar describes, so nothing computed above depends on it.
+  resolveSuffixDebts(
+    grammar, literals, regexTokens, firstSets, nullable, tokensOverlap)
 
   const refs = new RefRegistry()
   refs.useBuiltins = !!opts?.builtins
@@ -3047,22 +3058,38 @@ function emitProduction(
     return false
   }
 
-  // Suffix-debt guard for a contested left-recursion tail loop: the
-  // loop may only keep going while no enclosing frame owes the token it
-  // repeats. Applies to the continue alternatives (`alt` non-empty) and
-  // never to the exit peeks or the bare fallback, which is what lets
-  // the loop yield rather than fail. See `resolveSuffixDebts`.
+  // Suffix-debt guard for a contested left-recursion tail loop: a branch
+  // that would eat a token an enclosing frame still owes may only run
+  // while the debt is zero. Applies to the continue alternatives (`alt`
+  // non-empty) and never to the exit peeks or the bare fallback, which
+  // is what lets the loop yield rather than fail.
+  //
+  // Only the branches whose head token is contested are guarded. A loop
+  // built from several tails repeats several tokens, and the ones the
+  // suffix does not compete for must stay open at any debt — otherwise
+  // `A = A "y" / A "w" / "x" A "y" / "z"` rejects `xzwy`, where the
+  // inner A must consume the `w` before yielding the `y`.
+  // See `resolveSuffixDebts`.
   const applyDebtGuard = (
     list: Array<{ o: any; alt: Sequence | null }>,
   ): void => {
-    if (null == prod.debtGuard) return
+    if (null == prod.debtGuard || null == prod.debtOwed) return
+    const owed = new Set(prod.debtOwed)
     // Scalar shorthand for `$eq`, which both runtimes accept — the Go
     // engine's declarative form takes an int or a `CondOp`, not a nested
     // operator object, so this is the one spelling that is shape-identical
     // in each.
     const c = { ['n.' + prod.debtGuard]: 0 }
     for (const e of list) {
-      if (null != e.alt && 0 < e.alt.length) e.o.c = c
+      if (null == e.alt || 0 === e.alt.length) continue
+      // Entries are keyed by the token sequence they peek, so the head
+      // token says which branch this is. A continue alternative always
+      // names one; if it somehow does not, guard it — that is the
+      // direction that keeps the loop from starving its parent.
+      const s = e.o.s
+      const head = 'string' === typeof s ? s.split(' ')[0] : null
+      if (null != head && !owed.has(head)) continue
+      e.o.c = c
     }
   }
 
@@ -3503,11 +3530,23 @@ function computeFirstSets(
 //   mandatory, FIRST hits the loop | +1 — this frame owes the loop's token
 //   mandatory, FIRST disjoint      | 0  — a barrier; the frame re-anchors
 //
-// and guard the loop's continue alternative with `n.<counter> == 0`.
-// The barrier reset is not an optimisation: in
+// and guard the loop branches that could eat what is owed with
+// `n.<counter> == 0`. The barrier reset is not an optimisation: in
 // `A = ["x"] A "y" / "(" A ")" / "z"` the paren alternative owes a
 // `")"`, not a `"y"`, so an A pushed from there must start clean or
 // `x(zy)y` cannot parse.
+//
+// "Could eat what is owed" is per branch, not per loop. A loop built
+// from several tails repeats several tokens, and only the ones an
+// enclosing suffix competes for may be blocked — guarding the whole
+// helper makes `A = A "y" / A "w" / "x" A "y" / "z"` reject `xzwy`,
+// where the inner A has to consume the `w` before yielding the `y`. The
+// contested tokens are recorded in `debtOwed` for the emitter.
+//
+// Competition is decided at the character level, not by token identity:
+// a fixed `"a"` token and a `[a-z]` match token are different names for
+// overlapping input, and reading them as disjoint drops the guard on a
+// loop that really does contest the suffix.
 //
 // The counter needs no explicit decrement. `n` is copied down at push
 // time and a parent's own counters are untouched by what its children
@@ -3523,6 +3562,7 @@ function resolveSuffixDebts(
   regexTokens: Map<string, string>,
   firstSets: Map<string, Set<string>>,
   nullable: Set<string>,
+  tokensOverlap: (a: string, b: string) => boolean,
 ): void {
   const guarded = grammar.productions.filter((p) => null != p.debtGuard)
   if (0 === guarded.length) return
@@ -3552,7 +3592,8 @@ function resolveSuffixDebts(
     const carries = refCallersOf(grammar, owner.name)
 
     const pending: Array<{ alt: Sequence; i: number; delta: number }> = []
-    let owes = false
+    // The loop's own tokens that some enclosing suffix competes for.
+    const owed = new Set<string>()
     for (const prod of grammar.productions) {
       for (const alt of prod.alts) {
         for (let i = 0; i < alt.length; i++) {
@@ -3565,23 +3606,28 @@ function resolveSuffixDebts(
           // A suffix that can vanish commits the frame to nothing, so
           // the push stays in tail position and inherits.
           if (f.nullable) continue
+          // Collect every loop token this suffix competes for, rather
+          // than stopping at the first: they are exactly the branches
+          // the emitter may block, and the rest must stay open.
           let hits = false
-          for (const t of f.tokens) {
-            if (loopFirst.has(t)) { hits = true; break }
+          for (const u of f.tokens) {
+            for (const t of loopFirst) {
+              if (t === u || tokensOverlap(t, u)) { owed.add(t); hits = true }
+            }
           }
           pending.push({ alt, i, delta: hits ? 1 : 0 })
-          if (hits) owes = true
         }
       }
     }
 
-    if (!owes) {
+    if (0 === owed.size) {
       // Nothing anywhere competes with this loop — the shape matched
       // syntactically but the tokens never collide. Leave the grammar
       // exactly as it was.
       delete loop.debtGuard
       continue
     }
+    loop.debtOwed = [...owed]
 
     for (const { alt, i, delta } of pending) {
       const el = alt[i] as Extract<Element, { kind: 'ref' }>

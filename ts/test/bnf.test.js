@@ -420,6 +420,54 @@ describe('bnf', () => {
       assert.equal(counters.size, 2, [...counters].join(' '))
     })
 
+    it('guards only the branches the suffix competes for', () => {
+      // The loop repeats `"y"` and `"w"`; the suffix owes a `"y"`. Blocking
+      // the `"w"` branch too would reject `xzwy`, where the inner A has to
+      // consume the `w` before yielding the `y`.
+      const spec = emitGrammarSpec(
+        hidden([ref('A'), y], [ref('A'), w], [x, ref('A'), y], [z]),
+        { tag: 'demo' })
+
+      const tokenOf = (lit) => Object.entries(spec.options.fixed.token)
+        .find(([, v]) => v === lit)[0]
+      const loop = Object.entries(spec.rule)
+        .find(([n]) => /_star_/.test(n) && !n.includes('$'))[1]
+
+      // Continue alternatives fan out to K-token prefixes, so group them
+      // by the head token that decides which branch they are.
+      const heads = (list) =>
+        [...new Set(list.map((a) => String(a.s).split(' ')[0]))].sort()
+      const cont = loop.open.filter((a) => a.p)
+      assert.deepEqual(
+        heads(cont.filter((a) => a.c)), [tokenOf('y')], JSON.stringify(loop.open))
+      assert.deepEqual(
+        heads(cont.filter((a) => !a.c)), [tokenOf('w')], JSON.stringify(loop.open))
+    })
+
+    it('sees a self-reference buried in a group', () => {
+      // The detector runs before desugar, where the recursive call is
+      // still inside an IR `group`. Reading only the top level of each
+      // seed missed this shape entirely.
+      const spec = emitGrammarSpec(
+        hidden([ref('A'), y], [{ kind: 'group', alts: [[x, ref('A'), y], [z]] }]),
+        { tag: 'demo' })
+      assert.equal(alts(spec).filter((a) => a.c).length, 1)
+    })
+
+    it('reduces a rule name to a counter name Go agrees on', () => {
+      // The Go port sanitises by rune; a non-`u` regex here would split an
+      // astral name into two surrogate halves and mint a different name
+      // for the same grammar.
+      const counter = (name) => {
+        const spec = emitGrammarSpec(
+          { productions: [{ name, alts: [[{ kind: 'opt', inner: x }, ref(name), y], [z]] }] },
+          { tag: 'demo' })
+        return Object.keys(alts(spec).find((a) => a.c).c)[0]
+      }
+      assert.equal(counter('a-b'), 'n.debt_a_b')
+      assert.equal(counter('\u{1F600}'), 'n.debt__')
+    })
+
     it('keeps the guard expressible as pure data', () => {
       // Compilation mode drops every closure; a guard that needed one
       // would make these grammars uncompilable rather than merely

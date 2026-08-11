@@ -450,24 +450,24 @@ func freshDebtCounter(ruleName string, used map[string]bool) string {
 	return name
 }
 
-// hasSelfRefWithSuffix reports whether any seed alternative re-enters this
-// rule at a non-leading position with something mandatory left to match
-// after it. That is the shape whose inner tail loop competes with the
-// enclosing alternative's suffix — see resolveSuffixDebts, which decides
-// whether the competition is real once FIRST sets exist.
+// seedsReferenceSelf reports whether any seed alternative re-enters this
+// rule at all. A seed that does is the shape whose inner tail loop can
+// compete with the enclosing alternative's suffix.
 //
-// Only the top level of each seed is inspected: a self-reference buried
-// inside a group is not seen here, and is not seen by the hidden
-// left-recursion detector either. Mirrors the TS `hasSelfRefWithSuffix`.
-func hasSelfRefWithSuffix(seeds []Sequence, name string) bool {
+// This is only a cheap pre-filter: it decides whether to allocate a
+// counter, not whether one is warranted. resolveSuffixDebts does the real
+// analysis on the desugared grammar — where a self-reference buried in a
+// group has become an ordinary reference in an ordinary production — and
+// drops the flag again when nothing turns out to compete. So the filter
+// can afford to say yes broadly, and has to: reading only the top level of
+// each seed missed `A = A "y" / ( "x" A "y" / "z" )` entirely.
+// Mirrors the TS `seedsReferenceSelf`.
+func seedsReferenceSelf(seeds []Sequence, name string) bool {
+	refs := map[string]bool{}
 	for _, alt := range seeds {
-		for i := 0; i+1 < len(alt); i++ {
-			if alt[i].Kind == KindRef && alt[i].Name == name {
-				return true
-			}
-		}
+		refsIn(alt, refs)
 	}
-	return false
+	return refs[name]
 }
 
 // eliminateDirectLeftRec rewrites a single production's direct left
@@ -525,7 +525,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 	// or drops the flag when the suffix and the loop cannot collide
 	// (`A = A "w" / "(" A ")" / "z"` — `")"` never contests `"w"`). Issue #6.
 	star := &Element{Kind: KindStar, Inner: tailInner}
-	if hasSelfRefWithSuffix(seeds, prod.Name) {
+	if seedsReferenceSelf(seeds, prod.Name) {
 		star.DebtGuard = freshDebtCounter(prod.Name, debtNames)
 	}
 

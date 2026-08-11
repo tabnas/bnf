@@ -50,9 +50,21 @@ Both ports now handle left recursion reached through nullable sugar
 - `resolveSuffixDebts` settles the tail loop the rewrite leaves behind,
   whose greediness contests a suffix of the alternative it came from.
 
-Neither depends on negotiated lexing: the decision is about enclosing
-stack depth, not about how a character is cut. The counters and
-declarative conditions they emit (`n`, `c`) have identical semantics in
-both engines, and the condition uses the scalar `$eq` shorthand, which
-is the one spelling both accept — so the emitted shape is the same in
-each port.
+The decision itself is about enclosing stack depth, not about how a
+character is cut, so neither pass depends on negotiated lexing. The
+counters and declarative conditions they emit (`n`, `c`) have identical
+semantics in both engines, and the condition uses the scalar `$eq`
+shorthand, which is the one spelling both accept — so the emitted shape
+is the same in each port.
+
+One step inside `resolveSuffixDebts` is still TS-only: deciding whether
+the suffix and the loop *compete*. TS compares the two tokens' character
+coverage (`tokensOverlap`), so a fixed `"a"` token and a `[a-z]` match
+token read as competing; Go compares token identity, and a grammar whose
+contest crosses a fixed/match token boundary gets no counter there. That
+comparison is part of the contested-alternative machinery above, and
+acting on its answer needs the same negotiated lexing — with the Go
+engine as it stands, a guard emitted for that shape would be inert
+anyway, because the class matcher wins the first cut and the enclosing
+suffix can never be re-cut to its own token. Port it with the rest of
+that list.

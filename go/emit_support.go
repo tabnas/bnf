@@ -219,11 +219,23 @@ func firstOfSeq(seq Sequence, literals, regexTokens map[string]string,
 //	mandatory, FIRST hits the loop | +1 — this frame owes the loop's token
 //	mandatory, FIRST disjoint      | 0  — a barrier; the frame re-anchors
 //
-// and guard the loop's continue alternative with `n.<counter> == 0`.
-// The barrier reset is not an optimisation: in
+// and guard the loop branches that could eat what is owed with
+// `n.<counter> == 0`. The barrier reset is not an optimisation: in
 // `A = ["x"] A "y" / "(" A ")" / "z"` the paren alternative owes a
 // `")"`, not a `"y"`, so an A pushed from there must start clean or
 // `x(zy)y` cannot parse.
+//
+// "Could eat what is owed" is per branch, not per loop. A loop built from
+// several tails repeats several tokens, and only the ones an enclosing
+// suffix competes for may be blocked — guarding the whole helper makes
+// `A = A "y" / A "w" / "x" A "y" / "z"` reject `xzwy`, where the inner A
+// has to consume the `w` before yielding the `y`. The contested tokens are
+// recorded in DebtOwed for the emitter.
+//
+// Competition is decided here by token identity. The TS port additionally
+// compares character coverage, so a fixed `"a"` token and a `[a-z]` match
+// token read as competing; that rests on the contested-alternative
+// machinery this port does not have. See doc/differences.md.
 //
 // The counter needs no explicit decrement. `n` is copied down at push
 // time and a parent's own counters are untouched by what its children
@@ -288,7 +300,8 @@ func resolveSuffixDebts(grammar *Grammar, literals, regexTokens map[string]strin
 		carries := refCallersOf(grammar, owner.Name)
 
 		pending := []site{}
-		owes := false
+		// The loop's own tokens that some enclosing suffix competes for.
+		owed := map[string]bool{}
 		for _, prod := range grammar.Productions {
 			for _, alt := range prod.Alts {
 				for i, el := range alt {
@@ -306,30 +319,33 @@ func resolveSuffixDebts(grammar *Grammar, literals, regexTokens map[string]strin
 					if sufNullable {
 						continue
 					}
+					// Collect every loop token this suffix competes for, rather
+					// than stopping at the first: they are exactly the branches
+					// the emitter may block, and the rest must stay open.
 					hits := false
 					for t := range toks {
 						if loopFirst[t] {
+							owed[t] = true
 							hits = true
-							break
 						}
 					}
 					delta := 0
 					if hits {
 						delta = 1
-						owes = true
 					}
 					pending = append(pending, site{alt: alt, i: i, delta: delta})
 				}
 			}
 		}
 
-		if !owes {
+		if len(owed) == 0 {
 			// Nothing anywhere competes with this loop — the shape matched
 			// syntactically but the tokens never collide. Leave the grammar
 			// exactly as it was.
 			loop.DebtGuard = ""
 			continue
 		}
+		loop.DebtOwed = sortedKeys(owed)
 
 		for _, s := range pending {
 			el := s.alt[s.i]

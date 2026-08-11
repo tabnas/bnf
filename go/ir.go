@@ -139,7 +139,14 @@ type Production struct {
 	// the counter whose value must be zero for the loop to keep going.
 	// Mirrors the TS `debtGuard` production flag.
 	DebtGuard string
-	NodeKind  string // "", "user", "core", "helper"
+	// DebtOwed lists the loop's own FIRST tokens that an enclosing suffix
+	// can actually compete for, set by resolveSuffixDebts alongside
+	// DebtGuard. Only the branches that could eat one of these are guarded:
+	// a multi-tail loop (`A = A "y" / A "w" / "x" A "y" / "z"`) owes a `"y"`
+	// and nothing else, so blocking its `"w"` branch as well would reject
+	// `xzwy`. Mirrors the TS `debtOwed` production flag.
+	DebtOwed []string
+	NodeKind string // "", "user", "core", "helper"
 }
 
 type TailRepeatSpec struct {

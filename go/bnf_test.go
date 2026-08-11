@@ -338,3 +338,113 @@ func TestExpandsNullableLeftPrefixes(t *testing.T) {
 		}
 	}
 }
+
+func TestSuffixDebtGuardsOnlyTheContestedBranches(t *testing.T) {
+	// The loop repeats `"y"` and `"w"`; the suffix owes a `"y"`. Blocking
+	// the `"w"` branch too would reject `xzwy`, where the inner A has to
+	// consume the `w` before yielding the `y`.
+	spec := emitOrFail(t, hiddenLeftRec(
+		Sequence{ref("A"), sensTerm("y")},
+		Sequence{ref("A"), sensTerm("w")},
+		Sequence{sensTerm("x"), ref("A"), sensTerm("y")},
+		Sequence{sensTerm("z")}))
+
+	tokenOf := func(lit string) string {
+		for name, v := range spec.Options.Fixed.Token {
+			if v != nil && *v == lit {
+				return name
+			}
+		}
+		t.Fatalf("no token for %q", lit)
+		return ""
+	}
+
+	// Continue alternatives fan out to k-token prefixes, so group them by
+	// the head token that decides which branch they are.
+	guarded, open := map[string]bool{}, map[string]bool{}
+	for name, rs := range spec.Rule {
+		if rs == nil || !strings.Contains(name, "_star_") || strings.Contains(name, "$") {
+			continue
+		}
+		for _, a := range altListOf(rs.Open) {
+			s, ok := a.S.(string)
+			if !ok || a.P == "" {
+				continue
+			}
+			head := s
+			if i := strings.IndexByte(s, ' '); i >= 0 {
+				head = s[:i]
+			}
+			if a.C != nil {
+				guarded[head] = true
+			} else {
+				open[head] = true
+			}
+		}
+	}
+	if want := []string{tokenOf("y")}; !sameStrings(sortedKeys(guarded), want) {
+		t.Errorf("guarded heads = %v, want %v", sortedKeys(guarded), want)
+	}
+	if want := []string{tokenOf("w")}; !sameStrings(sortedKeys(open), want) {
+		t.Errorf("unguarded heads = %v, want %v", sortedKeys(open), want)
+	}
+}
+
+func TestSuffixDebtSeesASelfReferenceInsideAGroup(t *testing.T) {
+	// The detector runs before desugar, where the recursive call is still
+	// inside an IR group. Reading only the top level of each seed missed
+	// this shape entirely.
+	spec := emitOrFail(t, hiddenLeftRec(
+		Sequence{ref("A"), sensTerm("y")},
+		Sequence{&Element{Kind: KindGroup, Alts: []Sequence{
+			{sensTerm("x"), ref("A"), sensTerm("y")},
+			{sensTerm("z")},
+		}}}))
+
+	guards := 0
+	for _, a := range altsOf(spec) {
+		if a.C != nil {
+			guards++
+		}
+	}
+	if guards != 1 {
+		t.Errorf("expected the grouped seed to allocate a guard, got %d", guards)
+	}
+}
+
+func TestSuffixDebtCounterNameMatchesTypeScript(t *testing.T) {
+	// TypeScript sanitises with a Unicode-aware regular expression, so an
+	// astral rule name reduces to one underscore per code point in both
+	// runtimes rather than one per UTF-16 surrogate half.
+	for name, want := range map[string]string{
+		"a-b":          "debt_a_b",
+		"\U0001F600":   "debt__",
+		"x\U0001F600y": "debt_x_y",
+	} {
+		spec := emitOrFail(t, &Grammar{Productions: []*Production{{Name: name, Alts: []Sequence{
+			{optOf(sensTerm("x")), ref(name), sensTerm("y")},
+			{sensTerm("z")},
+		}}}})
+		got := ""
+		for _, a := range altsOf(spec) {
+			for counter := range a.N {
+				got = counter
+			}
+		}
+		if got != want {
+			t.Errorf("rule %q: counter = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
