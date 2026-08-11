@@ -34,7 +34,7 @@ are not:
 
 | Path | What it is |
 |---|---|
-| `ts/src/compiler.ts` | The IR types and the whole emit pipeline: desugar, left-recursion elimination, tail repeats, probe dispatch, literal lifting, token allocation, first sets, chain emission. |
+| `ts/src/compiler.ts` | The IR types and the whole emit pipeline: desugar, left-recursion elimination (incl. suffix-debt counters for contested tail loops), tail repeats, probe dispatch, literal lifting, token allocation, first sets, chain emission. |
 | `ts/src/spec.ts` | Spec-level transforms: recognition/pure lowering, jsonic serialisation, user-action attachment. Operates on an emitted `GrammarSpec`. |
 | `ts/src/bnf.ts` | Package entry; re-exports the public surface. |
 | `go/` | Go port (follows TS). |

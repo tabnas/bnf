@@ -16,6 +16,7 @@ const {
   escapeRegExp,
   BUILTIN_TOKENS,
   toJsonic,
+  compileSpec,
   attachActions,
   markListing,
   VERSION,
@@ -295,6 +296,189 @@ describe('bnf', () => {
         alt[1].kind === 'ref' && alt[1].name === 'A'
       assert.equal(hidden, false, 'A still re-enters itself behind an opt')
     }
+  })
+
+  // Left-recursion elimination turns `A = ["x"] A "y" / "z"` into
+  // `A = ( "x" A "y" | "z" ) "y"*`. That is a correct CFG and a broken
+  // parser: the tail loop is greedy, so the inner A eats the `"y"` the
+  // enclosing `"x" A "y"` still owes and the outer alternative starves.
+  // No lookahead settles it — the repeated token and the follow token
+  // are the same token, and the answer depends on enclosing stack
+  // depth. Issue #6.
+  describe('a contested left-recursion tail loop yields on suffix debt', () => {
+    const hidden = (...alts) => ({ productions: [{ name: 'A', alts }] })
+    const x = { kind: 'term', literal: 'x', caseSensitive: true }
+    const y = { kind: 'term', literal: 'y', caseSensitive: true }
+    const z = { kind: 'term', literal: 'z', caseSensitive: true }
+    const w = { kind: 'term', literal: 'w', caseSensitive: true }
+    const lp = { kind: 'term', literal: '(', caseSensitive: true }
+    const rp = { kind: 'term', literal: ')', caseSensitive: true }
+
+    // Every alt of every rule, flattened — the counter machinery is
+    // spread across a dispatcher and its `$altN` chain rules.
+    const alts = (spec) => Object.entries(spec.rule).flatMap(
+      ([name, rs]) => ['open', 'close'].flatMap((ph) => {
+        const f = rs[ph]
+        const list = Array.isArray(f) ? f : (f && f.alts) || []
+        return list.map((a) => ({ rule: name, ...a }))
+      }))
+
+    it('counts the debt on the push and guards the loop with it', () => {
+      const spec = emitGrammarSpec(
+        hidden([{ kind: 'opt', inner: x }, ref('A'), y], [z]), { tag: 'demo' })
+
+      // The alternative that pushes the inner A increments the counter…
+      const pushes = alts(spec).filter((a) => a.n)
+      assert.equal(pushes.length, 1, JSON.stringify(pushes))
+      const [counter] = Object.keys(pushes[0].n)
+      assert.equal(pushes[0].n[counter], 1, 'the push must add one debt')
+      assert.equal(pushes[0].p, 'A', 'the debt rides on the push of A')
+
+      // …and the tail loop's continue alternative refuses to run while
+      // any debt is outstanding.
+      const guarded = alts(spec).filter((a) => a.c)
+      assert.equal(guarded.length, 1, JSON.stringify(guarded))
+      assert.match(guarded[0].rule, /_star_/, 'the guard belongs to the loop')
+      assert.deepEqual(guarded[0].c, { ['n.' + counter]: 0 })
+      assert.equal(
+        guarded[0].p, guarded[0].rule, 'the guarded alt is the loop back-edge')
+
+      // The loop's exits stay unguarded, so it yields rather than fails.
+      const loop = spec.rule[guarded[0].rule].open
+      assert.ok(
+        loop.slice(1).every((a) => !a.c),
+        'the exit peeks and the bare fallback must stay unconditional')
+    })
+
+    it('resets the counter across an alternative that re-anchors', () => {
+      // `"(" A ")"` owes a `")"`, not a `"y"`, so the A it pushes must
+      // start from a clean slate or `x(zy)y` cannot parse.
+      const spec = emitGrammarSpec(
+        hidden(
+          [{ kind: 'opt', inner: x }, ref('A'), y],
+          [lp, ref('A'), rp],
+          [z]),
+        { tag: 'demo' })
+
+      const deltas = alts(spec).filter((a) => a.n).map((a) => Object.values(a.n)[0])
+      assert.deepEqual(
+        deltas.slice().sort(), [0, 1],
+        'expected one increment and one barrier reset, got ' +
+        JSON.stringify(alts(spec).filter((a) => a.n)))
+    })
+
+    it('leaves a loop the suffix cannot contest alone', () => {
+      // The loop repeats `"w"`; the only suffix after a self-reference
+      // is `")"`, which never competes with it. Emitting a guard here
+      // would make `(z)w` stop parsing.
+      const spec = emitGrammarSpec(
+        hidden([ref('A'), w], [lp, ref('A'), rp], [z]), { tag: 'demo' })
+
+      assert.deepEqual(
+        alts(spec).filter((a) => a.n || a.c), [],
+        'an uncontested loop must compile exactly as before')
+    })
+
+    it('leaves a nullable suffix alone', () => {
+      // `A = ["x"] A ["y"] / "z"` commits the enclosing frame to
+      // nothing, so the loop stays greedy — and already parses its
+      // whole language.
+      const spec = emitGrammarSpec(
+        hidden(
+          [{ kind: 'opt', inner: x }, ref('A'), { kind: 'opt', inner: y }],
+          [z]),
+        { tag: 'demo' })
+
+      assert.deepEqual(alts(spec).filter((a) => a.n || a.c), [])
+    })
+
+    it('leaves plain direct left recursion alone', () => {
+      const spec = emitGrammarSpec(hidden([ref('A'), y], [z]), { tag: 'demo' })
+      assert.deepEqual(alts(spec).filter((a) => a.n || a.c), [])
+    })
+
+    it('emits a counter per contested rule', () => {
+      const spec = emitGrammarSpec({
+        productions: [
+          {
+            name: 'B',
+            alts: [
+              [{ kind: 'opt', inner: { kind: 'term', literal: 'p', caseSensitive: true } },
+                ref('B'), { kind: 'term', literal: 'q', caseSensitive: true }],
+              [ref('A')],
+            ],
+          },
+          {
+            name: 'A',
+            alts: [[{ kind: 'opt', inner: x }, ref('A'), y], [z]],
+          },
+        ],
+      }, { tag: 'demo' })
+
+      const counters = new Set(
+        alts(spec).filter((a) => a.c).map((a) => Object.keys(a.c)[0]))
+      assert.equal(counters.size, 2, [...counters].join(' '))
+    })
+
+    it('guards only the branches the suffix competes for', () => {
+      // The loop repeats `"y"` and `"w"`; the suffix owes a `"y"`. Blocking
+      // the `"w"` branch too would reject `xzwy`, where the inner A has to
+      // consume the `w` before yielding the `y`.
+      const spec = emitGrammarSpec(
+        hidden([ref('A'), y], [ref('A'), w], [x, ref('A'), y], [z]),
+        { tag: 'demo' })
+
+      const tokenOf = (lit) => Object.entries(spec.options.fixed.token)
+        .find(([, v]) => v === lit)[0]
+      const loop = Object.entries(spec.rule)
+        .find(([n]) => /_star_/.test(n) && !n.includes('$'))[1]
+
+      // Continue alternatives fan out to K-token prefixes, so group them
+      // by the head token that decides which branch they are.
+      const heads = (list) =>
+        [...new Set(list.map((a) => String(a.s).split(' ')[0]))].sort()
+      const cont = loop.open.filter((a) => a.p)
+      assert.deepEqual(
+        heads(cont.filter((a) => a.c)), [tokenOf('y')], JSON.stringify(loop.open))
+      assert.deepEqual(
+        heads(cont.filter((a) => !a.c)), [tokenOf('w')], JSON.stringify(loop.open))
+    })
+
+    it('sees a self-reference buried in a group', () => {
+      // The detector runs before desugar, where the recursive call is
+      // still inside an IR `group`. Reading only the top level of each
+      // seed missed this shape entirely.
+      const spec = emitGrammarSpec(
+        hidden([ref('A'), y], [{ kind: 'group', alts: [[x, ref('A'), y], [z]] }]),
+        { tag: 'demo' })
+      assert.equal(alts(spec).filter((a) => a.c).length, 1)
+    })
+
+    it('reduces a rule name to a counter name Go agrees on', () => {
+      // The Go port sanitises by rune; a non-`u` regex here would split an
+      // astral name into two surrogate halves and mint a different name
+      // for the same grammar.
+      const counter = (name) => {
+        const spec = emitGrammarSpec(
+          { productions: [{ name, alts: [[{ kind: 'opt', inner: x }, ref(name), y], [z]] }] },
+          { tag: 'demo' })
+        return Object.keys(alts(spec).find((a) => a.c).c)[0]
+      }
+      assert.equal(counter('a-b'), 'n.debt_a_b')
+      assert.equal(counter('\u{1F600}'), 'n.debt__')
+    })
+
+    it('keeps the guard expressible as pure data', () => {
+      // Compilation mode drops every closure; a guard that needed one
+      // would make these grammars uncompilable rather than merely
+      // untree-built.
+      const spec = emitGrammarSpec(
+        hidden([{ kind: 'opt', inner: x }, ref('A'), y], [z]),
+        { tag: 'demo', builtins: true })
+      const text = compileSpec(spec, { strict: true })
+      assert.doesNotThrow(() => JSON.parse(text))
+      assert.match(text, /"n\.debt_A"/)
+    })
   })
 
   it('never allocates a lifted literal an engine-owned token name', () => {

@@ -159,6 +159,251 @@ func firstOfAlt(alt Sequence, literals, regexTokens map[string]string,
 	return nil
 }
 
+// firstOfSeq is FIRST of a sequence, reporting nullability separately
+// rather than collapsing it to nil the way firstOfAlt does — the caller
+// needs both halves of the answer. Mirrors the TS `firstOfSeq`.
+func firstOfSeq(seq Sequence, literals, regexTokens map[string]string,
+	firstSets map[string]map[string]bool, nullable map[string]bool,
+) (map[string]bool, bool) {
+	out := map[string]bool{}
+	for _, el := range seq {
+		if el.Kind == KindTerm || el.Kind == KindRegex || el.Kind == KindToken {
+			out[tokenForTerminal(el, literals, regexTokens)] = true
+			return out, false
+		}
+		if el.Kind == KindRef {
+			for tok := range firstSets[el.Name] {
+				out[tok] = true
+			}
+			if !nullable[el.Name] {
+				return out, false
+			}
+			continue
+		}
+		panic(diagName() + ": internal — unexpected kind in firstOfSeq: " + string(el.Kind))
+	}
+	return out, true
+}
+
+// ---- suffix debt: contested left-recursion tail loops ---------------
+//
+// eliminateDirectLeftRec rewrites `A = ["x"] A "y" / "z"` into
+//
+//	A = ( "x" A "y" | "z" ) "y"*
+//
+// which is a correct CFG and a broken parser. Parsing `xzy` needs the
+// inner A's tail loop to match ZERO `"y"`s, so the enclosing
+// `"x" A "y"` has one left to consume; the loop is greedy, eats it, and
+// the outer alternative starves. Widening the loop's lookahead cannot
+// help, because the two cases it must separate are indistinguishable
+// through any token window:
+//
+//	input | remaining at the decision | required
+//	------|--------------------------|-------------------------------
+//	xzy   | #Y #ZZ                   | exit — `"x" A "y"` owes a #Y
+//	zy    | #Y #ZZ                   | continue — nothing owes a #Y
+//
+// Same rule, same tokens, opposite answers. What differs is how many
+// enclosing frames have committed to consuming a `"y"` once the current
+// subtree returns — stack depth, not a token window. The engine already
+// propagates exactly that kind of state: `n` counters flow from a rule
+// to every rule it pushes, and never back up.
+//
+// So count the debt. For each contested loop, on every push that can
+// reach the recursive rule:
+//
+//	suffix after the push          | counter
+//	-------------------------------|-------------------------------------
+//	empty, or can derive ε         | inherited (the push is in tail
+//	                               | position; the ancestor's debt stands)
+//	mandatory, FIRST hits the loop | +1 — this frame owes the loop's token
+//	mandatory, FIRST disjoint      | 0  — a barrier; the frame re-anchors
+//
+// and guard the loop branches that could eat what is owed with
+// `n.<counter> == 0`. The barrier reset is not an optimisation: in
+// `A = ["x"] A "y" / "(" A ")" / "z"` the paren alternative owes a
+// `")"`, not a `"y"`, so an A pushed from there must start clean or
+// `x(zy)y` cannot parse.
+//
+// "Could eat what is owed" is per branch, not per loop. A loop built from
+// several tails repeats several tokens, and only the ones an enclosing
+// suffix competes for may be blocked — guarding the whole helper makes
+// `A = A "y" / A "w" / "x" A "y" / "z"` reject `xzwy`, where the inner A
+// has to consume the `w` before yielding the `y`. The contested tokens are
+// recorded in DebtOwed for the emitter.
+//
+// Competition is decided here by token identity. The TS port additionally
+// compares character coverage, so a fixed `"a"` token and a `[a-z]` match
+// token read as competing; that rests on the contested-alternative
+// machinery this port does not have. See doc/differences.md.
+//
+// The counter needs no explicit decrement. `n` is copied down at push
+// time and a parent's own counters are untouched by what its children
+// do, so unwinding out of a frame restores that frame's debt by
+// construction.
+//
+// Nothing is emitted unless some push actually owes the loop's token, so
+// a grammar whose loop was never contested compiles unchanged.
+// Mirrors the TS `resolveSuffixDebts`. Issue #6.
+func resolveSuffixDebts(grammar *Grammar, literals, regexTokens map[string]string,
+	firstSets map[string]map[string]bool, nullable map[string]bool) {
+
+	guarded := []*Production{}
+	for _, p := range grammar.Productions {
+		if p.DebtGuard != "" {
+			guarded = append(guarded, p)
+		}
+	}
+	if len(guarded) == 0 {
+		return
+	}
+
+	type site struct {
+		alt   Sequence
+		i     int
+		delta int
+	}
+
+	for _, loop := range guarded {
+		counter := loop.DebtGuard
+
+		// The recursive rule is whatever references the loop helper.
+		// eliminateDirectLeftRec emits one such reference and desugar mints
+		// the helper, so there is exactly one candidate.
+		var owner *Production
+		for _, p := range grammar.Productions {
+			if p == loop {
+				continue
+			}
+			for _, alt := range p.Alts {
+				for _, el := range alt {
+					if el.Kind == KindRef && el.Name == loop.Name {
+						owner = p
+					}
+				}
+			}
+			if owner != nil {
+				break
+			}
+		}
+
+		// FIRST of the helper is FIRST of what it repeats: its other
+		// alternative is empty.
+		loopFirst := firstSets[loop.Name]
+		if owner == nil || len(loopFirst) == 0 {
+			loop.DebtGuard = ""
+			continue
+		}
+
+		// Only a push into something that can still reach the recursive rule
+		// can end up inside the contested loop; everything else is left alone.
+		carries := refCallersOf(grammar, owner.Name)
+
+		pending := []site{}
+		// The loop's own tokens that some enclosing suffix competes for.
+		owed := map[string]bool{}
+		for _, prod := range grammar.Productions {
+			for _, alt := range prod.Alts {
+				for i, el := range alt {
+					if el.Kind != KindRef || !carries[el.Name] {
+						continue
+					}
+					suffix := alt[i+1:]
+					if len(suffix) == 0 {
+						continue
+					}
+					toks, sufNullable := firstOfSeq(
+						suffix, literals, regexTokens, firstSets, nullable)
+					// A suffix that can vanish commits the frame to nothing, so
+					// the push stays in tail position and inherits.
+					if sufNullable {
+						continue
+					}
+					// Collect every loop token this suffix competes for, rather
+					// than stopping at the first: they are exactly the branches
+					// the emitter may block, and the rest must stay open.
+					hits := false
+					for t := range toks {
+						if loopFirst[t] {
+							owed[t] = true
+							hits = true
+						}
+					}
+					delta := 0
+					if hits {
+						delta = 1
+					}
+					pending = append(pending, site{alt: alt, i: i, delta: delta})
+				}
+			}
+		}
+
+		if len(owed) == 0 {
+			// Nothing anywhere competes with this loop — the shape matched
+			// syntactically but the tokens never collide. Leave the grammar
+			// exactly as it was.
+			loop.DebtGuard = ""
+			continue
+		}
+		loop.DebtOwed = sortedKeys(owed)
+
+		for _, s := range pending {
+			el := s.alt[s.i]
+			// Replace rather than mutate. Elements are shared between
+			// alternatives and with the caller's AST (cloneGrammar copies the
+			// sequences, not the elements), so writing through this reference
+			// would annotate occurrences this pass never inspected.
+			cp := *el
+			cp.Debt = map[string]int{}
+			for k, v := range el.Debt {
+				cp.Debt[k] = v
+			}
+			cp.Debt[counter] = s.delta
+			s.alt[s.i] = &cp
+		}
+	}
+}
+
+// refCallersOf returns the names of the productions from which `target`
+// can be reached through rule references, `target` itself included. A
+// backward walk: the forward closure would cost a traversal per
+// production, and only this one node's ancestry is ever asked for.
+// Mirrors the TS `refCallersOf`.
+func refCallersOf(grammar *Grammar, target string) map[string]bool {
+	rev := map[string][]string{}
+	for _, p := range grammar.Productions {
+		out := map[string]bool{}
+		for _, alt := range p.Alts {
+			refsIn(alt, out)
+		}
+		// A dispatcher's branches live outside Alts, but a push into one is
+		// still a push.
+		if p.ProbeDisp != nil {
+			out[p.ProbeDisp.ProbeRule] = true
+			out[p.ProbeDisp.WithBranch] = true
+			out[p.ProbeDisp.NoBranch] = true
+		}
+		for to := range out {
+			rev[to] = append(rev[to], p.Name)
+		}
+	}
+
+	seen := map[string]bool{target: true}
+	queue := []string{target}
+	for len(queue) > 0 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for _, from := range rev[n] {
+			if seen[from] {
+				continue
+			}
+			seen[from] = true
+			queue = append(queue, from)
+		}
+	}
+	return seen
+}
+
 // ---- k-token prefixes ----------------------------------------------
 
 type prefixPath struct {
