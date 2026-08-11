@@ -627,6 +627,401 @@ function rewriteTailRepeats(grammar: Grammar, start: string): Grammar {
 }
 
 
+// How many concrete tokens the multi-alt dispatcher fans each
+// alternative's prefix out to (see emitProduction). Left factoring
+// uses the same bound to decide which shared prefixes the dispatcher
+// can already see past.
+const LOOKAHEAD_K = 4
+
+// Structural equality of IR elements, the comparison left factoring
+// uses to recognise a shared prefix. Terms compare by their token key
+// (literal + effective case-sensitivity — the same identity the token
+// allocator uses), refs and built-in tokens by name, and the sugar
+// forms recursively. Prose never equals anything: there is nothing to
+// factor out of an informational terminal.
+function elemEqual(a: Element, b: Element): boolean {
+  if (a.kind !== b.kind) return false
+  switch (a.kind) {
+    case 'term':
+      return termKey(a) === termKey(b as typeof a)
+    case 'ref':
+    case 'token':
+      return a.name === (b as typeof a).name
+    case 'regex':
+      return a.pattern === (b as typeof a).pattern &&
+        a.flags === (b as typeof a).flags
+    case 'prose':
+      return false
+    case 'opt':
+    case 'star':
+    case 'plus':
+      return elemEqual(a.inner, (b as { inner: Element }).inner)
+    case 'rep':
+      return a.min === (b as typeof a).min &&
+        a.max === (b as typeof a).max &&
+        elemEqual(a.inner, (b as typeof a).inner)
+    case 'group':
+      return a.alts.length === (b as typeof a).alts.length &&
+        a.alts.every((alt, i) => seqEqual(alt, (b as typeof a).alts[i]))
+  }
+}
+
+function seqEqual(a: Sequence, b: Sequence): boolean {
+  return a.length === b.length && a.every((el, i) => elemEqual(el, b[i]))
+}
+
+// The most tokens a sequence can span, for deciding whether the
+// dispatcher's K-token lookahead can see past it. Runs on the raw IR —
+// left factoring precedes desugaring, so the sugar kinds are still
+// here and each has to be counted on its own terms. Returns Infinity
+// for anything unbounded (a star/plus, an unbounded rep, a cycle) or
+// unknown (prose), which is what makes factoring the only remedy.
+//
+// This must NOT be approximated by asking altPrefixesRaw: that walker
+// treats every element it does not recognise as a truncation, and
+// before desugar it recognises none of the sugar — so a bounded `("a")`
+// or `["-"]` read as unbounded and got factored, collapsing
+// alternatives the dispatcher separates perfectly well (and, with
+// `marks: true`, silently merging their user-visible marks).
+function seqTokenSpan(
+  seq: Sequence,
+  grammar: Grammar,
+  visited: Set<string>,
+): number {
+  let total = 0
+  for (const el of seq) {
+    total += elementTokenSpan(el, grammar, visited)
+    if (LOOKAHEAD_K < total) return Infinity
+  }
+  return total
+}
+
+function elementTokenSpan(
+  el: Element,
+  grammar: Grammar,
+  visited: Set<string>,
+): number {
+  switch (el.kind) {
+    case 'term':
+    case 'regex':
+    case 'token':
+      return 1
+    case 'prose':
+      return Infinity
+    case 'opt':
+      // Absent contributes 0, present contributes the inner span; the
+      // MOST it can span is the inner span.
+      return elementTokenSpan(el.inner, grammar, visited)
+    case 'star':
+    case 'plus':
+      return Infinity
+    case 'rep':
+      return Infinity === el.max
+        ? Infinity
+        : el.max * elementTokenSpan(el.inner, grammar, visited)
+    case 'group': {
+      let most = 0
+      for (const alt of el.alts) {
+        const n = seqTokenSpan(alt, grammar, visited)
+        if (most < n) most = n
+      }
+      return most
+    }
+    case 'ref': {
+      if (visited.has(el.name)) return Infinity
+      const target = grammar.productions.find((p) => p.name === el.name)
+      if (!target || 0 === target.alts.length) return Infinity
+      const sub = new Set(visited)
+      sub.add(el.name)
+      let most = 0
+      for (const alt of target.alts) {
+        const n = seqTokenSpan(alt, grammar, sub)
+        if (most < n) most = n
+      }
+      return most
+    }
+  }
+}
+
+
+// First-character coverage of an element, from the raw IR (token
+// allocation has not happened when left factoring runs). Returns null
+// when coverage cannot be established — a nullable element leaks its
+// FOLLOW, a cycle or unparseable regex is unknown — and the caller
+// treats null as "not provably disjoint".
+function firstCharRangesOfElement(
+  el: Element,
+  grammar: Grammar,
+  visited: Set<string>,
+): Array<[number, number]> | null {
+  switch (el.kind) {
+    case 'term': {
+      if (0 === el.literal.length) return null
+      const cp = el.literal.codePointAt(0) as number
+      if (!isEffectivelyCaseSensitive(el)) {
+        const c = String.fromCodePoint(cp)
+        const lo = c.toLowerCase().codePointAt(0) as number
+        const up = c.toUpperCase().codePointAt(0) as number
+        return lo === up ? [[cp, cp]] : [[lo, lo], [up, up]]
+      }
+      return [[cp, cp]]
+    }
+    case 'regex':
+      return patternCharRanges(el.pattern)
+    case 'ref': {
+      if (visited.has(el.name)) return null
+      const target = grammar.productions.find((p) => p.name === el.name)
+      if (!target || 0 === target.alts.length) return null
+      const sub = new Set(visited)
+      sub.add(el.name)
+      const out: Array<[number, number]> = []
+      for (const alt of target.alts) {
+        if (0 === alt.length) return null
+        const r = firstCharRangesOfElement(alt[0], grammar, sub)
+        if (null == r) return null
+        out.push(...r)
+      }
+      return out
+    }
+    case 'group': {
+      const out: Array<[number, number]> = []
+      for (const alt of el.alts) {
+        if (0 === alt.length) return null
+        const r = firstCharRangesOfElement(alt[0], grammar, visited)
+        if (null == r) return null
+        out.push(...r)
+      }
+      return out
+    }
+    case 'plus':
+      return firstCharRangesOfElement(el.inner, grammar, visited)
+    case 'rep':
+      return 0 < el.min
+        ? firstCharRangesOfElement(el.inner, grammar, visited)
+        : null
+    case 'opt':
+    case 'star':
+    case 'token':
+    case 'prose':
+      return null
+  }
+}
+
+// See through a single-alternative group: `( a b )` as an entire
+// alternative is just `a b`. (A multi-alternative group is a real
+// alternation and stays opaque.)
+function unwrapAlt(alt: Sequence): Sequence {
+  let a = alt
+  while (1 === a.length && 'group' === a[0].kind && 1 === a[0].alts.length) {
+    a = a[0].alts[0]
+  }
+  return a
+}
+
+// Left-factor alternatives that share a leading element prefix.
+//
+// tabnas alternates are first-match-wins: once an alternative's first
+// token matches, the engine commits to it. Two alternatives sharing a
+// non-trivial prefix (`stmt = ident SP "=" … / ident SP "(" …`) can
+// therefore never both be reachable — the first wins the shared prefix
+// and fails where the second would have succeeded, and no finite token
+// lookahead can separate them (the shared prefix has unbounded token
+// length). The classical fix is mechanical: factor the prefix out and
+// defer the choice to a helper that dispatches on the first token
+// AFTER the prefix, where the alternatives really differ.
+//
+//   P = α β1 / α β2   ⇒   P = α P$factN ; P$factN = β1 / β2
+//
+// Only CONSECUTIVE alternatives merge: folding a later alternative
+// over an intervening one would promote it in first-match order, which
+// is observable whenever the intervening alternative overlaps. The
+// helper is a transparent 'helper' node, so factoring never changes
+// the emitted tree; a helper whose tails include the empty sequence is
+// flagged `repeatHelper` so its empty alternative gets the same FOLLOW
+// guards a repetition's terminator does.
+function leftFactor(grammar: Grammar): Grammar {
+  const used = new Set(grammar.productions.map((p) => p.name))
+  const out: Production[] = []
+  const queue = [...grammar.productions]
+
+  const freshName = (base: string): string => {
+    let i = 0
+    let name: string
+    do { name = `${base}$fact${i++}` } while (used.has(name))
+    used.add(name)
+    return name
+  }
+
+  while (0 < queue.length) {
+    const prod = queue.shift() as Production
+    if (prod.probeDispatch || prod.probeHelper || prod.tailRepeat) {
+      out.push(prod)
+      continue
+    }
+    let alts = prod.alts
+    for (;;) {
+      const next = factorOnce(prod.name, alts, freshName, queue, grammar)
+      if (null == next) break
+      alts = next
+    }
+    out.push(alts === prod.alts ? prod : { ...prod, alts })
+  }
+
+  return { productions: out }
+}
+
+// One factoring step over one production's alternatives: find the
+// first consecutive run sharing a leading element, replace it with a
+// single factored alternative, and queue the tail helper (so it is
+// itself factored in turn). Returns null when nothing shares a prefix.
+//
+// Only prefixes the dispatcher cannot see past are factored: the
+// emitter separates competing alternatives with up to LOOKAHEAD_K
+// concrete-token prefixes, so a short bounded shared prefix (`"a" X /
+// "a" Y`) is already handled — and left alone, which also preserves
+// the per-alternative identity that collision marks and tree tests
+// depend on. A prefix that can span LOOKAHEAD_K tokens or has
+// unbounded token length (`identifier ws "=" … / identifier ws "(" …`)
+// is beyond any finite lookahead, and factoring is the only fix.
+function factorOnce(
+  prodName: string,
+  alts: Sequence[],
+  freshName: (base: string) => string,
+  queue: Production[],
+  grammar: Grammar,
+): Sequence[] | null {
+  const views = alts.map(unwrapAlt)
+
+  const prefixBeyondLookahead = (prefix: Sequence): boolean =>
+    LOOKAHEAD_K < seqTokenSpan(prefix, grammar, new Set())
+
+  for (let i = 0; i < alts.length - 1; i++) {
+    if (0 === views[i].length) continue
+    const headEl = views[i][0]
+
+    // Gather run members. A later alternative joins the run when its
+    // first element equals the head — directly, or after inlining a
+    // single-alternative rule it starts with (`funcCall` in `factor =
+    // identifier / … / funcCall`, where `funcCall = identifier "(" …`;
+    // the inlined rule's own node flattens into the enclosing rule for
+    // that alternative — acceptance is what factoring buys here, and
+    // only this shape pays for it). Alternatives between members are
+    // skipped over only when their first characters are provably
+    // disjoint from the head's, so promoting a member across them
+    // cannot change which alternative wins any input.
+    const members: number[] = [i]
+    const memberViews = new Map<number, Sequence>([[i, views[i]]])
+    let headRanges: Array<[number, number]> | null | undefined
+    for (let j = i + 1; j < alts.length; j++) {
+      const v = views[j]
+      if (0 < v.length && elemEqual(headEl, v[0])) {
+        members.push(j)
+        memberViews.set(j, v)
+        continue
+      }
+      const inlined = 0 < v.length ? inlineHeadRef(v, headEl, grammar) : null
+      if (null != inlined) {
+        members.push(j)
+        memberViews.set(j, inlined)
+        continue
+      }
+      // Not a member — skippable only if provably disjoint.
+      if (undefined === headRanges) {
+        headRanges = firstCharRangesOfElement(headEl, grammar, new Set())
+      }
+      if (null == headRanges || 0 === v.length) break
+      const r = firstCharRangesOfElement(v[0], grammar, new Set())
+      if (null == r || charRangesOverlap(headRanges, r)) break
+    }
+    if (members.length < 2) continue
+
+    const run = members.map((m) => memberViews.get(m) as Sequence)
+    // Longest element-wise common prefix of the run.
+    let plen = 1
+    outer: for (;;) {
+      for (const v of run) {
+        if (v.length <= plen || !elemEqual(run[0][plen], v[plen])) break outer
+      }
+      plen++
+    }
+
+    const prefix = run[0].slice(0, plen)
+    if (!prefixBeyondLookahead(prefix)) {
+      // Dispatch lookahead already separates these — leave them be.
+      continue
+    }
+    // Structurally duplicate tails collapse — a duplicated alternative
+    // can never win over its first copy under first-match-wins.
+    const tails: Sequence[] = []
+    for (const v of run) {
+      const tail = v.slice(plen)
+      if (!tails.some((t) => seqEqual(t, tail))) tails.push(tail)
+    }
+    // Empty tail last: it matches anything, so the longer
+    // continuations must be offered first.
+    tails.sort((a, b) => (0 === a.length ? 1 : 0) - (0 === b.length ? 1 : 0))
+
+    let factored: Sequence
+    if (1 === tails.length) {
+      // All run members were structurally identical.
+      factored = [...prefix, ...tails[0]]
+    } else {
+      const helper = freshName(prodName)
+      const helperProd: Production = {
+        name: helper,
+        alts: tails,
+        nodeKind: 'helper',
+      }
+      if (tails.some((t) => 0 === t.length)) helperProd.repeatHelper = true
+      queue.push(helperProd)
+      factored = [...prefix, { kind: 'ref', name: helper }]
+    }
+
+    // Preserve the enclosing shape: when every run member arrived
+    // wrapped in its own single-alt group, keep the factored
+    // alternative wrapped too, so a production whose alternatives were
+    // all simple group refs stays that way for the emitter.
+    const wrapped = members.every(
+      (m) => 1 === alts[m].length && 'group' === alts[m][0].kind)
+    const replacement: Sequence = wrapped
+      ? [{ kind: 'group', alts: [factored] }]
+      : factored
+
+    const removed = new Set(members.slice(1))
+    const out: Sequence[] = []
+    for (let k = 0; k < alts.length; k++) {
+      if (removed.has(k)) continue
+      out.push(k === i ? replacement : alts[k])
+    }
+    return out
+  }
+
+  return null
+}
+
+// If `v` starts with a ref to a single-alternative production whose
+// body's first element equals `headEl`, return `v` with the ref
+// replaced by that body. One level deep, and never through the
+// synthetic production kinds. Returns null when the shape doesn't
+// apply.
+function inlineHeadRef(
+  v: Sequence,
+  headEl: Element,
+  grammar: Grammar,
+): Sequence | null {
+  const h = v[0]
+  if ('ref' !== h.kind) return null
+  const target = grammar.productions.find((p) => p.name === h.name)
+  if (!target || 1 !== target.alts.length) return null
+  if (target.probeDispatch || target.probeHelper || target.tailRepeat) {
+    return null
+  }
+  const body = unwrapAlt(target.alts[0])
+  if (0 === body.length || !elemEqual(body[0], headEl)) return null
+  return [...body, ...v.slice(1)]
+}
+
+
 function desugar(grammar: Grammar): Grammar {
   const extra: Production[] = []
   const used = new Set(grammar.productions.map((p) => p.name))
@@ -792,10 +1187,13 @@ function desugar(grammar: Grammar): Grammar {
     // Probe-dispatch and tail-repeat flags survive desugar unchanged —
     // the emitter routes around the standard alt-compilation path for
     // these. (A tail-repeat separator is all-terminal by construction,
-    // so it needs no desugaring of its own.)
+    // so it needs no desugaring of its own.) `repeatHelper` also
+    // arrives from upstream now: left factoring flags its nullable
+    // tail helpers so their empty alternative gets FOLLOW guards.
     if (p.probeDispatch) out.probeDispatch = p.probeDispatch
     if (p.probeHelper) out.probeHelper = p.probeHelper
     if (p.tailRepeat) out.tailRepeat = p.tailRepeat
+    if (p.repeatHelper) out.repeatHelper = p.repeatHelper
     return out
   })
 
@@ -1662,6 +2060,10 @@ function emitGrammarSpec(
   // (`?`, `*`, `+`, grouping) into plain ABNF.
   grammar = eliminateLeftRecursion(grammar)
   grammar = rewriteProbeDispatches(grammar)
+  // Left factoring runs after the probe rewriter (so `[X D] Y`
+  // patterns are recognised in their original alternatives) and
+  // before tail-repeat detection and desugaring.
+  grammar = leftFactor(grammar)
   grammar = rewriteTailRepeats(grammar, start)
   grammar = desugar(grammar)
 
@@ -1713,6 +2115,63 @@ function emitGrammarSpec(
     grammar, literals, regexTokens)
   const followSets = computeFollowSets(
     grammar, literals, regexTokens, firstSets, nullable, start)
+  const followPairs = computeFollowPairs(
+    grammar, literals, regexTokens, firstSets, nullable, followSets)
+
+  // Character coverage per token, for the contested-repetition check.
+  // A fixed token covers its literal's first code point; a match token
+  // covers whatever its leading character class covers; null means
+  // unknown (and the guard emission stays conservative).
+  const rangeCache = new Map<string, Array<[number, number]> | null>()
+  const tokenRangesOf = (tok: string): Array<[number, number]> | null => {
+    if (rangeCache.has(tok)) return rangeCache.get(tok) as any
+    let r: Array<[number, number]> | null = null
+    const lit = fixedTokens[tok]
+    if ('string' === typeof lit && 0 < lit.length) {
+      const cp = lit.codePointAt(0) as number
+      r = [[cp, cp]]
+    } else {
+      const re = matchTokens[tok]
+      if (null != re) {
+        // Strip the emitter's own `^` anchor (and grouping) so the
+        // parser sees the pattern as written.
+        let src = re.source.replace(/^\^/, '')
+        const m = /^\(\?:(.*)\)$/.exec(src)
+        if (m) src = m[1]
+        r = patternCharRanges(src)
+        // A case-insensitive matcher covers both cases of every letter
+        // it names, and the pattern text only spells one of them. ABNF
+        // literals are case-insensitive by default, so without this an
+        // unquoted `"GET"` reads as covering `G` alone — no contest is
+        // detected against a lowercase identifier class, no guards are
+        // emitted, and a valid sentence is rejected. Keeps this in step
+        // with firstCharRangesOfElement, which folds case already.
+        if (null != r && re.flags.includes('i')) {
+          r = foldCaseRanges(r)
+        }
+      }
+    }
+    rangeCache.set(tok, null == r ? null : normalizeRanges(r))
+    return rangeCache.get(tok) as any
+  }
+
+  // Do two tokens' character coverages intersect? Memoised on the token
+  // PAIR, because the contest checks below are quadratic in dispatch
+  // entries while the distinct token pairs behind them are few — a
+  // grammar with hundreds of entries per rule asks the same handful of
+  // questions over and over.
+  const overlapCache = new Map<string, boolean>()
+  const tokensOverlap = (a: string, b: string): boolean => {
+    const key = a < b ? a + ' ' + b : b + ' ' + a
+    const hit = overlapCache.get(key)
+    if (undefined !== hit) return hit
+    const ra = tokenRangesOf(a)
+    const rb = tokenRangesOf(b)
+    const out = null != ra && null != rb && charRangesOverlap(ra, rb)
+    overlapCache.set(key, out)
+    return out
+  }
+
   const refs = new RefRegistry()
   refs.useBuiltins = !!opts?.builtins
   refs.emitMarks = !!opts?.marks
@@ -1733,7 +2192,8 @@ function emitGrammarSpec(
     // directly; multi-segment alts emit a chain of aux rules.
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
-      firstSets, nullable, refs, followSets,
+      firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
+      tokensOverlap,
     )
   }
 
@@ -2141,9 +2601,326 @@ function emitProduction(
   nullable: Set<string>,
   refs: RefRegistry,
   followSets: Map<string, Set<string>>,
+  followPairs: Map<string, Map<string, Set<string>>>,
+  tokenRangesOf: (tok: string) => Array<[number, number]> | null,
+  tokensOverlap: (a: string, b: string) => boolean,
 ) {
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
+  }
+
+  // FOLLOW₂ exit guards for a CONTESTED repetition — one whose repeated
+  // element covers a follow token at the character level, so that at
+  // that character both continuing the loop and exiting are locally
+  // viable (`ws = *[ \t\n]` before the literal "\n"). The 2-token guard
+  // writes the decision down: exit exactly when the follow token is
+  // followed by something only the exit path can accept. Ordered BEFORE
+  // the continue alternatives; under the engine's negotiated lexing the
+  // guard can re-cut the character to the follow token's identity, and
+  // a failed guard leaves the loop's own alternatives to re-cut it
+  // back. Without negotiated lexing the class matcher wins the first
+  // cut and the guards are inert, which is what keeps this safe for
+  // notations that never contest.
+  const pairExitGuards = (baseO: any): any[] => {
+    if (!prod.repeatHelper) return []
+    const pairs = followPairs.get(prod.name)
+    if (null == pairs || 0 === pairs.size) return []
+    const contFirst = firstSets.get(prod.name) ?? new Set<string>()
+    const out: any[] = []
+    const seen = new Set<string>()
+    for (const [t, us] of pairs) {
+      if (0 === us.size) continue
+      if (null == tokenRangesOf(t)) continue
+      let contested = false
+      for (const f of contFirst) {
+        if (f === t) continue
+        if (tokensOverlap(t, f)) {
+          contested = true
+          break
+        }
+      }
+      if (!contested) continue
+      for (const u of us) {
+        const s = t + ' ' + u
+        if (seen.has(s)) continue
+        seen.add(s)
+        out.push({ ...baseO, s, b: 2 })
+      }
+    }
+    return out
+  }
+
+  // Keyword-shadow reordering. A dispatch list built in grammar order
+  // puts a character-class alternative (`identifier`) ahead of
+  // literal-keyword alternatives (`"while" …`) whenever the grammar
+  // listed them that way — and a scannerless lexer cuts `w` as the
+  // class token first, so the class alternative wins the dispatch and
+  // the keyword alternative is unreachable (`while(…)` dies inside
+  // `identifier ws …`). The symmetric problem when the literal comes
+  // FIRST: under negotiated lexing it re-cuts `intx` to `int` and
+  // steals the identifier. So every literal-headed dispatch entry
+  // contested by a class-headed entry gets 2-token guards (`{s:
+  // '#WHILE #T1', b: 2}` — the keyword plus a token only the keyword
+  // alternative can follow it with) placed ahead of the first
+  // contesting class entry, while its 1-token original drops behind
+  // the class entries so it can no longer steal; entries that already
+  // carry multi-token prefixes simply move ahead. Without negotiated
+  // lexing the class matcher wins the first cut and the guards never
+  // match, so tokenising notations keep their exact prior behavior.
+  const synthKeywordGuards = (
+    o: any, alt: Sequence, f: string, consumed: number,
+  ): any[] | null => {
+    const paths = altPrefixesRaw(alt, grammar, literals, regexTokens, 2)
+    const seconds = new Set<string>()
+    for (const p of paths) {
+      if (p.tokens[0] !== f) continue
+      if (2 <= p.tokens.length) { seconds.add(p.tokens[1]); continue }
+      // The literal can end the alternative (or the prefix was cut
+      // short by a cycle): the second token is whatever may follow
+      // the production. An unknown FOLLOW means no guard — and then
+      // no reordering either.
+      const fol = followSets.get(prod.name)
+      if (null == fol || 0 === fol.size) return null
+      for (const t of fol) seconds.add(t)
+    }
+    if (0 === seconds.size || 16 < seconds.size) return null
+    return [...seconds].map((u) => ({ ...o, s: f + ' ' + u, b: 2 - consumed }))
+  }
+
+  const reorderKeywordShadow = (
+    entries: Array<{ o: any; alt: Sequence | null }>,
+  ): any[] => {
+    const litToks = new Set(literals.values())
+    const classToks = new Set(regexTokens.values())
+
+    // Head token and lookahead length, resolved ONCE per entry. A
+    // dispatch list can hold hundreds of entries whose `s` is a
+    // four-token prefix, and this loop is quadratic in them — splitting
+    // those strings per comparison dominated compile time (a 332-rule
+    // grammar took a minute).
+    const N = entries.length
+    const heads: Array<string | null> = new Array(N)
+    const sLens: number[] = new Array(N)
+    for (let i = 0; i < N; i++) {
+      const s = entries[i].o.s
+      if ('string' !== typeof s || 0 === s.length) {
+        heads[i] = null
+        sLens[i] = 0
+        continue
+      }
+      const sp = s.indexOf(' ')
+      heads[i] = -1 === sp ? s : s.substring(0, sp)
+      let n = 1
+      for (let k = 0; k < s.length; k++) if (32 === s.charCodeAt(k)) n++
+      sLens[i] = n
+    }
+
+    // Class-headed entries, with their character coverage resolved once.
+    const classIdx: number[] = []
+    const classRanges: Array<Array<[number, number]>> = []
+    for (let i = 0; i < N; i++) {
+      const f = heads[i]
+      if (null == f || !classToks.has(f)) continue
+      const r = tokenRangesOf(f)
+      if (null == r) continue
+      classIdx.push(i)
+      classRanges.push(r)
+    }
+    if (0 === classIdx.length) return entries.map((e) => e.o)
+
+    type Placed = { o: any; rank: number; seq: number }
+    const placed: Placed[] = []
+    let seq = 0
+    const put = (o: any, rank: number) => placed.push({ o, rank, seq: seq++ })
+
+    // Which class entries a given literal head contests, decided once
+    // per distinct head token. Entries repeat their head heavily (one
+    // per lookahead prefix of the same alternative), and the scan below
+    // is quadratic, so without this the coverage test runs on every
+    // pair. A literal head is never itself a class head — the two token
+    // name sets are disjoint — so `c === i` cannot arise here.
+    const contestsByHead = new Map<string, Uint8Array>()
+
+    for (let i = 0; i < N; i++) {
+      const { o, alt } = entries[i]
+      const f = heads[i]
+      const fr = null != f && litToks.has(f) ? tokenRangesOf(f) : null
+
+      // First and last contesting class entry, in one pass.
+      let firstC = -1
+      let lastC = -1
+      if (null != fr && null != alt) {
+        let hits = contestsByHead.get(f as string)
+        if (undefined === hits) {
+          hits = new Uint8Array(classIdx.length)
+          for (let k = 0; k < classIdx.length; k++) {
+            hits[k] = charRangesOverlap(fr, classRanges[k]) ? 1 : 0
+          }
+          contestsByHead.set(f as string, hits)
+        }
+        for (let k = 0; k < classIdx.length; k++) {
+          if (0 === hits[k]) continue
+          const c = classIdx[k]
+          // Same descent target either way — order is moot.
+          if (null != o.p && entries[c].o.p === o.p) continue
+          if (-1 === firstC) firstC = c
+          lastC = c
+        }
+      }
+
+      if (-1 === firstC) { put(o, i); continue }
+      const front = firstC - 0.5
+      const back = lastC + 0.5
+
+      if (2 <= sLens[i]) {
+        // Already carries its own lookahead — just outrank the class.
+        put(o, Math.min(i, front))
+        continue
+      }
+
+      const consumed = 1 - (o.b ?? 0)
+      const guards = (0 === consumed || 1 === consumed)
+        ? synthKeywordGuards(o, alt as Sequence, f as string, consumed)
+        : null
+      if (null == guards) { put(o, i); continue }
+      for (const g of guards) put(g, Math.min(i, front))
+      put(o, Math.max(i, back))
+    }
+
+    return placed
+      .sort((a, b) => a.rank - b.rank || a.seq - b.seq)
+      .map((p) => p.o)
+  }
+
+  // Specificity ordering among contested class heads. llama.cpp's
+  // schema converter loves `[0-9] | [1] [0-9] | [2] [0-3]` (a bounded
+  // integer): the 1-token alternative is listed first and, matching
+  // any digit, shadows the 2-token ones — `23` dies after `2`. Among
+  // entries whose class heads overlap at the character level and whose
+  // descents differ, longer lookahead goes first (maximal munch): the
+  // longer entry only matches where its full prefix does, and a failed
+  // longer entry still falls through to the shorter one. Without
+  // negotiated lexing a token's single identity picks the same entry
+  // in either order, so tokenising notations are unaffected. Entries
+  // are permuted among their own slots so everything else stays put.
+  const specificityPermute = (
+    entries: Array<{ o: any; alt: Sequence | null }>,
+  ): void => {
+    const classToks = new Set(regexTokens.values())
+    // Head token and lookahead length once per entry — the loop below
+    // is quadratic, and re-splitting multi-token `s` strings inside it
+    // is what made large grammars slow.
+    const N = entries.length
+    const sLens: number[] = new Array(N)
+    const heads: Array<string | null> = new Array(N)
+    for (let i = 0; i < N; i++) {
+      const { o, alt } = entries[i]
+      const s = o.s
+      if ('string' !== typeof s || 0 === s.length) {
+        heads[i] = null
+        sLens[i] = 0
+        continue
+      }
+      let n = 1
+      for (let k = 0; k < s.length; k++) if (32 === s.charCodeAt(k)) n++
+      sLens[i] = n
+      if (null == alt) { heads[i] = null; continue }
+      const sp = s.indexOf(' ')
+      const f = -1 === sp ? s : s.substring(0, sp)
+      heads[i] = classToks.has(f) ? f : null
+    }
+    // Coverage per candidate head, resolved once.
+    const ranges: Array<Array<[number, number]> | null> = new Array(N)
+    for (let i = 0; i < N; i++) {
+      ranges[i] = null == heads[i] ? null : tokenRangesOf(heads[i] as string)
+    }
+    const idxs: number[] = []
+    for (let i = 0; i < N; i++) {
+      const ri = ranges[i]
+      if (null == ri) continue
+      for (let j = 0; j < N; j++) {
+        if (j === i || null == ranges[j]) continue
+        // Same descent target: the order between them is moot. Only
+        // when a descent EXISTS, though — terminal-only alternatives
+        // all carry `p: undefined`, and reading those as "same target"
+        // excludes the whole rule from the permutation, so
+        // `[0-9] / [2] [0-3]` keeps its 1-token entry first and
+        // misparses `23`.
+        if (null != entries[i].o.p && entries[j].o.p === entries[i].o.p) {
+          continue
+        }
+        if (charRangesOverlap(ri, ranges[j] as Array<[number, number]>)) {
+          idxs.push(i)
+          break
+        }
+      }
+    }
+    if (idxs.length < 2) return
+    // How much the alternative behind an entry can consume in total.
+    // Two contested entries can carry the SAME lookahead length when
+    // the prefix walk was truncated by a descent (`[0-9]` beside
+    // `[1-9] [0-9]{0,15}`, both fanning out to one token), and then
+    // lookahead alone cannot rank them. The longer alternative is the
+    // more specific one, so it goes first — maximal munch again, one
+    // level up.
+    // Computed once per contested entry, not inside the comparator.
+    const spans = new Map<number, number>()
+    for (const i of idxs) {
+      const alt = entries[i].alt
+      const n = null == alt ? 0 : seqTokenSpan(alt, grammar, new Set())
+      spans.set(i, Number.isFinite(n) ? n : 1e9)
+    }
+    const sorted = idxs
+      .slice()
+      .sort((a, b) =>
+        sLens[b] - sLens[a] ||
+        (spans.get(b) as number) - (spans.get(a) as number))
+      .map((i) => entries[i])
+    idxs.forEach((slot, k) => { entries[slot] = sorted[k] })
+  }
+
+  // True for a repetition helper whose content can start with a token
+  // its FOLLOW also contains (`( "," space b-kv )? ( "," space c-kv )?`
+  // — both sides open with the comma). One token can never decide
+  // continue-vs-exit there; K-token prefixes on the continue side let
+  // a failed deep match fall through to the exit peeks instead of
+  // committing.
+  const contestedByFollow = (alt: Sequence): boolean => {
+    if (!prod.repeatHelper) return false
+    const mine = firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
+    if (null == mine) return false
+    const fol = followSets.get(prod.name) ?? new Set<string>()
+    for (const t of mine) {
+      for (const f of fol) {
+        if (f === t) return true
+        if (tokensOverlap(t, f)) return true
+      }
+    }
+    return false
+  }
+
+  // True when this alternative's first tokens overlap another
+  // alternative's at the character level with a different descent —
+  // the condition under which a 1-token FIRST peek cannot pick the
+  // right alternative and K-token prefixes are worth their weight.
+  const altHeadContested = (
+    alt: Sequence,
+    all: Sequence[],
+  ): boolean => {
+    const mine = firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
+    if (null == mine) return false
+    for (const other of all) {
+      if (other === alt || 0 === other.length) continue
+      const theirs = firstOfAlt(
+        other, literals, regexTokens, firstSets, nullable)
+      if (null == theirs) continue
+      for (const t of mine) {
+        for (const u of theirs) {
+          if (tokensOverlap(t, u)) return true
+        }
+      }
+    }
+    return false
   }
 
   if (prod.tailRepeat) {
@@ -2173,7 +2950,7 @@ function emitProduction(
       ? assignMarks(ordered, literals, regexTokens)
       : null
     const needsPeek = ordered.length > 1
-    const opens: any[] = []
+    const entries: Array<{ o: any; alt: Sequence | null }> = []
     for (const alt of ordered) {
       const segs = segmentize(alt, literals, regexTokens)
       const seg = segs[0]
@@ -2187,18 +2964,44 @@ function emitProduction(
         const firstTokens = firstOfAlt(
           alt, literals, regexTokens, firstSets, nullable)
         if (firstTokens) {
-          for (const tok of firstTokens) {
-            const o: any = {
-              s: tok,
-              b: 1,
-              p: seg.ref,
-              ...refs.node(
-                { init: true, rule: prod.name, kind: prodKind, nterms: 0 },
-                (r: Rule) => { r.node = mkAstNode(prod.name, prodKind) }),
-              g: tag,
+          const nodeFields = refs.node(
+            { init: true, rule: prod.name, kind: prodKind, nterms: 0 },
+            (r: Rule) => { r.node = mkAstNode(prod.name, prodKind) })
+          // A contested head cannot be decided by one token — fan out
+          // to K-token prefixes (bounded, deduped; bail to the 1-token
+          // peek if the fan-out is degenerate) so the specificity
+          // ordering has lookahead to work with.
+          let paths: string[][] | null = null
+          if (altHeadContested(alt, ordered) || contestedByFollow(alt)) {
+            const pfx = altPrefixes(
+              alt, grammar, literals, regexTokens, LOOKAHEAD_K)
+              .filter((p) => 0 < p.length)
+            if (0 < pfx.length && pfx.length <= 64) paths = pfx
+          }
+          if (paths) {
+            for (const p of paths) {
+              const o: any = {
+                s: p.join(' '),
+                b: p.length,
+                p: seg.ref,
+                ...nodeFields,
+                g: tag,
+              }
+              if (mark) o.m = mark
+              entries.push({ o, alt })
             }
-            if (mark) o.m = mark
-            opens.push(o)
+          } else {
+            for (const tok of firstTokens) {
+              const o: any = {
+                s: tok,
+                b: 1,
+                p: seg.ref,
+                ...nodeFields,
+                g: tag,
+              }
+              if (mark) o.m = mark
+              entries.push({ o, alt })
+            }
           }
           continue
         }
@@ -2213,13 +3016,18 @@ function emitProduction(
       // alternative stays last as the fallback.
       if (alt.length === 0 && prod.repeatHelper) {
         for (const tok of followSets.get(prod.name) ?? []) {
-          opens.push({ ...o, s: tok, b: 1 })
+          entries.push({ o: { ...o, s: tok, b: 1 }, alt: null })
         }
+        // Contested repetitions additionally get FOLLOW₂ guards, at
+        // the FRONT so they outrank the continue alternatives.
+        entries.unshift(
+          ...pairExitGuards(o).map((g: any) => ({ o: g, alt: null })))
       }
-      opens.push(o)
+      entries.push({ o, alt: 0 < alt.length ? alt : null })
     }
 
-    const rs: any = { open: opens }
+    specificityPermute(entries)
+    const rs: any = { open: reorderKeywordShadow(entries) }
 
     // If any alt has a push, the close state must capture the
     // returned child. Add a universal fallback close alt whose
@@ -2250,8 +3058,10 @@ function emitProduction(
   // and pushes the matching impl rule. Using `p:` (not `r:`) keeps
   // the parent's `child` pointer valid so the parent can read the
   // impl's node in its close-state action.
-  const dispatchOpen: any[] = []
+  const dispatchEntries: Array<{ o: any; alt: Sequence | null }> = []
   let emptyAltSeen = false
+  const nullableImpls: Array<{ implName: string; fields: any; mark?: string }> =
+    []
   const dispatchMarks = ((prod.nodeKind ?? 'user') === 'user' && refs.emitMarks)
     ? assignMarks(prod.alts, literals, regexTokens)
     : null
@@ -2286,7 +3096,17 @@ function emitProduction(
       { init: true, rule: prod.name, kind: dispatchKind, nterms: 0 },
       (r: Rule) => { r.node = mkAstNode(prod.name, dispatchKind) })
 
-    const LOOKAHEAD_K = 4
+    const rawPaths = altPrefixesRaw(
+      alt, grammar, literals, regexTokens, LOOKAHEAD_K)
+    // An alternative that can derive ε (all elements nullable — a
+    // complete zero-token path, not a cycle truncation) loses that
+    // derivation in the `usable` filter below. Remember it: after the
+    // loop it is re-issued as FOLLOW-guarded entries plus a bare
+    // fallback, ordered after every content entry so an ε-derivation
+    // never preempts a real match.
+    if (rawPaths.some((p) => 0 === p.tokens.length && !p.done)) {
+      nullableImpls.push({ implName, fields: initDispatchFields, mark })
+    }
     const prefixes = altPrefixes(
       alt, grammar, literals, regexTokens, LOOKAHEAD_K)
     const usable = prefixes.filter((p) => p.length > 0)
@@ -2300,7 +3120,7 @@ function emitProduction(
           g: tag,
         }
         if (mark) o.m = mark
-        dispatchOpen.push(o)
+        dispatchEntries.push({ o, alt })
       }
     } else {
       const firstTokens = firstOfAlt(
@@ -2315,9 +3135,24 @@ function emitProduction(
           s: tok, b: 1, p: implName, ...initDispatchFields, g: tag,
         }
         if (mark) o.m = mark
-        dispatchOpen.push(o)
+        dispatchEntries.push({ o, alt })
       }
     }
+  }
+
+  // Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
+  // first (they name the follow token, so the lexer offers it at this
+  // position), then one unguarded fallback that pushes the impl with
+  // nothing consumed. Everything here ranks after all content entries.
+  for (const n of nullableImpls) {
+    for (const tok of followSets.get(prod.name) ?? []) {
+      const o: any = { s: tok, b: 1, p: n.implName, ...n.fields, g: tag }
+      if (n.mark) o.m = n.mark
+      dispatchEntries.push({ o, alt: null })
+    }
+    const o: any = { p: n.implName, ...n.fields, g: tag }
+    if (n.mark) o.m = n.mark
+    dispatchEntries.push({ o, alt: null })
   }
 
   if (emptyAltSeen) {
@@ -2336,10 +3171,14 @@ function emitProduction(
     // Same FOLLOW guard as the single-segment path above.
     if (prod.repeatHelper) {
       for (const tok of followSets.get(prod.name) ?? []) {
-        dispatchOpen.push({ ...o, s: tok, b: 1 })
+        dispatchEntries.push({ o: { ...o, s: tok, b: 1 }, alt: null })
       }
+      // Contested repetitions additionally get FOLLOW₂ guards, at the
+      // FRONT so they outrank the continue alternatives.
+      dispatchEntries.unshift(
+        ...pairExitGuards(o).map((g: any) => ({ o: g, alt: null })))
     }
-    dispatchOpen.push(o)
+    dispatchEntries.push({ o, alt: null })
   }
 
   const dispClose: any = {
@@ -2351,7 +3190,11 @@ function emitProduction(
     g: tag,
   }
   if (dispatchMarks) dispClose.m = '_'
-  ruleSpec[prod.name] = { open: dispatchOpen, close: [dispClose] }
+  specificityPermute(dispatchEntries)
+  ruleSpec[prod.name] = {
+    open: reorderKeywordShadow(dispatchEntries),
+    close: [dispClose],
+  }
 }
 
 
@@ -2560,6 +3403,277 @@ function computeFollowSets(
   }
 
   return follow
+}
+
+
+// FOLLOW₂ pairs — for each production R, the pairs (t, u) such that R
+// may be followed by token t and then token u.
+//
+// This exists for exactly one decision the 1-token FOLLOW guard cannot
+// make: a repetition whose repeated element COVERS a follow token at
+// the character level. `ws = *[ \t\n]` followed by the literal "\n" is
+// the canonical case — at a newline, continuing the loop and exiting
+// are both locally viable, and which is right depends on what comes
+// AFTER the newline. The pair (t, u) is what lets the emitter write
+// that decision down as an ordered guard.
+//
+// Deliberately approximate, in one direction only: pairs whose t would
+// come from inside a following REFERENCE are not collected (walking
+// FIRST₂ through rules needs its own fixpoint), so some contested
+// repetitions get no pair guards and keep today's behaviour. Pairs that
+// ARE collected are exact.
+function computeFollowPairs(
+  grammar: Grammar,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+  firstSets: Map<string, Set<string>>,
+  nullable: Set<string>,
+  follow: Map<string, Set<string>>,
+): Map<string, Map<string, Set<string>>> {
+  const pairs = new Map<string, Map<string, Set<string>>>()
+  for (const p of grammar.productions) pairs.set(p.name, new Map())
+
+  const tokOf = (el: Element): string | undefined =>
+    el.kind === 'term'
+      ? literals.get(termKey(el))
+      : el.kind === 'token'
+        ? el.name
+        : el.kind === 'regex'
+          ? regexTokens.get(regexKey(el))
+          : undefined
+
+  const addPair = (R: string, t: string, u: string): boolean => {
+    const m = pairs.get(R)
+    if (!m) return false
+    let us = m.get(t)
+    if (!us) {
+      us = new Set()
+      m.set(t, us)
+    }
+    if (us.has(u)) return false
+    us.add(u)
+    return true
+  }
+
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const prod of grammar.productions) {
+      const prodFollow = follow.get(prod.name) ?? new Set<string>()
+      const prodPairs = pairs.get(prod.name) as Map<string, Set<string>>
+      for (const alt of prod.alts) {
+        for (let i = 0; i < alt.length; i++) {
+          const el = alt[i]
+          if (el.kind !== 'ref' || !pairs.has(el.name)) continue
+
+          let j = i + 1
+          let blocked = false
+          while (j < alt.length) {
+            const ej = alt[j]
+            if (ej.kind === 'ref') {
+              // A following reference blocks the walk unless it can
+              // vanish; pairs starting inside it are not collected
+              // (see the header note).
+              if (nullable.has(ej.name)) { j++; continue }
+              blocked = true
+              break
+            }
+            const t = tokOf(ej)
+            if (null == t) { blocked = true; break }
+            const rest = firstOfSeq(
+              alt.slice(j + 1), literals, regexTokens, firstSets, nullable)
+            for (const u of rest.tokens) {
+              if (addPair(el.name, t, u)) changed = true
+            }
+            if (rest.nullable) {
+              for (const u of prodFollow) {
+                if (addPair(el.name, t, u)) changed = true
+              }
+            }
+            blocked = true
+            break
+          }
+          if (!blocked) {
+            // Nothing mandatory follows the reference, so the enclosing
+            // production's pairs follow it too.
+            for (const [t, us] of prodPairs) {
+              for (const u of us) {
+                if (addPair(el.name, t, u)) changed = true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return pairs
+}
+
+
+// Character coverage of an emitted matcher pattern, as sorted
+// code-point ranges — or null when the pattern is not a shape this
+// parser understands (the caller must then treat coverage as unknown
+// and stay conservative). Handles exactly what the emitter itself
+// produces: a leading character class with \uXXXX / \u{…} / \xXX
+// escapes and ranges, `[\s\S]`, negation, or a single (possibly
+// escaped) literal character. Trailing content after the first class
+// (`[aA][bB]`, boundary guards) is irrelevant here: only the FIRST
+// character's coverage decides whether two tokens can contest one
+// input position.
+function patternCharRanges(
+  pattern: string,
+): Array<[number, number]> | null {
+  if ('[\\s\\S]' === pattern) return [[0, 0x10FFFF]]
+
+  let i = 0
+
+  const one = (): number | null => {
+    const c = pattern[i]
+    if (undefined === c) return null
+    if ('\\' === c) {
+      const m = pattern[i + 1]
+      if (undefined === m) return null
+      if ('u' === m) {
+        if ('{' === pattern[i + 2]) {
+          const e = pattern.indexOf('}', i + 3)
+          if (e < 0) return null
+          const cp = parseInt(pattern.slice(i + 3, e), 16)
+          if (isNaN(cp)) return null
+          i = e + 1
+          return cp
+        }
+        const cp = parseInt(pattern.substr(i + 2, 4), 16)
+        if (isNaN(cp)) return null
+        i += 6
+        return cp
+      }
+      if ('x' === m) {
+        const cp = parseInt(pattern.substr(i + 2, 2), 16)
+        if (isNaN(cp)) return null
+        i += 4
+        return cp
+      }
+      if ('dDwWsSbB0nrtfv'.includes(m)) {
+        // Shorthand classes and control escapes: bail rather than
+        // guess — unknown coverage keeps the caller conservative.
+        return null
+      }
+      i += 2
+      return m.codePointAt(0) as number
+    }
+    const cp = pattern.codePointAt(i) as number
+    i += cp > 0xFFFF ? 2 : 1
+    return cp
+  }
+
+  if ('[' !== pattern[0]) {
+    const cp = one()
+    if (null == cp) return null
+    return [[cp, cp]]
+  }
+
+  i = 1
+  let neg = false
+  if ('^' === pattern[i]) {
+    neg = true
+    i++
+  }
+  const ranges: Array<[number, number]> = []
+  while (i < pattern.length && ']' !== pattern[i]) {
+    const lo = one()
+    if (null == lo) return null
+    if ('-' === pattern[i] && ']' !== pattern[i + 1] &&
+      i + 1 < pattern.length) {
+      i++
+      const hi = one()
+      if (null == hi) return null
+      ranges.push([lo, hi])
+    } else {
+      ranges.push([lo, lo])
+    }
+  }
+  if (']' !== pattern[i]) return null
+
+  if (!neg) return ranges
+
+  // Complement over the code-point space.
+  ranges.sort((a, b) => a[0] - b[0])
+  const out: Array<[number, number]> = []
+  let next = 0
+  for (const [lo, hi] of ranges) {
+    if (next < lo) out.push([next, lo - 1])
+    if (hi + 1 > next) next = hi + 1
+  }
+  if (next <= 0x10FFFF) out.push([next, 0x10FFFF])
+  return out
+}
+
+
+// Widen character ranges to cover both cases of every ASCII letter in
+// them, for matchers carrying the `i` flag. ASCII only: the ranges feed
+// contest detection between a keyword and a character class, and both
+// sides of that contest are ASCII in every notation this compiler
+// targets. A non-ASCII letter simply keeps its own case, which is the
+// conservative answer (a missed contest emits no guard).
+function foldCaseRanges(
+  ranges: Array<[number, number]>,
+): Array<[number, number]> {
+  const out: Array<[number, number]> = [...ranges]
+  const A = 0x41, Z = 0x5a, a = 0x61, z = 0x7a
+  const DELTA = a - A
+  for (const [lo, hi] of ranges) {
+    // Uppercase portion of the range -> its lowercase image, and back.
+    const uLo = Math.max(lo, A), uHi = Math.min(hi, Z)
+    if (uLo <= uHi) out.push([uLo + DELTA, uHi + DELTA])
+    const lLo = Math.max(lo, a), lHi = Math.min(hi, z)
+    if (lLo <= lHi) out.push([lLo - DELTA, lHi - DELTA])
+  }
+  return out
+}
+
+
+// Sort by low bound and merge touching/overlapping spans, so the
+// overlap test below can sweep both sides once instead of comparing
+// every pair. Called from tokenRangesOf, whose result is cached, so
+// each token pays for this at most once.
+function normalizeRanges(
+  r: Array<[number, number]>,
+): Array<[number, number]> {
+  if (r.length < 2) return r
+  const sorted = r.slice().sort((x, y) => x[0] - y[0] || x[1] - y[1])
+  const out: Array<[number, number]> = [sorted[0]]
+  for (let i = 1; i < sorted.length; i++) {
+    const last = out[out.length - 1]
+    const cur = sorted[i]
+    if (cur[0] <= last[1] + 1) {
+      if (last[1] < cur[1]) last[1] = cur[1]
+    } else {
+      out.push(cur)
+    }
+  }
+  return out
+}
+
+
+// Do two coverages share a character? Both sides come from
+// tokenRangesOf and are therefore sorted and merged, so one linear
+// sweep decides it. This runs inside the quadratic contest loops, and
+// a pairwise scan here is what made a 332-rule grammar take a minute.
+function charRangesOverlap(
+  a: Array<[number, number]>,
+  b: Array<[number, number]>,
+): boolean {
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    const ai = a[i]
+    const bj = b[j]
+    if (ai[0] <= bj[1] && bj[0] <= ai[1]) return true
+    if (ai[1] < bj[1]) i++
+    else j++
+  }
+  return false
 }
 
 
@@ -2789,8 +3903,12 @@ function escapeRegExp(s: string): string {
 // parsing starts. Falling through to the numbered form (`#NR1`) costs
 // nothing but a less pretty name.
 function isEngineOwnedToken(name: string): boolean {
+  // Mirrors the engine's MATCHER_TOKEN_NAMES: tokens its own matchers
+  // produce, which a grammar's fixed literal must not be named after
+  // (`"aa"` would otherwise derive `#AA`, the engine's ANY token).
   return Object.prototype.hasOwnProperty.call(BUILTIN_TOKENS, name.slice(1)) ||
-    '#ZZ' === name || '#SP' === name || '#LN' === name || '#CM' === name
+    '#BD' === name || '#ZZ' === name || '#UK' === name || '#AA' === name ||
+    '#SP' === name || '#LN' === name || '#CM' === name
 }
 
 

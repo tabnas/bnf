@@ -325,6 +325,107 @@ describe('bnf', () => {
     assert.deepEqual(lift('PL'), { '#PL': 'PL' })
   })
 
+  // Left factoring rewrites a user rule's alternatives, so it must fire
+  // only where the dispatcher genuinely cannot separate them: a
+  // factored rule keeps ONE alternative, which merges the per-branch
+  // collision marks that actions bind to. The prefix-span measurement
+  // is what draws that line, and it runs on the raw IR — where the
+  // sugar kinds are still present and easy to misread as unbounded.
+  describe('left factoring is bounded by dispatch lookahead', () => {
+    const rep = (min, max, inner) => ({ kind: 'rep', min, max, inner })
+    const group = (...alts) => ({ kind: 'group', alts })
+    const factored = (grammar, name) =>
+      Object.keys(emitGrammarSpec(grammar, { tag: 'demo' }).rule)
+        .some((rn) => rn.startsWith(name + '$fact'))
+
+    const twoAlts = (prefix) => ({
+      productions: [
+        {
+          name: 'g',
+          alts: [
+            [...prefix, ref('P')],
+            [...prefix, ref('Q')],
+          ],
+        },
+        { name: 'P', alts: [[term('p')]] },
+        { name: 'Q', alts: [[term('q')]] },
+      ],
+    })
+
+    it('leaves a short prefix of plain terminals to the dispatcher', () => {
+      assert.equal(factored(twoAlts([term('a'), term('x')]), 'g'), false)
+    })
+
+    it('leaves a short prefix wrapped in a group', () => {
+      // `("a") "x"` spans two tokens like the case above. Reading the
+      // group as unbounded factored it, and the two branches then
+      // shared one mark.
+      assert.equal(
+        factored(twoAlts([group([term('a')]), term('x')]), 'g'), false)
+    })
+
+    it('leaves a short prefix containing an optional', () => {
+      assert.equal(
+        factored(twoAlts([{ kind: 'opt', inner: term('-') }, term('1')]), 'g'),
+        false)
+    })
+
+    it('leaves a bounded repetition that fits the lookahead', () => {
+      assert.equal(factored(twoAlts([rep(2, 2, term('a'))]), 'g'), false)
+    })
+
+    it('factors a prefix longer than the lookahead', () => {
+      const long = ['a', 'b', 'c', 'd', 'e'].map(term)
+      assert.equal(factored(twoAlts(long), 'g'), true)
+    })
+
+    it('factors an unbounded repetition', () => {
+      assert.equal(
+        factored(twoAlts([{ kind: 'plus', inner: term('a') }]), 'g'), true)
+    })
+
+    it('keeps a mark per branch when it does not factor', () => {
+      const listing = markListing(
+        emitGrammarSpec(twoAlts([group([term('a')]), term('x')]),
+          { tag: 'demo', marks: true }))
+      // Two distinct open marks — one per original alternative.
+      const marks = listing.split('\n')
+        .filter((l) => l.includes('o:'))
+        .map((l) => l.trim())
+      assert.equal(marks.length, 2, listing)
+      assert.notEqual(marks[0], marks[1], listing)
+    })
+  })
+
+
+  // Coverage feeding the contest checks must agree with what a matcher
+  // actually matches, or no guard is emitted where one is needed.
+  it('counts both cases of a case-insensitive literal as covered', () => {
+    // A bare literal is case-insensitive by default here, so `"G"` also
+    // matches `g` and contests a lowercase class.
+    const spec = emitGrammarSpec({
+      productions: [
+        {
+          name: 'g',
+          alts: [
+            [term('G'), ref('L')],
+            [ref('L')],
+          ],
+        },
+        { name: 'L', alts: [[{ kind: 'regex', pattern: '[a-z]', flags: '' }]] },
+      ],
+    }, { tag: 'demo' })
+
+    // The contest was detected, so the keyword entry carries lookahead
+    // and outranks the bare class entry.
+    const first = spec.rule.g.open[0]
+    assert.ok(
+      'string' === typeof first.s && 1 < first.s.split(' ').length,
+      'expected a multi-token keyword guard first, got ' +
+      JSON.stringify(spec.rule.g.open))
+  })
+
+
   it('exports a semver-shaped VERSION matching package.json', () => {
     assert.match(VERSION, /^\d+\.\d+\.\d+/)
     assert.equal(VERSION, require('../package.json').version)
