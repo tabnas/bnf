@@ -22,7 +22,10 @@ Everything hard about that second arrow lives here, and is shared:
 
 - **desugaring** repetition (`*A`, `1*A`, `m*nA`, `[A]`) into helper rules;
 - **left-recursion elimination**, rewriting a left-recursive rule into
-  iterative form so it runs on a push-down engine;
+  iterative form so it runs on a push-down engine — including the
+  recursion hidden behind nullable sugar (`A = ["x"] A "y"`), and the
+  **suffix-debt counters** that stop the generated tail loop from eating
+  a token the enclosing alternative still owes;
 - **tail-repeat rewriting**, turning `X = prefix [ sep X ]` into a
   same-depth close-phase loop so iterations share one parent;
 - **probe dispatch**, the mark/rewind machinery for optional prefixes that

@@ -45,7 +45,125 @@ func cloneGrammar(grammar *Grammar) *Grammar {
 
 // ---- left-recursion elimination (Paull's) --------------------------
 
+// nullableSugarPresent describes sugar that can match nothing: `[X]`,
+// `*X`, and `m*nX` with m = 0. It returns the element sequence for the
+// branch where the sugar DOES match at least once, or nil if the element
+// is not nullable sugar.
+//
+// This is deliberately narrow. A nullable *reference* (`A = b A`,
+// `b = "y" /`) is already handled by Paull's substitution; what that
+// machinery cannot see is sugar, because it inspects ref elements and
+// this pass runs before desugar. Mirrors the TS `nullableSugarPresent`.
+func nullableSugarPresent(el *Element) Sequence {
+	switch el.Kind {
+	case KindOpt:
+		return Sequence{el.Inner}
+	case KindStar:
+		return Sequence{el.Inner, el}
+	case KindRep:
+		if el.Min != 0 {
+			return nil
+		}
+		switch {
+		case el.Max == 0:
+			return nil
+		case el.Max == MaxInfinity:
+			return Sequence{el.Inner, el}
+		case el.Max == 1:
+			return Sequence{el.Inner}
+		default:
+			return Sequence{el.Inner,
+				&Element{Kind: KindRep, Min: 0, Max: el.Max - 1, Inner: el.Inner}}
+		}
+	}
+	return nil
+}
+
+// isHiddenLeftRecursive reports whether this alternative re-enters `name`
+// at the same input position — reachable only because everything before
+// the self-reference can match nothing. `A = ["x"] A "y"` is the shape:
+// skip the leading nullable sugar and the next element is a reference
+// back to A.
+//
+// Direct left recursion (`A = A "y"`) is excluded: there is no sugar to
+// split, and eliminateDirectLeftRec already removes it. Mirrors the TS
+// `isHiddenLeftRecursive`.
+func isHiddenLeftRecursive(alt Sequence, name string) bool {
+	sawSugar := false
+	for _, el := range alt {
+		if el.Kind == KindRef {
+			return sawSugar && el.Name == name
+		}
+		if nullableSugarPresent(el) == nil {
+			return false
+		}
+		sawSugar = true
+	}
+	return false
+}
+
+// expandNullableLeftPrefixes splits leading nullable sugar into explicit
+// present/absent alternatives, so that hidden left recursion becomes
+// *direct* left recursion that eliminateDirectLeftRec can then remove.
+//
+//	A = ["x"] A "y" / "z"    becomes    A = "x" A "y" / A "y" / "z"
+//
+// Without this the recursion survives into the emitted grammar: the
+// generated optional helper takes its empty branch and exposes A again at
+// the same source position, so the parse loops or rejects strings the IR
+// accepts. eliminateLeftRecursion runs before desugar (it has to —
+// substitution works on the authored shape), so it never sees the sugar
+// as the nullable thing it is.
+//
+// Only alternatives that are actually hidden-left-recursive are touched,
+// so a grammar that compiles correctly today is unchanged. Mirrors the TS
+// `expandNullableLeftPrefixes`.
+func expandNullableLeftPrefixes(prods []*Production) []*Production {
+	out := make([]*Production, len(prods))
+	for i, p := range prods {
+		alts := p.Alts
+		changed := false
+		// Each expansion shortens the leading sugar run of the alternative it
+		// splits, so this terminates; the guard is belt-and-braces.
+		guard := 1
+		for _, a := range alts {
+			guard += len(a)
+		}
+		for round := 0; round < guard; round++ {
+			idx := -1
+			for j, a := range alts {
+				if isHiddenLeftRecursive(a, p.Name) {
+					idx = j
+					break
+				}
+			}
+			if idx < 0 {
+				break
+			}
+			alt := alts[idx]
+			present := nullableSugarPresent(alt[0])
+			next := make([]Sequence, 0, len(alts)+1)
+			next = append(next, alts[:idx]...)
+			next = append(next, append(append(Sequence{}, present...), alt[1:]...))
+			next = append(next, append(Sequence{}, alt[1:]...))
+			next = append(next, alts[idx+1:]...)
+			alts = next
+			changed = true
+		}
+		if !changed {
+			out[i] = p
+			continue
+		}
+		cp := *p
+		cp.Alts = alts
+		out[i] = &cp
+	}
+	return out
+}
+
 func eliminateLeftRecursion(grammar *Grammar) *Grammar {
+	// Suffix-debt counter names handed out across the whole grammar.
+	debtNames := map[string]bool{}
 	originalOrder := make([]string, len(grammar.Productions))
 	for i, p := range grammar.Productions {
 		originalOrder[i] = p.Name
@@ -60,7 +178,12 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 		}
 		copies[i] = &Production{Name: p.Name, Alts: alts, NodeKind: p.NodeKind}
 	}
-	prods := topoOrderForPaull(copies)
+	// Order productions so that rules referenced at a leading position are
+	// processed before the rules that reference them. Paull's substitution
+	// inlines A_j's alts into A_i for j < i, so putting dependencies first is
+	// what makes nullable-prefixed hidden left recursion reachable by the
+	// substitution step.
+	prods := topoOrderForPaull(expandNullableLeftPrefixes(copies))
 
 	// Substitution normally runs for every production, even a cycle-free one.
 	// That is pragmatic rather than theoretical: the multi-token altPrefixes
@@ -120,7 +243,7 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 				}
 			}
 		}
-		prods[i] = eliminateDirectLeftRec(prods[i])
+		prods[i] = eliminateDirectLeftRec(prods[i], debtNames)
 	}
 
 	byName := map[string]*Production{}
@@ -301,7 +424,57 @@ func substituteLeadingRef(target, source *Production) *Production {
 	return &Production{Name: target.Name, Alts: newAlts, NodeKind: target.NodeKind}
 }
 
-func eliminateDirectLeftRec(prod *Production) *Production {
+// freshDebtCounter allocates a suffix-debt counter name for a production.
+// Counter names end up in a declarative condition path (`n.<counter>`),
+// which the engine splits on `.`, and in serialised output, where a bare
+// identifier avoids quoting — so reduce the rule name to word characters
+// and disambiguate against what has already been handed out. Mirrors the
+// TS `freshDebtCounter`.
+func freshDebtCounter(ruleName string, used map[string]bool) string {
+	var b strings.Builder
+	b.WriteString("debt_")
+	for _, r := range ruleName {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	base := b.String()
+	name := base
+	for i := 1; used[name]; i++ {
+		name = base + "_" + intToStr(i)
+	}
+	used[name] = true
+	return name
+}
+
+// hasSelfRefWithSuffix reports whether any seed alternative re-enters this
+// rule at a non-leading position with something mandatory left to match
+// after it. That is the shape whose inner tail loop competes with the
+// enclosing alternative's suffix — see resolveSuffixDebts, which decides
+// whether the competition is real once FIRST sets exist.
+//
+// Only the top level of each seed is inspected: a self-reference buried
+// inside a group is not seen here, and is not seen by the hidden
+// left-recursion detector either. Mirrors the TS `hasSelfRefWithSuffix`.
+func hasSelfRefWithSuffix(seeds []Sequence, name string) bool {
+	for _, alt := range seeds {
+		for i := 0; i+1 < len(alt); i++ {
+			if alt[i].Kind == KindRef && alt[i].Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// eliminateDirectLeftRec rewrites a single production's direct left
+// recursion to its iterative equivalent. debtNames accumulates the
+// suffix-debt counters allocated so far, so two rules whose names reduce
+// to the same word characters still get distinct counters.
+func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Production {
 	recursive := []Sequence{}
 	seeds := []Sequence{}
 	for _, alt := range prod.Alts {
@@ -337,9 +510,28 @@ func eliminateDirectLeftRec(prod *Production) *Production {
 	} else {
 		tailInner = &Element{Kind: KindGroup, Alts: nonTrivial}
 	}
+	// The rewrite is correct as a CFG, but it introduces a repetition whose
+	// greediness can compete with a suffix of the very alternative it was
+	// derived from. `A = ["x"] A "y" / "z"` becomes
+	// `A = ( "x" A "y" | "z" ) "y"*`: parsing `xzy` needs the inner A's tail
+	// loop to match ZERO `"y"`s so the outer `"y"` has something to consume,
+	// and a greedy loop eats it instead. No amount of lookahead can decide
+	// that — the repeated token and the follow token are the same token, and
+	// whether to continue depends on how many enclosing frames still owe a
+	// `"y"`, which is stack depth, not a token window.
+	//
+	// So count the debt instead. Flag the loop here; resolveSuffixDebts
+	// confirms the contest against real FIRST sets and wires up the counter,
+	// or drops the flag when the suffix and the loop cannot collide
+	// (`A = A "w" / "(" A ")" / "z"` — `")"` never contests `"w"`). Issue #6.
+	star := &Element{Kind: KindStar, Inner: tailInner}
+	if hasSelfRefWithSuffix(seeds, prod.Name) {
+		star.DebtGuard = freshDebtCounter(prod.Name, debtNames)
+	}
+
 	return &Production{
 		Name:     prod.Name,
-		Alts:     []Sequence{{seedElement, {Kind: KindStar, Inner: tailInner}}},
+		Alts:     []Sequence{{seedElement, star}},
 		NodeKind: prod.NodeKind,
 	}
 }
@@ -497,8 +689,13 @@ func desugar(grammar *Grammar) *Grammar {
 		case KindStar:
 			name := freshName("star_" + hint)
 			selfRef := &Element{Kind: KindRef, Name: name}
-			extra = append(extra, &Production{
-				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper"})
+			helper := &Production{
+				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper"}
+			// A left-recursion tail loop that may have to yield to an enclosing
+			// suffix carries its counter onto the helper it becomes — the rule
+			// the guard is actually emitted on.
+			helper.DebtGuard = el.DebtGuard
+			extra = append(extra, helper)
 			return &Element{Kind: KindRef, Name: name}
 		case KindPlus:
 			tailName := freshName("star_" + hint)
@@ -580,6 +777,7 @@ func desugar(grammar *Grammar) *Grammar {
 		if p.TailRepeat != nil {
 			out.TailRepeat = p.TailRepeat
 		}
+		out.DebtGuard = p.DebtGuard
 		rewritten = append(rewritten, out)
 	}
 	return &Grammar{Productions: append(rewritten, extra...)}

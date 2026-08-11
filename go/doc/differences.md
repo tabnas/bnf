@@ -37,3 +37,22 @@ that engine option would be exercise without effect.
 
 When the Go engine gains negotiated lexing, port the items above in the
 same order they landed in TS, moving each from this list into the code.
+
+## Hidden left recursion (ported, tabnas/bnf#6)
+
+Both ports now handle left recursion reached through nullable sugar
+(`A = ["x"] A "y" / "z"`):
+
+- `expandNullableLeftPrefixes` splits the leading sugar into explicit
+  present/absent alternatives, turning hidden left recursion into the
+  direct kind Paull's machinery removes. This landed in TS with
+  tabnas/bnf#4 and was missed by the port; it is here now.
+- `resolveSuffixDebts` settles the tail loop the rewrite leaves behind,
+  whose greediness contests a suffix of the alternative it came from.
+
+Neither depends on negotiated lexing: the decision is about enclosing
+stack depth, not about how a character is cut. The counters and
+declarative conditions they emit (`n`, `c`) have identical semantics in
+both engines, and the condition uses the scalar `$eq` shorthand, which
+is the one spelling both accept — so the emitted shape is the same in
+each port.

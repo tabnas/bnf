@@ -72,11 +72,22 @@ type Element struct {
 
 	// ref
 	Name string
+	// Debt holds the suffix-debt counter mutations to emit on the alt that
+	// pushes this reference (`n: {<counter>: 1|0}`). Written by
+	// resolveSuffixDebts; see that pass for what the counter means. Nil on
+	// every reference in a grammar with no contested tail loop, which is all
+	// of them until one is detected. Mirrors the TS `debt` field.
+	Debt map[string]int
 
 	// opt / star / plus / rep
 	Inner *Element
 	Min   int
 	Max   int // MaxInfinity for unbounded
+	// DebtGuard names the suffix-debt counter guarding a star, set by
+	// eliminateDirectLeftRec on the tail loop it generates. desugar carries
+	// it onto the helper production the star becomes; resolveSuffixDebts
+	// then confirms or drops it. Mirrors the TS `debtGuard` field.
+	DebtGuard string
 
 	// group
 	Alts []Sequence
@@ -122,7 +133,13 @@ type Production struct {
 	// (`r: X`) instead of the opt→group→push helper chain. Mirrors the
 	// TS `tailRepeat` flag.
 	TailRepeat *TailRepeatSpec
-	NodeKind   string // "", "user", "core", "helper"
+	// DebtGuard is set by desugar on the star helper generated for a
+	// left-recursion tail loop whose greediness contests a suffix of the
+	// rule it was derived from, and confirmed by resolveSuffixDebts. Names
+	// the counter whose value must be zero for the loop to keep going.
+	// Mirrors the TS `debtGuard` production flag.
+	DebtGuard string
+	NodeKind  string // "", "user", "core", "helper"
 }
 
 type TailRepeatSpec struct {

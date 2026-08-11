@@ -172,6 +172,11 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 		knownRules[p.Name] = true
 	}
 	firstSets, nullable := computeFirstSets(grammar, literals, regexTokens)
+	// Settle the contested left-recursion tail loops flagged during
+	// elimination, now that FIRST sets can say whether the competition is
+	// real. Runs on the desugared grammar because the loop is a helper
+	// production by this point.
+	resolveSuffixDebts(grammar, literals, regexTokens, firstSets, nullable)
 
 	refs := newRefRegistry()
 	refs.useBuiltins = opts.Builtins
@@ -253,6 +258,9 @@ func goRegex(pattern, flags string) *regexp.Regexp {
 type segment struct {
 	terms []string
 	ref   string
+	// debt holds the counter mutations the pushing alt carries, from the
+	// reference's Debt annotation. See resolveSuffixDebts.
+	debt map[string]int
 }
 
 func segmentize(alt Sequence, literals, regexTokens map[string]string) []segment {
@@ -268,6 +276,7 @@ func segmentize(alt Sequence, literals, regexTokens map[string]string) []segment
 			current.terms = append(current.terms, el.Name)
 		case KindRef:
 			current.ref = el.Name
+			current.debt = el.Debt
 			segs = append(segs, current)
 			current = segment{}
 		default:
@@ -546,6 +555,16 @@ func segmentToAlt(seg segment, tag string, refs *refRegistry, initNode bool, rul
 	if seg.ref != "" {
 		spec["p"] = seg.ref
 	}
+	// Suffix-debt bookkeeping rides on the alt that does the push, so the
+	// child inherits the updated counter: the engine applies `n` before it
+	// copies counters into the pushed rule.
+	if len(seg.debt) > 0 {
+		n := map[string]int{}
+		for k, v := range seg.debt {
+			n[k] = v
+		}
+		spec["n"] = n
+	}
 	nterms := len(seg.terms)
 	if nterms > 0 || initNode {
 		merge(spec, refs.node(map[string]any{
@@ -626,6 +645,19 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		}
 	}
 
+	// Suffix-debt guard for a contested left-recursion tail loop: the loop
+	// may only keep going while no enclosing frame owes the token it repeats.
+	// Applies to the continue alternatives and never to the empty fallback,
+	// which is what lets the loop yield rather than fail. The value is the
+	// scalar `$eq` shorthand, which both runtimes accept. See
+	// resolveSuffixDebts.
+	debtGuard := func(o map[string]any) map[string]any {
+		if prod.DebtGuard != "" {
+			o["c"] = map[string]any{"n." + prod.DebtGuard: 0}
+		}
+		return o
+	}
+
 	if prod.TailRepeat != nil {
 		emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
 		return nil
@@ -676,13 +708,23 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 						o := map[string]any{
 							"s": tok, "b": 1, "p": seg.ref, "g": tag,
 						}
+						// This path builds the push alt by hand rather than
+						// through segmentToAlt, so it has to carry the same
+						// suffix-debt bookkeeping.
+						if len(seg.debt) > 0 {
+							n := map[string]int{}
+							for k, v := range seg.debt {
+								n[k] = v
+							}
+							o["n"] = n
+						}
 						merge(o, refs.node(map[string]any{
 							"init": true, "rule": prod.Name, "kind": prodKind, "nterms": 0,
 						}))
 						if mark != "" {
 							o["m"] = mark
 						}
-						opens = append(opens, o)
+						opens = append(opens, debtGuard(o))
 					}
 					continue
 				}
@@ -690,6 +732,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			o := segmentToAlt(seg, tag, refs, true, prod.Name, prodKind)
 			if mark != "" {
 				o["m"] = mark
+			}
+			if len(alt) > 0 {
+				o = debtGuard(o)
 			}
 			opens = append(opens, o)
 		}
@@ -752,7 +797,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if mark != "" {
 					o["m"] = mark
 				}
-				dispatchOpen = append(dispatchOpen, o)
+				dispatchOpen = append(dispatchOpen, debtGuard(o))
 			}
 		} else {
 			firstTokens := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
@@ -766,7 +811,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if mark != "" {
 					o["m"] = mark
 				}
-				dispatchOpen = append(dispatchOpen, o)
+				dispatchOpen = append(dispatchOpen, debtGuard(o))
 			}
 		}
 	}
