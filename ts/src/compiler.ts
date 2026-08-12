@@ -2280,7 +2280,12 @@ function emitGrammarSpec(
   // questions over and over.
   const overlapCache = new Map<string, boolean>()
   const tokensOverlap = (a: string, b: string): boolean => {
-    const key = a < b ? a + ' ' + b : b + ' ' + a
+    // '\u0000' as an ESCAPE, not a literal NUL byte. A literal one
+    // makes this whole file binary to grep, which silently reports no
+    // matches for anything in it — including the names of every
+    // function below, which is how a Go port came to be scoped as
+    // absent when it was merely unfindable.
+    const key = a < b ? a + '\u0000' + b : b + '\u0000' + a
     const hit = overlapCache.get(key)
     if (undefined !== hit) return hit
     const ra = tokenRangesOf(a)
