@@ -53,9 +53,11 @@ clean-go:
 # (when gh is available) creates a GitHub release.
 publish-go: test-go
 	@test -n "$(V)" || (echo "Usage: make publish-go V=x.y.z" && exit 1)
-	sed -i.bak 's/^const VERSION = ".*"/const VERSION = "$(V)"/' go/zon.go
-	rm -f go/zon.go.bak
-	git add go/zon.go
+	@grep -q '^const VERSION = ' go/bnf.go || \
+	  (echo "publish-go: no 'const VERSION = ' in go/bnf.go — refusing to tag a release with an unbumped constant" && exit 1)
+	sed -i.bak 's/^const VERSION = ".*"/const VERSION = "$(V)"/' go/bnf.go
+	rm -f go/bnf.go.bak
+	git add go/bnf.go
 	git commit -m "go: v$(V)"
 	git tag go/v$(V)
 	git push origin main go/v$(V)
