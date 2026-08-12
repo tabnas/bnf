@@ -24,7 +24,7 @@ would hand back a grammar that no longer does what it says.
 The output is a spec ``libtabnas`` can load, so the pipeline a caller
 with neither Go nor Node can assemble is::
 
-    GBNF text --libgbnf--> spec --libbnf--> recognition spec
+    GBNF text --libtabnasgbnf--> spec --libtabnasbnf--> recognition spec
                                                   |
                                             libtabnas --> verdicts
 
@@ -69,9 +69,9 @@ def _default_lib_path() -> str:
         platform.system(), "linux")
     here = os.path.dirname(os.path.abspath(__file__))
     for candidate in (
-        os.path.join(here, f"libbnf{ext}"),
+        os.path.join(here, f"libtabnasbnf{ext}"),
         os.path.join(here, "..", "go", "clib", "dist",
-                     f"libbnf-{goos}-{arch}{ext}"),
+                     f"libtabnasbnf-{goos}-{arch}{ext}"),
     ):
         if os.path.exists(candidate):
             return candidate

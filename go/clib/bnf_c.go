@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Richard Rodger and other contributors, MIT License
 
-// Package main builds the C-ABI shared library: libbnf.
+// Package main builds the C-ABI shared library: libtabnasbnf.
 //
-//	go build -buildmode=c-shared -o libbnf.so ./clib
+//	go build -buildmode=c-shared -o libtabnasbnf.so ./clib
 //
 // WHAT THIS IS FOR. @tabnas/bnf is the shared compiler behind the
 // BNF-family front-ends (GBNF, ABNF, EBNF) — it is a library those
@@ -22,13 +22,13 @@
 // The output is a spec `libtabnas` can load, so the pipeline a caller
 // without Go or Node can assemble is:
 //
-//	GBNF text --libgbnf--> spec --libbnf--> recognition spec
+//	GBNF text --libtabnasgbnf--> spec --libtabnasbnf--> recognition spec
 //	                                              |
 //	                                        libtabnas --> verdicts
 //
 // NOT A COMPILER ENTRY POINT. There is no "notation text in" function
 // here, because this package parses no notation — a front-end does. Use
-// libgbnf (tabnas/gbnf) for GBNF.
+// libtabnasgbnf (tabnas/gbnf) for GBNF.
 //
 // EVERY CALL RETURNS JSON. A C ABI has one return value and no
 // exceptions, so each entry point returns a malloc'd JSON document and a

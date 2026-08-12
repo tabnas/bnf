@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build libbnf, the C-ABI shared library, for one or more targets.
+# Build libtabnasbnf, the C-ABI shared library, for one or more targets.
 #
 #   ./build.sh                 # host only, into ./dist
 #   ./build.sh all             # every target this host can reach
@@ -74,7 +74,7 @@ for t in $targets; do
   os=${t%%/*}
   arch=${t##*/}
   ext=$(lib_ext "$os")
-  out="$OUT/libbnf-$os-$arch$ext"
+  out="$OUT/libtabnasbnf-$os-$arch$ext"
 
   if [ "$os" = "$host_os" ] && [ "$arch" = "$host_arch" ]; then
     # Native: the system toolchain is already correct, and on macOS it is

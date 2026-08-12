@@ -1,4 +1,4 @@
-# libbnf — the C ABI
+# libtabnasbnf — the C ABI
 
 The shared compiler's one capability that is useful **without a
 front-end**: reducing an already-serialized `GrammarSpec` to pure data.
@@ -14,7 +14,7 @@ ZIG=/path/to/zig ./build.sh all
 ABNF, EBNF). It is a library those front-ends call, not something an end
 user drives — so this surface is deliberately narrow. There is **no
 "notation text in" function**, because this package parses no notation. A
-front-end does. For GBNF, use [`libgbnf`](https://github.com/tabnas/gbnf),
+front-end does. For GBNF, use [`libtabnasgbnf`](https://github.com/tabnas/gbnf),
 which both compiles and validates.
 
 What is left is the reduction, and it is worth exposing because it is the
@@ -22,7 +22,7 @@ piece that lets a caller with neither Go nor Node assemble the whole
 pipeline:
 
 ```
-GBNF text ──libgbnf──▶ spec ──libbnf──▶ recognition spec
+GBNF text ──libtabnasgbnf──▶ spec ──libtabnasbnf──▶ recognition spec
                                               │
                                         libtabnas ──▶ verdicts
 ```

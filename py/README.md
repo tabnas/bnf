@@ -22,7 +22,7 @@ exposes the reduction, which is the piece that lets a caller with
 neither Go nor Node assemble the whole pipeline.
 
 ```
-GBNF text --libgbnf--> spec --libbnf--> recognition spec
+GBNF text --libtabnasgbnf--> spec --libtabnasbnf--> recognition spec
                                               |
                                         libtabnas --> verdicts
 ```
@@ -56,8 +56,8 @@ re-serialize yourself.
 
 ## Finding the library
 
-`load()` looks for `$BNF_LIB`, then `libbnf.*` beside this module, then
-`../go/clib/dist/libbnf-<goos>-<arch><ext>`. Or pass `path=`.
+`load()` looks for `$BNF_LIB`, then `libtabnasbnf.*` beside this module, then
+`../go/clib/dist/libtabnasbnf-<goos>-<arch><ext>`. Or pass `path=`.
 
 ## One caveat
 
