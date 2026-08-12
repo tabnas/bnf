@@ -59,30 +59,20 @@ type CompileOptions struct {
 func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 	offenders := map[string]bool{}
 
-	// options block: only fixed.token, match.token, rule.start are
-	// emitted by the converter.
-	options := map[string]any{}
-	if spec.Options != nil {
-		opt := spec.Options
-		if opt.Fixed != nil && opt.Fixed.Token != nil {
-			ft := map[string]any{}
-			for name, srcPtr := range opt.Fixed.Token {
-				if srcPtr != nil {
-					ft[name] = *srcPtr
-				}
-			}
-			options["fixed"] = map[string]any{"token": ft}
-		}
-		if opt.Match != nil && opt.Match.Token != nil {
-			mt := map[string]any{}
-			for name, re := range opt.Match.Token {
-				eager := opt.Match.TokenEager != nil && opt.Match.TokenEager[name]
-				mt[name] = regexHolder{re: re, eager: eager}
-			}
-			options["match"] = map[string]any{"token": mt}
-		}
-		if opt.Rule != nil && opt.Rule.Start != "" {
-			options["rule"] = map[string]any{"start": opt.Rule.Start}
+	// The options block carries the WHOLE of the front-end's typed
+	// Options, not just the three keys the converter sets itself. See
+	// options_data.go: a front-end's lexing configuration IS part of the
+	// accepted language, and a spec emitted without it produced a
+	// grammar that parsed differently from a natively installed one.
+	options, err := optionsToData(spec.Options)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Map-form options fill in under the typed ones, so a spec carrying
+	// both keeps the typed side authoritative.
+	for k, v := range spec.OptionsMap {
+		if _, taken := options[k]; !taken {
+			options[k] = v
 		}
 	}
 
@@ -122,7 +112,27 @@ type regexHolder struct {
 // CLI's JSON output, which serialises actions as FuncRef strings. Used by
 // the CLI's default (spec-dump) mode.
 func SpecToData(spec *tabnas.GrammarSpec) map[string]any {
-	data, _, _ := specToData(spec)
+	data, _ := SpecToDataErr(spec)
+	return data
+}
+
+// SpecToDataErr is SpecToData with the failure surfaced.
+//
+// specToData can now refuse a spec outright — an option holding a
+// function cannot be emitted as data — and a dump API that swallowed
+// that returned an EMPTY spec while reporting success, which is the
+// silent-wrong-grammar failure this package exists to avoid. It also
+// panicked outright on `data["ref"]` when the nil map met a spec with
+// refs.
+//
+// The signatures of SpecToData / SpecToJSON are kept so callers do not
+// break; on failure they now yield nil / "" rather than a plausible
+// lie, and this function is how a caller learns why.
+func SpecToDataErr(spec *tabnas.GrammarSpec) (map[string]any, error) {
+	data, _, err := specToData(spec)
+	if err != nil {
+		return nil, err
+	}
 	if spec.Ref != nil && len(spec.Ref) > 0 {
 		// List the ref names (closures can't serialise) for parity with
 		// the TS shape where `ref` maps names to functions.
@@ -132,12 +142,24 @@ func SpecToData(spec *tabnas.GrammarSpec) map[string]any {
 		}
 		data["ref"] = refs
 	}
-	return data
+	return data, nil
 }
 
 // SpecToJSON renders a spec as JSON text (the CLI default output).
+// Returns "" for a spec that cannot be represented; use SpecToJSONErr
+// to learn why rather than emitting an empty grammar as if it were one.
 func SpecToJSON(spec *tabnas.GrammarSpec, indent int) string {
-	return ToJsonic(SpecToData(spec), true, indent)
+	out, _ := SpecToJSONErr(spec, indent)
+	return out
+}
+
+// SpecToJSONErr is SpecToJSON with the failure surfaced.
+func SpecToJSONErr(spec *tabnas.GrammarSpec, indent int) (string, error) {
+	data, err := SpecToDataErr(spec)
+	if err != nil {
+		return "", err
+	}
+	return ToJsonic(data, true, indent), nil
 }
 
 func altsToData(alts any, rule string, offenders map[string]bool) []any {
@@ -471,11 +493,38 @@ func ToJsonic(value any, strict bool, indent int) string {
 	}
 	pad := func(n int) string { return strings.Repeat(" ", indent*n) }
 
+	// Every C0 control character is escaped, not just newline: JSON
+	// forbids all of them raw inside a string, so a spec whose options
+	// carried a tab (a plausible space.chars) serialised to text that
+	// would not parse back. The TS serialiser escapes the whole range;
+	// this now matches it.
 	quote := func(s, ch string) string {
-		r := strings.ReplaceAll(s, "\\", "\\\\")
-		r = strings.ReplaceAll(r, ch, "\\"+ch)
-		r = strings.ReplaceAll(r, "\n", "\\n")
-		return ch + r + ch
+		var b strings.Builder
+		b.WriteString(ch)
+		for _, r := range s {
+			switch {
+			case string(r) == ch:
+				b.WriteString("\\" + ch)
+			case r == '\\':
+				b.WriteString(`\\`)
+			case r == '\n':
+				b.WriteString(`\n`)
+			case r == '\r':
+				b.WriteString(`\r`)
+			case r == '\t':
+				b.WriteString(`\t`)
+			case r == '\b':
+				b.WriteString(`\b`)
+			case r == '\f':
+				b.WriteString(`\f`)
+			case r < 0x20:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			default:
+				b.WriteRune(r)
+			}
+		}
+		b.WriteString(ch)
+		return b.String()
 	}
 	dq := func(s string) string { return quote(s, `"`) }
 	str := func(s string) string {
