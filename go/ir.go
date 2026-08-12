@@ -147,6 +147,16 @@ type Production struct {
 	// `xzwy`. Mirrors the TS `debtOwed` production flag.
 	DebtOwed []string
 	NodeKind string // "", "user", "core", "helper"
+
+	// RepeatHelper marks a synthetic production standing in for a
+	// repetition (`opt`/`star` and the tails of `plus`/`rep`), and the
+	// nullable tail helpers left factoring creates. Their terminating
+	// alternative is EMPTY, so it names no token — and the engine only
+	// offers a matcher at a position where the active rule names it.
+	// The emitter therefore guards that alternative with a FOLLOW-set
+	// peek, without which a repetition followed by a character class
+	// cannot terminate. See computeFollowSets.
+	RepeatHelper bool
 }
 
 type TailRepeatSpec struct {

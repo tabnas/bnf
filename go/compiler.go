@@ -684,13 +684,15 @@ func desugar(grammar *Grammar) *Grammar {
 		case KindOpt:
 			name := freshName("opt_" + hint)
 			extra = append(extra, &Production{
-				Name: name, Alts: []Sequence{{inner}, {}}, NodeKind: "helper"})
+				Name: name, Alts: []Sequence{{inner}, {}}, NodeKind: "helper",
+				RepeatHelper: true})
 			return &Element{Kind: KindRef, Name: name}
 		case KindStar:
 			name := freshName("star_" + hint)
 			selfRef := &Element{Kind: KindRef, Name: name}
 			helper := &Production{
-				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper"}
+				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper",
+				RepeatHelper: true}
 			// A left-recursion tail loop that may have to yield to an enclosing
 			// suffix carries its counter onto the helper it becomes — the rule
 			// the guard is actually emitted on.
@@ -702,7 +704,8 @@ func desugar(grammar *Grammar) *Grammar {
 			plusName := freshName("plus_" + hint)
 			tailRef := &Element{Kind: KindRef, Name: tailName}
 			extra = append(extra, &Production{
-				Name: tailName, Alts: []Sequence{{inner, tailRef}, {}}, NodeKind: "helper"})
+				Name: tailName, Alts: []Sequence{{inner, tailRef}, {}}, NodeKind: "helper",
+				RepeatHelper: true})
 			extra = append(extra, &Production{
 				Name: plusName, Alts: []Sequence{{inner, tailRef}}, NodeKind: "helper"})
 			return &Element{Kind: KindRef, Name: plusName}
@@ -719,7 +722,8 @@ func desugar(grammar *Grammar) *Grammar {
 			tailStarName := freshName("star_" + hint)
 			tailStarRef := &Element{Kind: KindRef, Name: tailStarName}
 			extra = append(extra, &Production{
-				Name: tailStarName, Alts: []Sequence{{inner, tailStarRef}, {}}, NodeKind: "helper"})
+				Name: tailStarName, Alts: []Sequence{{inner, tailStarRef}, {}}, NodeKind: "helper",
+				RepeatHelper: true})
 			repAlt = append(repAlt, tailStarRef)
 		} else {
 			// Nest (max - min) optionals: [A [A [A ...]]].
@@ -748,7 +752,8 @@ func desugar(grammar *Grammar) *Grammar {
 				optName := freshName("opt_" + groupName)
 				extra = append(extra, &Production{
 					Name: optName,
-					Alts: []Sequence{{groupRef}, {}}, NodeKind: "helper"})
+					Alts: []Sequence{{groupRef}, {}}, NodeKind: "helper",
+					RepeatHelper: true})
 				nestedRef = &Element{Kind: KindRef, Name: optName}
 			}
 			if nestedRef != nil {
@@ -778,6 +783,13 @@ func desugar(grammar *Grammar) *Grammar {
 			out.TailRepeat = p.TailRepeat
 		}
 		out.DebtGuard = p.DebtGuard
+		// RepeatHelper also arrives from UPSTREAM, not only from the
+		// desugar sites below: left factoring flags its nullable tail
+		// helpers so their empty alternative gets the same FOLLOW
+		// guards a repetition's terminator does.
+		if p.RepeatHelper {
+			out.RepeatHelper = true
+		}
 		rewritten = append(rewritten, out)
 	}
 	return &Grammar{Productions: append(rewritten, extra...)}
@@ -809,12 +821,32 @@ func regexKey(el *Element) string {
 var nonIdentRe = regexp.MustCompile(`[^A-Za-z0-9]`)
 var trimUnderscore = regexp.MustCompile(`^_+|_+$`)
 
+// isEngineOwnedToken reports names the engine's own matchers own. A
+// lifted literal that would land on one — `NR = "NR"` wants `#NR`, `end
+// = "ZZ"` wants `#ZZ` — must be renamed instead: the engine rejects a
+// fixed-token entry under a matcher-owned name at configuration time,
+// so emitting it turns an otherwise ordinary grammar into a hard
+// failure before parsing starts. Falling through to the numbered form
+// (`#NR1`) costs nothing but a less pretty name.
+//
+// Mirrors ts/src/compiler.ts (isEngineOwnedToken), which is canonical.
+func isEngineOwnedToken(name string) bool {
+	if _, ok := builtinTokens[strings.TrimPrefix(name, "#")]; ok {
+		return true
+	}
+	switch name {
+	case "#BD", "#ZZ", "#UK", "#AA", "#SP", "#LN", "#CM":
+		return true
+	}
+	return false
+}
+
 func allocTokenName(literal string, used map[string]bool, preferred string) string {
 	// A literal lifted from a named production (`PL = "+"`) keeps that name,
 	// so the emitted grammar reads `PL` rather than `T`.
 	if preferred != "" {
 		want := "#" + preferred
-		if !used[want] {
+		if !used[want] && !isEngineOwnedToken(want) {
 			used[want] = true
 			return want
 		}
@@ -826,7 +858,7 @@ func allocTokenName(literal string, used map[string]bool, preferred string) stri
 	if len(base) > 0 {
 		candidate = "#" + base
 	}
-	if !used[candidate] {
+	if !used[candidate] && !isEngineOwnedToken(candidate) {
 		used[candidate] = true
 		return candidate
 	}

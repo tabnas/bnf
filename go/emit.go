@@ -72,6 +72,10 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 
 	grammar = eliminateLeftRecursion(grammar)
 	grammar = rewriteProbeDispatches(grammar)
+	// Left factoring runs after the probe rewriter (so `[X D] Y`
+	// patterns are recognised in their original alternatives) and
+	// before tail-repeat detection and desugaring.
+	grammar = leftFactor(grammar)
 	grammar = rewriteTailRepeats(grammar, start)
 	grammar = desugar(grammar)
 
@@ -176,8 +180,15 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 	// elimination, now that FIRST sets can say whether the competition is
 	// real. Runs on the desugared grammar because the loop is a helper
 	// production by this point.
-	resolveSuffixDebts(grammar, literals, regexTokens, firstSets, nullable)
-
+	cc := newContestCtx(fixedTokens, matchTokens)
+	resolveSuffixDebts(grammar, literals, regexTokens, firstSets, nullable, cc)
+	// FOLLOW puts the tokens that may come after a repetition back into
+	// its terminating alternative's token column; FOLLOW₂ decides a
+	// repetition whose repeated class COVERS one of them. See follow.go.
+	followSets := computeFollowSets(
+		grammar, literals, regexTokens, firstSets, nullable, start)
+	followPairs := computeFollowPairs(
+		grammar, literals, regexTokens, firstSets, nullable, followSets)
 	refs := newRefRegistry()
 	refs.useBuiltins = opts.Builtins
 	refs.emitMarks = opts.Marks
@@ -193,7 +204,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 			continue
 		}
 		if err := emitProduction(prod, grammar, literals, regexTokens, knownRules,
-			tag, ruleSpec, firstSets, nullable, refs); err != nil {
+			tag, ruleSpec, firstSets, nullable, refs,
+			followSets, followPairs, cc); err != nil {
 			return nil, err
 		}
 	}
@@ -637,7 +649,9 @@ func emitTailRepeat(prod *Production, literals, regexTokens map[string]string,
 
 func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens map[string]string,
 	knownRules map[string]bool, tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec,
-	firstSets map[string]map[string]bool, nullable map[string]bool, refs *refRegistry) error {
+	firstSets map[string]map[string]bool, nullable map[string]bool, refs *refRegistry,
+	followSets map[string]map[string]bool,
+	followPairs map[string]map[string]map[string]bool, cc *contestCtx) error {
 
 	for _, alt := range prod.Alts {
 		if err := validateRefs(alt, knownRules, prod.Name); err != nil {
@@ -717,7 +731,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			marks = buildMarks(ordered, literals, regexTokens)
 		}
 		needsPeek := len(ordered) > 1
-		opens := []map[string]any{}
+		entries := []dispatchEntry{}
 		for idx, alt := range ordered {
 			segs := segmentize(alt, literals, regexTokens)
 			seg := segs[0]
@@ -729,6 +743,44 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			if needsPeek && isRefOnly {
 				firstTokens := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
 				if firstTokens != nil {
+					// A CONTESTED head cannot be decided by one token —
+					// fan out to K-token prefixes (bounded and deduped;
+					// fall back to the 1-token peek if the fan-out is
+					// degenerate) so the ordering has lookahead to work
+					// with.
+					var paths [][]string
+					if altHeadContested(alt, ordered, literals, regexTokens,
+						firstSets, nullable, cc) ||
+						contestedByFollow(prod, alt, literals, regexTokens,
+							firstSets, nullable, followSets, cc) {
+						pfx := [][]string{}
+						for _, p := range altPrefixes(alt, grammar, literals, regexTokens, lookaheadKSpan) {
+							if len(p) > 0 {
+								pfx = append(pfx, p)
+							}
+						}
+						if 0 < len(pfx) && len(pfx) <= 64 {
+							paths = pfx
+						}
+					}
+
+					if paths != nil {
+						for _, p := range paths {
+							o := map[string]any{
+								"s": strings.Join(p, " "), "b": len(p),
+								"p": seg.ref, "g": tag,
+							}
+							merge(o, refs.node(map[string]any{
+								"init": true, "rule": prod.Name, "kind": prodKind, "nterms": 0,
+							}))
+							if mark != "" {
+								o["m"] = mark
+							}
+							entries = append(entries, dispatchEntry{o: o, alt: alt})
+						}
+						continue
+					}
+
 					for _, tok := range sortedKeys(firstTokens) {
 						o := map[string]any{
 							"s": tok, "b": 1, "p": seg.ref, "g": tag,
@@ -749,7 +801,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 						if mark != "" {
 							o["m"] = mark
 						}
-						opens = append(opens, debtGuard(o))
+						entries = append(entries, dispatchEntry{o: debtGuard(o), alt: alt})
 					}
 					continue
 				}
@@ -761,9 +813,40 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			if len(alt) > 0 {
 				o = debtGuard(o)
 			}
-			opens = append(opens, o)
+
+			// The terminating alternative of a repetition helper names no
+			// token, so the lexer is never asked to produce whatever
+			// follows the repetition. Re-issue that alternative once per
+			// FOLLOW token, peeking and pushing straight back (`b: 1`) so
+			// the token column widens without anything extra being
+			// consumed. The bare alternative stays last as the fallback.
+			if len(alt) == 0 && prod.RepeatHelper {
+				for _, tok := range sortedKeys(followSets[prod.Name]) {
+					g := copyMap(o)
+					g["s"] = tok
+					g["b"] = 1
+					entries = append(entries, dispatchEntry{o: g})
+				}
+				// Contested repetitions additionally get FOLLOW₂ guards,
+				// at the FRONT so they outrank the continue alternatives.
+				guards := pairExitGuards(prod, o, followPairs, firstSets, cc)
+				front := make([]dispatchEntry, 0, len(guards)+len(entries))
+				for _, g := range guards {
+					front = append(front, dispatchEntry{o: g})
+				}
+				entries = append(front, entries...)
+			}
+
+			var srcAlt Sequence
+			if len(alt) > 0 {
+				srcAlt = alt
+			}
+			entries = append(entries, dispatchEntry{o: o, alt: srcAlt})
 		}
 
+		specificityPermute(entries, cc, grammar, regexTokens)
+		opens := reorderKeywordShadow(prod, entries, grammar,
+			literals, regexTokens, followSets, cc)
 		rs := &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
 		if anyHasRef(prod.Alts) {
 			close := captureChildFields(refs, prod.Name, prodKind)
@@ -783,8 +866,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	}
 
 	// Multi-alt with at least one multi-segment alt: dispatcher.
-	dispatchOpen := []map[string]any{}
+	dispatchEntries := []dispatchEntry{}
 	emptyAltSeen := false
+	var nullableImpls []nullableImpl
 	var dispatchMarks *markTable
 	if prodKind == "user" && refs.emitMarks {
 		dispatchMarks = buildMarks(prod.Alts, literals, regexTokens)
@@ -808,6 +892,24 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		})
 
 		const lookaheadK = 4
+		// An alternative that can derive ε — every element nullable, a
+		// complete zero-token path rather than a cycle truncation — loses
+		// that derivation in the `usable` filter below, because a
+		// zero-token prefix names no token to dispatch on. Remember it:
+		// after the loop it is re-issued as FOLLOW-guarded entries plus a
+		// bare fallback. Without this, `expression ::= term (("+"|"-")
+		// term)*` reaches the `;` that ends the statement with nothing in
+		// the token column that can lex it, and a valid C program is
+		// rejected one character from the end.
+		for _, p := range altPrefixesRaw(
+			alt, grammar, literals, regexTokens, lookaheadK, map[string]bool{}) {
+			if len(p.tokens) == 0 && !p.done {
+				nullableImpls = append(nullableImpls, nullableImpl{
+					implName: implName, fields: initDispatchFields, mark: mark,
+				})
+				break
+			}
+		}
 		prefixes := altPrefixes(alt, grammar, literals, regexTokens, lookaheadK)
 		usable := [][]string{}
 		for _, p := range prefixes {
@@ -822,7 +924,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if mark != "" {
 					o["m"] = mark
 				}
-				dispatchOpen = append(dispatchOpen, debtGuard(o))
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: debtGuard(o), alt: alt})
 			}
 		} else {
 			firstTokens := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
@@ -836,9 +938,31 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if mark != "" {
 					o["m"] = mark
 				}
-				dispatchOpen = append(dispatchOpen, debtGuard(o))
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: debtGuard(o), alt: alt})
 			}
 		}
+	}
+
+	// Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
+	// first (naming the follow token is what makes the lexer offer it at
+	// this position), then one unguarded fallback that pushes the impl
+	// with nothing consumed. Everything here ranks after all content
+	// entries, so an ε-derivation never preempts a real match.
+	for _, n := range nullableImpls {
+		for _, tok := range sortedKeys(followSets[prod.Name]) {
+			o := map[string]any{"s": tok, "b": 1, "p": n.implName, "g": tag}
+			merge(o, copyMap(n.fields))
+			if n.mark != "" {
+				o["m"] = n.mark
+			}
+			dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
+		}
+		o := map[string]any{"p": n.implName, "g": tag}
+		merge(o, copyMap(n.fields))
+		if n.mark != "" {
+			o["m"] = n.mark
+		}
+		dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
 	}
 
 	if emptyAltSeen {
@@ -850,7 +974,22 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		if dispatchMarks != nil {
 			o["m"] = "_"
 		}
-		dispatchOpen = append(dispatchOpen, o)
+		// Same FOLLOW guards as the single-segment path above.
+		if prod.RepeatHelper {
+			for _, tok := range sortedKeys(followSets[prod.Name]) {
+				g := copyMap(o)
+				g["s"] = tok
+				g["b"] = 1
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: g})
+			}
+			guards := pairExitGuards(prod, o, followPairs, firstSets, cc)
+			front := make([]dispatchEntry, 0, len(guards)+len(dispatchEntries))
+			for _, g := range guards {
+				front = append(front, dispatchEntry{o: g})
+			}
+			dispatchEntries = append(front, dispatchEntries...)
+		}
+		dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
 	}
 
 	dispClose := captureChildFields(refs, prod.Name, prodKind)
@@ -858,8 +997,10 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	if dispatchMarks != nil {
 		dispClose["m"] = "_"
 	}
+	specificityPermute(dispatchEntries, cc, grammar, regexTokens)
 	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
-		Open:  mapsToAlts(dispatchOpen),
+		Open: mapsToAlts(reorderKeywordShadow(prod, dispatchEntries, grammar,
+			literals, regexTokens, followSets, cc)),
 		Close: mapsToAlts([]map[string]any{dispClose}),
 	}
 	return nil

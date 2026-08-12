@@ -246,7 +246,7 @@ func firstOfSeq(seq Sequence, literals, regexTokens map[string]string,
 // a grammar whose loop was never contested compiles unchanged.
 // Mirrors the TS `resolveSuffixDebts`. Issue #6.
 func resolveSuffixDebts(grammar *Grammar, literals, regexTokens map[string]string,
-	firstSets map[string]map[string]bool, nullable map[string]bool) {
+	firstSets map[string]map[string]bool, nullable map[string]bool, cc *contestCtx) {
 
 	guarded := []*Production{}
 	for _, p := range grammar.Productions {
@@ -322,11 +322,18 @@ func resolveSuffixDebts(grammar *Grammar, literals, regexTokens map[string]strin
 					// Collect every loop token this suffix competes for, rather
 					// than stopping at the first: they are exactly the branches
 					// the emitter may block, and the rest must stay open.
+					// Identity is not enough: a fixed `"a"` token and a
+					// `[a-z]` match token are different tokens that claim
+					// the same character, and under negotiated lexing the
+					// suffix really can take what the loop wants. Mirrors
+					// the TS test, which has always compared coverage.
 					hits := false
-					for t := range toks {
-						if loopFirst[t] {
-							owed[t] = true
-							hits = true
+					for u := range toks {
+						for t := range loopFirst {
+							if t == u || cc.tokensOverlap(t, u) {
+								owed[t] = true
+								hits = true
+							}
 						}
 					}
 					delta := 0
@@ -647,4 +654,13 @@ func joinSpace(s []string) string {
 }
 func itoa(n int) string {
 	return intToStr(n)
+}
+
+// nullableImpl records an alternative that can derive ε, so the
+// dispatcher can re-issue it after every content entry. See the
+// nullableImpls loop in emitProduction.
+type nullableImpl struct {
+	implName string
+	fields   map[string]any
+	mark     string
 }
