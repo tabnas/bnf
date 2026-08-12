@@ -91,17 +91,97 @@ func TestFunctionValuedOptionsAreRefused(t *testing.T) {
 
 // The guard that keeps this file honest as the engine grows: an Options
 // field nobody taught optionsToData about must fail loudly rather than
-// disappear from every serialized grammar.
+// disappear from every serialized grammar. Parser holds a func, so it
+// is both unhandled AND genuinely unserialisable.
 func TestUnhandledOptionFieldIsRefused(t *testing.T) {
 	opt := exactLexing()
-	opt.Error = map[string]string{"unexpected": "custom message"}
+	opt.Parser = &tabnas.ParserOptions{
+		Start: func(string, *tabnas.Tabnas, map[string]any) (any, error) {
+			return nil, nil
+		},
+	}
 
 	_, err := optionsToData(opt)
 	if err == nil {
 		t.Fatal("an unhandled option field was accepted silently")
 	}
-	if !strings.Contains(err.Error(), "Error") {
+	if !strings.Contains(err.Error(), "Parser") {
 		t.Errorf("error should name the field, got: %v", err)
+	}
+}
+
+// Diagnostics are plain data and TS's cloneData carries them through.
+// Refusing them would be a Go-only failure for a spec the canonical
+// runtime serialises happily — a divergence in the other direction.
+func TestDiagnosticOptionsAreCarriedNotRefused(t *testing.T) {
+	opt := exactLexing()
+	opt.Error = map[string]string{"unexpected": "custom message"}
+	opt.Hint = map[string]string{"unexpected": "try a comma"}
+
+	data, err := optionsToData(opt)
+	if err != nil {
+		t.Fatalf("plain-data diagnostics were refused: %v", err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal([]byte(ToJsonic(data, true, 0)), &back); err != nil {
+		t.Fatalf("not valid JSON: %v", err)
+	}
+	got := tabnas.MapToOptions(back)
+	if got.Error["unexpected"] != "custom message" {
+		t.Errorf("error templates did not survive: %v", got.Error)
+	}
+	if got.Hint["unexpected"] != "try a comma" {
+		t.Errorf("hints did not survive: %v", got.Hint)
+	}
+}
+
+// A dump API that swallowed the refusal returned an EMPTY spec while
+// reporting success — and panicked on a nil map when the spec carried
+// refs. An empty grammar presented as the real one is precisely the
+// silent-wrong-grammar failure this package exists to avoid.
+func TestDumpAPIsDoNotSwallowRefusals(t *testing.T) {
+	opt := exactLexing()
+	opt.Number.Exclude = func(string) bool { return false }
+	spec := &tabnas.GrammarSpec{
+		Options: opt,
+		Ref:     map[string]any{"@x": func() {}}, // the nil-map panic path
+	}
+
+	if _, err := SpecToDataErr(spec); err == nil {
+		t.Error("SpecToDataErr accepted an unserialisable spec")
+	}
+	if _, err := SpecToJSONErr(spec, 0); err == nil {
+		t.Error("SpecToJSONErr accepted an unserialisable spec")
+	}
+	// The signature-compatible forms must not lie, and must not panic.
+	if got := SpecToData(spec); got != nil {
+		t.Errorf("SpecToData should yield nil, not a plausible spec: %v", got)
+	}
+	if got := SpecToJSON(spec, 0); got != "" {
+		t.Errorf("SpecToJSON should yield \"\", not %q", got)
+	}
+}
+
+// JSON forbids raw C0 controls in strings. space.chars carrying a tab
+// is entirely plausible, and used to serialise to text that would not
+// parse back.
+func TestControlCharactersSurviveSerialisation(t *testing.T) {
+	for _, ch := range []string{"\t", "\r", "\n", "\x01", "\x1f"} {
+		opt := exactLexing()
+		opt.Space.Chars = ch
+		data, err := optionsToData(opt)
+		if err != nil {
+			t.Fatalf("chars=%q: %v", ch, err)
+		}
+		text := ToJsonic(data, true, 0)
+		var back map[string]any
+		if err := json.Unmarshal([]byte(text), &back); err != nil {
+			t.Errorf("chars=%q emitted invalid JSON: %v", ch, err)
+			continue
+		}
+		if got := tabnas.MapToOptions(back); got.Space.Chars != ch {
+			t.Errorf("chars=%q came back as %q", ch, got.Space.Chars)
+		}
 	}
 }
 

@@ -50,6 +50,11 @@ var optionsHandled = map[string]bool{
 	"Space": true, "Line": true, "Text": true, "Number": true,
 	"Comment": true, "String": true, "Value": true, "Lex": true,
 	"Ender": true, "Tag": true,
+	// Diagnostics. These do not change the accepted language, but they
+	// ARE plain data and TS's cloneData carries them through, so
+	// refusing them would be a Go-only failure for a spec the canonical
+	// runtime serialises happily.
+	"Error": true, "Hint": true, "Safe": true,
 }
 
 // optionsToData converts typed Options into the map form
@@ -77,6 +82,17 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 			ts[name] = strsToAny(tins)
 		}
 		out["tokenSet"] = ts
+	}
+	if len(opt.Error) > 0 {
+		out["error"] = strMapToAny(opt.Error)
+	}
+	if len(opt.Hint) > 0 {
+		out["hint"] = strMapToAny(opt.Hint)
+	}
+	if o := opt.Safe; o != nil {
+		m := map[string]any{}
+		putBool(m, "key", o.Key)
+		put(out, "safe", m)
 	}
 
 	if o := opt.Fixed; o != nil {
@@ -306,6 +322,14 @@ func putStr(m map[string]any, key, v string) {
 	if v != "" {
 		m[key] = v
 	}
+}
+
+func strMapToAny(m map[string]string) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func strsToAny(ss []string) []any {
