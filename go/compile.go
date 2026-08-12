@@ -59,30 +59,20 @@ type CompileOptions struct {
 func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 	offenders := map[string]bool{}
 
-	// options block: only fixed.token, match.token, rule.start are
-	// emitted by the converter.
-	options := map[string]any{}
-	if spec.Options != nil {
-		opt := spec.Options
-		if opt.Fixed != nil && opt.Fixed.Token != nil {
-			ft := map[string]any{}
-			for name, srcPtr := range opt.Fixed.Token {
-				if srcPtr != nil {
-					ft[name] = *srcPtr
-				}
-			}
-			options["fixed"] = map[string]any{"token": ft}
-		}
-		if opt.Match != nil && opt.Match.Token != nil {
-			mt := map[string]any{}
-			for name, re := range opt.Match.Token {
-				eager := opt.Match.TokenEager != nil && opt.Match.TokenEager[name]
-				mt[name] = regexHolder{re: re, eager: eager}
-			}
-			options["match"] = map[string]any{"token": mt}
-		}
-		if opt.Rule != nil && opt.Rule.Start != "" {
-			options["rule"] = map[string]any{"start": opt.Rule.Start}
+	// The options block carries the WHOLE of the front-end's typed
+	// Options, not just the three keys the converter sets itself. See
+	// options_data.go: a front-end's lexing configuration IS part of the
+	// accepted language, and a spec emitted without it produced a
+	// grammar that parsed differently from a natively installed one.
+	options, err := optionsToData(spec.Options)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Map-form options fill in under the typed ones, so a spec carrying
+	// both keeps the typed side authoritative.
+	for k, v := range spec.OptionsMap {
+		if _, taken := options[k]; !taken {
+			options[k] = v
 		}
 	}
 
