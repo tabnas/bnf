@@ -1,0 +1,14 @@
+{
+  "$schema": "https://tabnas.dev/schema/plugin.schema.json",
+  "name": "@tabnas/bnf",
+  "go": "github.com/tabnas/bnf/go",
+  "description": "Shared BNF-family grammar compiler for the tabnas engine, used by abnf, ebnf and gbnf.",
+  "engine": "@tabnas/parser",
+  "extensions": [
+    ".bnf"
+  ],
+  "errorCodes": [],
+  "docs": "https://tabnas.dev/docs/packages",
+  "repository": "https://github.com/tabnas/bnf",
+  "versionSource": "ts/package.json"
+}
