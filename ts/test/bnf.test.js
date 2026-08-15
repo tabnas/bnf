@@ -19,6 +19,8 @@ const {
   compileSpec,
   attachActions,
   markListing,
+  toPureSpec,
+  toRecognitionSpec,
   VERSION,
 } = require('../dist/bnf')
 
@@ -613,5 +615,38 @@ describe('bnf', () => {
   it('exports a semver-shaped VERSION matching package.json', () => {
     assert.match(VERSION, /^\d+\.\d+\.\d+/)
     assert.equal(VERSION, require('../package.json').version)
+  })
+})
+
+
+// The alt `m` mark is compiler-internal: `attachActions`,
+// `attachActionSlots` and `markListing` read it off the in-memory spec,
+// but the engine's alt contract has no `m` and the grammar JSON Schema
+// sets additionalProperties:false. An emitted `m` therefore does not just
+// waste bytes -- it makes the grammar FAIL `tabnas validate`.
+describe('marks do not reach the wire', () => {
+  const marked = () => emitGrammarSpec({
+    productions: [
+      { name: 'op', alts: [[{ kind: 'term', literal: 'inc' }],
+                           [{ kind: 'term', literal: 'dec' }]] },
+    ],
+  }, { tag: 'demo', marks: true, builtins: true })
+
+  it('markListing still reads marks off the in-memory spec', () => {
+    assert.match(markListing(marked()), /op\s+o:/)
+  })
+
+  it('toPureSpec and toRecognitionSpec both drop m', () => {
+    for (const shape of [toPureSpec, toRecognitionSpec]) {
+      const out = toJsonic(shape(marked()), { strict: true })
+      assert.doesNotMatch(out, /"m"\s*:/, `${shape.name} emitted a mark`)
+    }
+  })
+
+  it('shaping does not mutate the caller\'s spec', () => {
+    const spec = marked()
+    toPureSpec(spec)
+    assert.match(markListing(spec), /op\s+o:/,
+      'toPureSpec stripped marks from the in-memory spec, not just its output')
   })
 })

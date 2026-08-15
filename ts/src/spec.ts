@@ -143,6 +143,7 @@ export function toRecognitionSpec(spec: GrammarSpec): GrammarSpec {
   // Declare the builtin config-schema version so the engine can refuse a
   // grammar that needs a newer schema than it implements.
   out.v = BUILTIN_SCHEMA_VERSION
+  stripMarks(out)
   return out
 }
 
@@ -164,6 +165,7 @@ export function toPureSpec(spec: GrammarSpec): GrammarSpec {
   }
   const out = cloneData({ options: spec.options, rule: spec.rule }) as GrammarSpec
   out.v = BUILTIN_SCHEMA_VERSION
+  stripMarks(out)
   return out
 }
 
@@ -416,4 +418,39 @@ export function compileSpec(spec: GrammarSpec, opts: CompileOptions = {}): strin
     ? toPureSpec(spec)
     : toRecognitionSpec(spec)
   return toJsonic(out, { strict: opts.strict, indent: opts.indent })
+}
+
+
+// Remove the alt marks before serialising.
+//
+// `m` is a compiler-internal field: `attachActions`, `attachActionSlots`
+// and `markListing` read it off the IN-MEMORY spec to resolve
+// `@<rule>:o|c:<mark>` references. It is not part of the engine's alt
+// contract — the runtime's AltSpec has no `m`, Go's loader drops it, and
+// the grammar JSON Schema sets `additionalProperties: false` over the
+// twelve keys it does define. So an emitted `m` is not merely dead weight
+// on the wire: it makes the whole grammar FAIL `tabnas validate`, which
+// is the first thing the docs tell an author to run.
+//
+// It is stripped structurally — walked rule by rule, phase by phase —
+// rather than by deleting every key named `m` in a deep clone, because a
+// grammar's own `u`/`k` payloads are free-form and may legitimately carry
+// one. Only the alt's own field goes.
+//
+// The mark survives where it is actually used: this runs at the
+// serialisation boundary only, so the in-memory spec that
+// `attachActionSlots` and `markListing` see is untouched. The documented
+// workflow attaches slots BEFORE compiling, and a slot is a name written
+// into the alt's `a:` array, which serialises normally.
+function stripMarks(spec: GrammarSpec): void {
+  const rules: any = spec.rule ?? {}
+  for (const rule of Object.keys(rules)) {
+    for (const phase of ['open', 'close']) {
+      for (const alt of altListOf(rules[rule]?.[phase])) {
+        if (alt && 'object' === typeof alt) {
+          delete alt.m
+        }
+      }
+    }
+  }
 }
