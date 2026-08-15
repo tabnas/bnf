@@ -233,12 +233,16 @@ func altToData(ga *tabnas.GrammarAltSpec, rule string, offenders map[string]bool
 		m["n"] = nm
 	}
 	if ga.U != nil {
-		// Recover the mark stashed under "m$" as a top-level "m".
+		// Drop the mark. The emitter stashes it under "m$" so
+		// attachActions and markListing can find it on the in-memory
+		// spec, but it is compiler-internal: the engine's alt contract
+		// has no `m`, its loader would discard one, and the grammar JSON
+		// Schema sets additionalProperties:false over the twelve keys it
+		// defines -- so emitting it makes the whole grammar FAIL
+		// `tabnas validate`, which is the first thing the docs tell an
+		// author to run. It used to be promoted to a top-level "m" here.
 		um := copyAnyMap(ga.U)
-		if mv, ok := um["m$"]; ok {
-			m["m"] = mv
-			delete(um, "m$")
-		}
+		delete(um, "m$")
 		if len(um) > 0 {
 			m["u"] = um
 		}
@@ -601,7 +605,7 @@ var fieldOrder = map[string]int{
 	"options": 0, "rule": 1, "v": 2,
 	"fixed": 0, "match": 1, "token": 0, "start": 0,
 	"open": 0, "close": 1,
-	"s": 0, "b": 1, "c": 2, "p": 3, "r": 4, "a": 5, "k": 6, "n": 7, "u": 8, "m": 9, "g": 10,
+	"s": 0, "b": 1, "c": 2, "p": 3, "r": 4, "a": 5, "k": 6, "n": 7, "u": 8, "g": 9,
 }
 
 func sortedMapKeys(m map[string]any) []string {
