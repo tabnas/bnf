@@ -1,63 +1,77 @@
-# zon (Go)
+# bnf (Go)
 
-A jsonic grammar plugin that parses
-[Zig Object Notation (ZON)](https://ziglang.org/documentation/master/#ZON)
-into Go values. ZON is the anonymous-struct data format used for Zig
-`build.zig.zon` manifests.
+The shared compiler behind the BNF-family grammar front-ends for the
+[tabnas](https://github.com/tabnas/parser) parsing engine.
+
+This package holds no notation of its own. It defines a grammar IR and
+compiles it into a tabnas `GrammarSpec`; a front-end parses one concrete
+syntax into that IR:
+
+```
+ABNF / GBNF / EBNF text ──front-end──▶ Grammar ──EmitGrammarSpec──▶ GrammarSpec
+```
+
+| Front-end | Notation |
+|---|---|
+| [`tabnas/abnf`](https://github.com/tabnas/abnf) | RFC 5234 ABNF |
+| [`tabnas/gbnf`](https://github.com/tabnas/gbnf) | llama.cpp GBNF |
+| [`tabnas/ebnf`](https://github.com/tabnas/ebnf) | EBNF (best effort) |
+
+Everything downstream of the IR is shared and lives here: desugaring
+repetition into helper rules, left-recursion elimination, tail-repeat
+rewriting, the probe/rewind dispatcher for prefixes beyond the engine's
+bounded lookahead, literal lifting, token allocation, first-set analysis,
+and `$stepN` chain emission.
 
 ## Install
 
 ```bash
-go get github.com/tabnas/zon/go@latest
+go get github.com/tabnas/bnf/go@latest
 ```
 
 ```go
-import tabnaszon "github.com/tabnas/zon/go"
+import bnf "github.com/tabnas/bnf/go"
 ```
 
 ## One example
 
-`tabnaszon.Parse` is the one-call entry point — pass source, get a value and
-an `error`:
+`EmitGrammarSpec` is the entry point: an IR in, a `*tabnas.GrammarSpec`
+and an `error` out.
 
 ```go
-result, err := tabnaszon.Parse(`.{ .name = "Alice", .age = 30 }`)
-// result: map[string]any{"name": "Alice", "age": float64(30)}
-
-result, err = tabnaszon.Parse(`.{ 1, 2, 3 }`)
-// result: []any{float64(1), float64(2), float64(3)}
+spec, err := bnf.EmitGrammarSpec(&bnf.Grammar{
+	Productions: []*bnf.Production{
+		{Name: "val", Alts: []bnf.Sequence{{
+			{Kind: bnf.KindRef, Name: "add"},
+		}}},
+		{Name: "add", Alts: []bnf.Sequence{{
+			{Kind: bnf.KindToken, Name: "#NR"},
+		}}},
+	},
+}, &bnf.ConvertOptions{Tag: "demo"})
 ```
 
-Numbers come back as `float64`. The no-options `Parse` path reuses a
-cached instance internally and is safe for concurrent use; for hot
-loops with options, build one instance with `tabnaszon.MakeJsonic` and reuse
-it.
+A `Sequence` is a slice of `*Element`, and an element's `Kind` picks what
+it is — a rule reference, a lexer token, or a literal terminal.
+
+Also exported: `EliminateLeftRecursion`, for a front-end that wants to
+inspect or test the rewritten IR on its own; `AttachActions` and
+`AttachActionSlots`, to bind alt-actions to an emitted spec; `MarkListing`,
+to list the alternate marks a grammar produced; and `SpecToJSON` /
+`SpecToData`, to serialise a spec for inspection or a golden test.
 
 ## Documentation
 
-Full documentation follows the [Diátaxis](https://diataxis.fr)
-framework:
+Full documentation follows the [Diátaxis](https://diataxis.fr) framework:
 
-- [Tutorial](doc/tutorial.md) — a guided first parse, start to finish.
+- [Tutorial](doc/tutorial.md) — a guided first compile, start to finish.
 - [How-to guide](doc/guide.md) — short recipes for individual tasks.
-- [Reference](doc/reference.md) — the public API, every option, and the
-  complete ZON syntax accepted.
-- [Concepts](doc/concepts.md) — how the plugin reshapes the engine, and
+- [Reference](doc/reference.md) — the public API and every option.
+- [Concepts](doc/concepts.md) — the IR contract, the compiler passes, and
   how the Go version differs from TypeScript.
 
 For the canonical TypeScript implementation, see
 [`../ts/README.md`](../ts/README.md).
-
-## Grammar
-
-The grammar is defined once in the top-level
-[`zon-grammar.jsonic`](../zon-grammar.jsonic) and embedded into this Go
-source ([`zon.go`](zon.go)) and the TypeScript source during the build.
-Edit the grammar there, not in the generated source.
-
-A railroad/syntax diagram of the grammar is in
-[`../ts/doc/grammar.svg`](../ts/doc/grammar.svg) (ASCII version:
-[`../ts/doc/grammar.txt`](../ts/doc/grammar.txt)).
 
 ## License
 
