@@ -60,7 +60,35 @@ export type ConvertOptions = {
 }
 
 
-type Element =
+// Where an IR node came from in the front-end's grammar text.
+//
+//   s  start offset, inclusive
+//   e  end offset, exclusive
+//   r  row of the start, 1-based (optional)
+//   c  column of the start, 1-based (optional)
+//
+// Offsets and row/column are in the SAME UNITS the front-end's own
+// engine tokens use, so a front-end copies `sI`/`rI`/`cI` straight
+// across with no arithmetic — the step where an off-by-one would
+// otherwise creep in. That does mean the units are runtime-native and
+// not identical across ports: TypeScript offsets count UTF-16 code
+// units and Go's count bytes, the same divergence the engine already
+// records for token positions. A consumer that needs LSP positions
+// converts at the LSP boundary, where the document's encoding is known;
+// nothing here can do that conversion correctly, because the IR does
+// not hold the source text.
+//
+// Spans are optional everywhere. A front-end that records them gets
+// ranged compile errors (see `EmitError.sp`); one that does not
+// compiles to exactly the same grammar.
+type SrcSpan = {
+  s: number
+  e: number
+  r?: number
+  c?: number
+}
+
+type Element = (
   | {
       kind: 'term';
       literal: string;
@@ -114,6 +142,17 @@ type Element =
   | { kind: 'plus'; inner: Element }    // 1*A
   | { kind: 'rep'; min: number; max: number; inner: Element } // m*nA
   | { kind: 'group'; alts: Sequence[] } // ( A / B )
+) & {
+  // Where this element came from in the grammar source (front-end
+  // populated, optional). Rewrite passes share element objects by
+  // reference — `cloneGrammar` copies productions and alt arrays but
+  // not the elements themselves — so a span recorded at parse time
+  // survives all the way to the emitter. Elements the compiler
+  // synthesises for itself (a group wrapper around left-recursion
+  // seeds, say) carry none, which is correct: the author wrote no such
+  // group.
+  sp?: SrcSpan
+}
 
 type Sequence = Element[]
 
@@ -187,6 +226,13 @@ type Production = {
   // back out (`spec.meta.provenance`) so a tool can name the user's rule
   // instead of the machinery's.
   origin?: string
+  // Where the author wrote this production, when the front-end records
+  // it. Element spans locate a term or a reference; this locates the
+  // rule as a whole, which is what an outline entry or a
+  // go-to-definition on a rule name needs. Synthesised productions
+  // carry none — `origin` is how they are located, by naming the rule
+  // they descend from.
+  sp?: SrcSpan
 }
 
 
@@ -355,6 +401,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
         alts: p.alts.map((a) => a.slice()),
         nodeKind: p.nodeKind,
         origin: p.origin,
+        sp: p.sp,
       })),
     ),
   )
@@ -578,6 +625,7 @@ function substituteLeadingRef(
     alts: newAlts,
     nodeKind: target.nodeKind,
     origin: target.origin,
+    sp: target.sp,
   }
 }
 
@@ -657,12 +705,14 @@ function eliminateDirectLeftRec(
       alts: seeds,
       nodeKind: prod.nodeKind,
       origin: prod.origin,
+      sp: prod.sp,
     }
   }
   if (seeds.length === 0) {
-    throw new Error(
+    throw new EmitError(
       `${diagName()}: rule '${prod.name}' is purely left-recursive ` +
-      `(no seed alternative); cannot eliminate`)
+      `(no seed alternative); cannot eliminate`,
+      { rule: prod.name, sp: prod.sp })
   }
 
   const seedElement: Element =
@@ -700,6 +750,7 @@ function eliminateDirectLeftRec(
     alts: [[seedElement, star]],
     nodeKind: prod.nodeKind,
     origin: prod.origin,
+    sp: prod.sp,
   }
 }
 
@@ -1364,6 +1415,7 @@ function desugar(grammar: Grammar): Grammar {
       alts: p.alts.map(desugarAlt),
       nodeKind: p.nodeKind,
       origin: p.origin,
+      sp: p.sp,
     }
     // Probe-dispatch and tail-repeat flags survive desugar unchanged —
     // the emitter routes around the standard alt-compilation path for
@@ -1641,6 +1693,7 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
         alts: newAlts,
         nodeKind: prod.nodeKind,
         origin: prod.origin,
+        sp: prod.sp,
       })
     } else {
       rewritten.push(prod)
@@ -1890,20 +1943,21 @@ function resolveProseTerminals(grammar: Grammar): void {
       }
 
       if (BUILTIN_TOKENS[prod.name]) continue // informational — the lexer defines it
-      throw new Error(
+      throw new EmitError(
         `${diagName()}: rule '${prod.name}' is defined only by prose ('<${text}>'), ` +
         `which describes a terminal but does not define one. Prose is ` +
         `allowed only for built-in lexer tokens (${
           Object.keys(BUILTIN_TOKENS).join(', ')
-        }).`)
+        }).`,
+        { rule: prod.name, sp: prod.sp })
     }
 
     // Any surviving prose is embedded in a larger expression, where it
     // cannot be given a meaning. Search nested groups and repetitions
     // too, so `x = ( <foo> / "a" )` reports the same clear error as a
     // top-level `x = "a" <foo>`.
-    const findStray = (el: Element): { text: string } | undefined => {
-      if (isProse(el)) return el as { text: string }
+    const findStray = (el: Element): (Element & { text: string }) | undefined => {
+      if (isProse(el)) return el as Element & { text: string }
       if (el.kind === 'opt' || el.kind === 'star' || el.kind === 'plus' ||
           el.kind === 'rep') {
         return findStray(el.inner)
@@ -1922,10 +1976,11 @@ function resolveProseTerminals(grammar: Grammar): void {
       for (const el of alt) {
         const stray = findStray(el)
         if (stray) {
-          throw new Error(
+          throw new EmitError(
             `${diagName()}: rule '${prod.name}' uses prose ('<${stray.text}>') inside an ` +
             `expression; prose may only stand alone as the whole definition ` +
-            `of a built-in lexer token.`)
+            `of a built-in lexer token.`,
+            { rule: prod.name, sp: stray.sp ?? prod.sp })
         }
       }
     }
@@ -2153,6 +2208,30 @@ let _diagName = 'bnf'
 
 function diagName(): string {
   return _diagName
+}
+
+
+// A compile failure that can say WHERE. Every diagnostic this compiler
+// raises was a bare `Error` whose only structure was the `${diagName()}:`
+// prefix, so a caller wanting to underline the offending text had
+// nothing to read and had to parse the message.
+//
+// `sp` is populated only when the offending IR node carries a span,
+// which means only when the front-end recorded one — so this is a
+// strict improvement on every path and a change of behaviour on none.
+// It extends Error, and the message text is unchanged, so existing
+// `catch` blocks and message assertions keep working.
+class EmitError extends Error {
+  // The rule being compiled when the failure was raised.
+  rule?: string
+  // Where in the grammar source, when the IR knew.
+  sp?: SrcSpan
+  constructor(message: string, opts?: { rule?: string; sp?: SrcSpan }) {
+    super(message)
+    this.name = 'EmitError'
+    if (null != opts?.rule) this.rule = opts.rule
+    if (null != opts?.sp) this.sp = opts.sp
+  }
 }
 
 
@@ -2624,8 +2703,9 @@ function validateRefs(
 ) {
   for (const el of alt) {
     if (el.kind === 'ref' && !knownRules.has(el.name)) {
-      throw new Error(
-        `${diagName()}: rule '${ruleName}' references unknown rule '${el.name}'`)
+      throw new EmitError(
+        `${diagName()}: rule '${ruleName}' references unknown rule '${el.name}'`,
+        { rule: ruleName, sp: el.sp })
     }
   }
 }
@@ -3473,9 +3553,10 @@ function emitProduction(
       const firstTokens = firstOfAlt(
         alt, literals, regexTokens, firstSets, nullable)
       if (firstTokens === null) {
-        throw new Error(
+        throw new EmitError(
           `${diagName()}: rule '${prod.name}' alternative ${i} is nullable ` +
-          `but is not the only empty alt; FIRST set is ambiguous`)
+          `but is not the only empty alt; FIRST set is ambiguous`,
+          { rule: prod.name, sp: prod.sp })
       }
       for (const tok of firstTokens) {
         const o: any = {
@@ -4488,6 +4569,7 @@ function allocTokenName(
 // `BUILTIN_TOKENS` to recognise engine token names).
 export {
   diagName,
+  EmitError,
   emitGrammarSpec,
   eliminateLeftRecursion,
   refsIn,
@@ -4502,6 +4584,7 @@ export {
 
 // (`ConvertOptions` is exported at its own declaration above.)
 export type {
+  SrcSpan,
   Element,
   Sequence,
   Production,

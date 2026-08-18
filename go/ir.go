@@ -40,10 +40,54 @@ const (
 	KindProse ElemKind = "prose"
 )
 
+// SrcSpan is where an IR node came from in the front-end's grammar text.
+//
+//	S  start offset, inclusive
+//	E  end offset, exclusive
+//	R  row of the start, 1-based (optional)
+//	C  column of the start, 1-based (optional)
+//
+// Offsets and row/column are in the SAME UNITS the front-end's own
+// engine tokens use, so a front-end copies `sI`/`rI`/`cI` straight
+// across with no arithmetic — the step where an off-by-one would
+// otherwise creep in. That does mean the units are runtime-native and
+// not identical across ports: Go offsets count BYTES and TypeScript's
+// count UTF-16 code units, the same divergence the engine already
+// records for token positions. A consumer that needs LSP positions
+// converts at the LSP boundary, where the document's encoding is known;
+// nothing here can do that conversion correctly, because the IR does
+// not hold the source text.
+//
+// R and C are 1-based, so a zero in either means "not recorded" — there
+// is no row 0. The span ITSELF is optional a level up: `Element.Sp` and
+// `Production.Sp` are POINTERS, because `SrcSpan{S: 0, E: 0}` is a
+// legitimate empty span at the very start of a file and must not read
+// as "no span".
+//
+// Spans are optional everywhere. A front-end that records them gets
+// ranged compile errors (see `EmitError.Sp`); one that does not
+// compiles to exactly the same grammar. Mirrors the TS `SrcSpan`.
+type SrcSpan struct {
+	S int
+	E int
+	R int
+	C int
+}
+
 // Element is one element of an ABNF sequence (a term, ref, regex, or
 // EBNF sugar). Mirrors the TS AbnfElement union.
 type Element struct {
 	Kind ElemKind
+
+	// Sp is where this element came from in the grammar source
+	// (front-end populated, nil when unrecorded). Rewrite passes share
+	// element objects by reference — cloneGrammar copies productions and
+	// alt slices but not the elements themselves — so a span recorded at
+	// parse time survives all the way to the emitter. Elements the
+	// compiler synthesises for itself (a group wrapper around
+	// left-recursion seeds, say) carry none, which is correct: the author
+	// wrote no such group. Mirrors the TS `Element.sp`.
+	Sp *SrcSpan
 
 	// term
 	Literal       string
@@ -172,6 +216,22 @@ type Production struct {
 	// out (`spec.Meta["provenance"]`) so a tool can name the user's rule
 	// instead of the machinery's. Mirrors the TS `Production.origin`.
 	Origin string
+
+	// Sp is where the author wrote this production, when the front-end
+	// records it. Element spans locate a term or a reference; this locates
+	// the rule as a whole, which is what an outline entry or a
+	// go-to-definition on a rule name needs. Synthesised productions carry
+	// none — Origin is how they are located, by naming the rule they
+	// descend from.
+	//
+	// A pointer, not a value: see SrcSpan. Nil means "not recorded", which
+	// a zero-valued span cannot mean.
+	//
+	// CAUTION: every pass that REBUILDS a production field by field has to
+	// carry this across, exactly as it carries Origin — a `&Production{…}`
+	// that forgets it silently drops the span. The passes that copy with
+	// `cp := *p` get it for free. Mirrors the TS `Production.sp`.
+	Sp *SrcSpan
 }
 
 // originOf is the author-written production a (possibly synthesised)
@@ -258,6 +318,42 @@ type ParseError struct {
 
 func (e *ParseError) Error() string { return e.Message }
 func (e *ParseError) Unwrap() error { return e.Cause }
+
+// EmitError is a compile failure that can say WHERE. Every diagnostic
+// this compiler raises used to be a bare message whose only structure
+// was the `diagName():` prefix, so a caller wanting to underline the
+// offending text had nothing to read and had to parse the message.
+//
+// Sp is populated only when the offending IR node carries a span, which
+// means only when the front-end recorded one — so this is a strict
+// improvement on every path and a change of behaviour on none. It
+// implements `error` and the message text is unchanged, so existing
+// error handling and message assertions keep working.
+//
+// It sits alongside ParseError rather than replacing it, mirroring
+// TypeScript: there, five author-facing throw sites became `EmitError`
+// and the other eleven stayed a plain `Error`. The same five sites raise
+// this here, and the rest still raise *ParseError or a bare
+// `fmt.Errorf`.
+//
+// NOTE one of those five (`eliminateDirectLeftRec`'s purely-left-
+// recursive rule) PANICS in Go where TypeScript throws — inherited
+// behaviour the ABNF front-end's suite pins. It panics with a
+// *EmitError VALUE rather than a string precisely so the span survives
+// the panic: a `recover()` that type-asserts gets the span, where one
+// that only stringifies gets what it always got.
+type EmitError struct {
+	Message string
+	// Rule is the rule being compiled when the failure was raised.
+	Rule string
+	// Sp is where in the grammar source, when the IR knew. Nil when the
+	// front-end recorded no span for the offending node.
+	Sp    *SrcSpan
+	Cause error
+}
+
+func (e *EmitError) Error() string { return e.Message }
+func (e *EmitError) Unwrap() error { return e.Cause }
 
 // diagPrefix names the NOTATION a grammar was written in, not this
 // package: a front-end's users should not see "bnf:" on an error about

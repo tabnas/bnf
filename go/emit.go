@@ -430,7 +430,12 @@ func isSingleSegment(alt Sequence) bool {
 func validateRefs(alt Sequence, knownRules map[string]bool, ruleName string) error {
 	for _, el := range alt {
 		if el.Kind == KindRef && !knownRules[el.Name] {
-			return fmt.Errorf(diagName()+": rule '%s' references unknown rule '%s'", ruleName, el.Name)
+			return &EmitError{
+				Message: fmt.Sprintf(
+					diagName()+": rule '%s' references unknown rule '%s'", ruleName, el.Name),
+				Rule: ruleName,
+				Sp:   el.Sp,
+			}
 		}
 	}
 	return nil
@@ -1055,8 +1060,14 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		} else {
 			firstTokens := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
 			if firstTokens == nil {
-				return fmt.Errorf(diagName()+": rule '%s' alternative %d is nullable "+
-					"but is not the only empty alt; FIRST set is ambiguous", prod.Name, i)
+				return &EmitError{
+					Message: fmt.Sprintf(
+						diagName()+": rule '%s' alternative %d is nullable "+
+							"but is not the only empty alt; FIRST set is ambiguous",
+						prod.Name, i),
+					Rule: prod.Name,
+					Sp:   prod.Sp,
+				}
 			}
 			for _, tok := range sortedKeys(firstTokens) {
 				o := map[string]any{"s": tok, "b": 1, "p": implName, "g": tag}

@@ -177,7 +177,8 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 			alts[j] = append(Sequence{}, a...)
 		}
 		copies[i] = &Production{
-			Name: p.Name, Alts: alts, NodeKind: p.NodeKind, Origin: p.Origin}
+			Name: p.Name, Alts: alts, NodeKind: p.NodeKind, Origin: p.Origin,
+			Sp: p.Sp}
 	}
 	// Order productions so that rules referenced at a leading position are
 	// processed before the rules that reference them. Paull's substitution
@@ -427,6 +428,7 @@ func substituteLeadingRef(target, source *Production) *Production {
 		Alts:     newAlts,
 		NodeKind: target.NodeKind,
 		Origin:   target.Origin,
+		Sp:       target.Sp,
 	}
 }
 
@@ -502,11 +504,20 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 			Alts:     seeds,
 			NodeKind: prod.NodeKind,
 			Origin:   prod.Origin,
+			Sp:       prod.Sp,
 		}
 	}
 	if len(seeds) == 0 {
-		panic(fmt.Sprintf(diagName()+": rule '%s' is purely left-recursive "+
-			"(no seed alternative); cannot eliminate", prod.Name))
+		// A *EmitError value, not the string this used to panic with: the
+		// panic is inherited behaviour (abnf/go's suite pins it), but the
+		// span only survives a panic if the VALUE carries it. Recovering
+		// callers that stringify see exactly the message they saw before.
+		panic(&EmitError{
+			Message: fmt.Sprintf(diagName()+": rule '%s' is purely left-recursive "+
+				"(no seed alternative); cannot eliminate", prod.Name),
+			Rule: prod.Name,
+			Sp:   prod.Sp,
+		})
 	}
 
 	var seedElement *Element
@@ -545,6 +556,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		Alts:     []Sequence{{seedElement, star}},
 		NodeKind: prod.NodeKind,
 		Origin:   prod.Origin,
+		Sp:       prod.Sp,
 	}
 }
 
@@ -791,7 +803,8 @@ func desugar(grammar *Grammar) *Grammar {
 	rewritten := []*Production{}
 	for _, p := range grammar.Productions {
 		origin = originOf(p)
-		out := &Production{Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin}
+		out := &Production{
+			Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin, Sp: p.Sp}
 		alts := make([]Sequence, len(p.Alts))
 		for i, a := range p.Alts {
 			alts[i] = desugarAlt(a)
@@ -1041,11 +1054,15 @@ func resolveProseTerminals(grammar *Grammar) error {
 			// builtinTokenOrder, not a sorted map walk: the message must
 			// match the TS one byte for byte (ts/test/grammar/parity.json).
 			names := builtinTokenOrder
-			return &ParseError{Message: fmt.Sprintf(
-				diagName()+": rule '%s' is defined only by prose ('<%s>'), which describes "+
-					"a terminal but does not define one. Prose is allowed only for "+
-					"built-in lexer tokens (%s).",
-				prod.Name, prod.Alts[0][0].Text, strings.Join(names, ", "))}
+			return &EmitError{
+				Message: fmt.Sprintf(
+					diagName()+": rule '%s' is defined only by prose ('<%s>'), which describes "+
+						"a terminal but does not define one. Prose is allowed only for "+
+						"built-in lexer tokens (%s).",
+					prod.Name, prod.Alts[0][0].Text, strings.Join(names, ", ")),
+				Rule: prod.Name,
+				Sp:   prod.Sp,
+			}
 		}
 
 		// Any surviving prose is embedded in a larger expression, where it
@@ -1055,10 +1072,20 @@ func resolveProseTerminals(grammar *Grammar) error {
 		for _, alt := range prod.Alts {
 			for _, el := range alt {
 				if stray := findStray(el); stray != nil {
-					return &ParseError{Message: fmt.Sprintf(
-						diagName()+": rule '%s' uses prose ('<%s>') inside an expression; "+
-							"prose may only stand alone as the whole definition of a "+
-							"built-in lexer token.", prod.Name, stray.Text)}
+					// The offending prose itself is the tighter range; fall back
+					// to the rule when the front-end spanned productions only.
+					sp := stray.Sp
+					if sp == nil {
+						sp = prod.Sp
+					}
+					return &EmitError{
+						Message: fmt.Sprintf(
+							diagName()+": rule '%s' uses prose ('<%s>') inside an expression; "+
+								"prose may only stand alone as the whole definition of a "+
+								"built-in lexer token.", prod.Name, stray.Text),
+						Rule: prod.Name,
+						Sp:   sp,
+					}
 				}
 			}
 		}

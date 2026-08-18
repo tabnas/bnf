@@ -27,6 +27,7 @@
  */
 
 export {
+  EmitError,
   emitGrammarSpec,
   eliminateLeftRecursion,
   refsIn,
@@ -41,6 +42,7 @@ export {
 
 export type {
   ConvertOptions,
+  SrcSpan,
   Element,
   Sequence,
   Production,

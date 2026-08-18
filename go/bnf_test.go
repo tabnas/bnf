@@ -8,6 +8,7 @@ package bnf
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -913,4 +914,348 @@ func ruleNames(spec *tabnas.GrammarSpec) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ---- source spans --------------------------------------------------
+//
+// Source spans on the IR, and the compile errors that carry them.
+//
+// A front-end that records where each element came from gets compile
+// errors with a range, so a tool can underline the offending text
+// instead of parsing it back out of the message. A front-end that
+// records nothing compiles to exactly the same grammar and gets the
+// same messages — every assertion below has a no-span counterpart.
+// Mirrors the TS `describe('source spans')`.
+
+func at(s, e, r, c int) *SrcSpan { return &SrcSpan{S: s, E: e, R: r, C: c} }
+
+// sameSpan compares by VALUE, not identity: a pass is free to copy the
+// struct, and what matters is that the position is still the author's.
+func sameSpan(got, want *SrcSpan) bool {
+	if got == nil || want == nil {
+		return got == want
+	}
+	return *got == *want
+}
+
+func spannedRef(name string, sp *SrcSpan) *Element {
+	return &Element{Kind: KindRef, Name: name, Sp: sp}
+}
+
+// TestUnknownRuleRefCarriesTheElementSpan: the most common author-facing
+// compile error, and the one an editor most wants to underline.
+func TestUnknownRuleRefCarriesTheElementSpan(t *testing.T) {
+	sp := at(10, 15, 2, 7)
+	_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{spannedRef("nope", sp)}}},
+	}}, &ConvertOptions{Tag: "demo"})
+	if err == nil {
+		t.Fatal("expected an unknown-rule failure")
+	}
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("error is %T (%v), want *EmitError", err, err)
+	}
+	if !strings.Contains(ee.Error(), "references unknown rule 'nope'") {
+		t.Errorf("message = %q, want it to name the unknown rule", ee.Error())
+	}
+	if ee.Rule != "doc" {
+		t.Errorf("Rule = %q, want %q", ee.Rule, "doc")
+	}
+	if !sameSpan(ee.Sp, sp) {
+		t.Errorf("Sp = %+v, want %+v", ee.Sp, sp)
+	}
+}
+
+// TestUnknownRuleRefWithoutSpansStillFailsIdentically is the
+// backward-compatibility guarantee: a front-end that records nothing
+// gets the message it always got, and no span invented for it.
+func TestUnknownRuleRefWithoutSpansStillFailsIdentically(t *testing.T) {
+	_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ref("nope")}}},
+	}}, &ConvertOptions{Tag: "demo"})
+	if err == nil {
+		t.Fatal("expected an unknown-rule failure")
+	}
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("error is %T (%v), want *EmitError", err, err)
+	}
+	if !strings.Contains(ee.Error(), "references unknown rule 'nope'") {
+		t.Errorf("message = %q, want it to name the unknown rule", ee.Error())
+	}
+	if ee.Sp != nil {
+		t.Errorf("Sp = %+v, want nil — no span recorded, so none reported", ee.Sp)
+	}
+}
+
+// TestPurelyLeftRecursiveCarriesTheProductionSpan.
+//
+// NOTE the shape: this failure PANICS in Go where TypeScript throws (see
+// TestDiagnosticsNameTheNotation, and abnf/go's suite, which pins it).
+// The panic value is a *EmitError rather than a string precisely so the
+// span survives — a recovering caller that stringifies still sees the
+// message it always saw.
+func TestPurelyLeftRecursiveCarriesTheProductionSpan(t *testing.T) {
+	sp := at(0, 12, 1, 1)
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected a left-recursion failure")
+		}
+		ee, ok := r.(*EmitError)
+		if !ok {
+			t.Fatalf("panic value is %T (%v), want *EmitError", r, r)
+		}
+		if !strings.Contains(ee.Error(), "purely left-recursive") {
+			t.Errorf("message = %q, want it to mention 'purely left-recursive'", ee.Error())
+		}
+		if ee.Rule != "loop" {
+			t.Errorf("Rule = %q, want %q", ee.Rule, "loop")
+		}
+		if !sameSpan(ee.Sp, sp) {
+			t.Errorf("Sp = %+v, want %+v", ee.Sp, sp)
+		}
+	}()
+	// Every alternative re-enters the rule and consumes something, so
+	// there is no seed to start from. (A bare `loop = loop` is a trivial
+	// self-reference and is dropped instead.)
+	_, _ = EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "loop", Sp: sp, Alts: []Sequence{
+			{ref("loop"), term("x")},
+			{ref("loop"), term("y")},
+		}},
+	}}, &ConvertOptions{Tag: "demo"})
+}
+
+// TestElementSpansSurviveToTheEmitter: elements are shared by reference
+// through cloning and Paull's substitution, so a span recorded at parse
+// time survives to the emitter. If that ever stops being true, the
+// unknown-rule span above is the first casualty — this pins the
+// mechanism rather than one symptom of it.
+func TestElementSpansSurviveToTheEmitter(t *testing.T) {
+	sp := at(20, 24, 3, 1)
+	el := spannedRef("gone", sp)
+	g := &Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ref("mid")}}},
+		{Name: "mid", Alts: []Sequence{{el, term("x")}}},
+	}}
+	_, err := EmitGrammarSpec(g, &ConvertOptions{Start: "doc", Tag: "demo"})
+	if err == nil {
+		t.Fatal("expected an unknown-rule failure")
+	}
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("error is %T (%v), want *EmitError", err, err)
+	}
+	if !sameSpan(ee.Sp, sp) {
+		t.Errorf("Sp = %+v, want %+v — the span did not survive the rewrite passes",
+			ee.Sp, sp)
+	}
+	// ...and the caller's own element is untouched.
+	if !sameSpan(el.Sp, sp) {
+		t.Errorf("caller's element Sp = %+v, want %+v", el.Sp, sp)
+	}
+}
+
+// TestProductionSpansSurviveTheRewritePasses is the one that catches a
+// dropped rebuild site.
+//
+// A production is REBUILT field by field by several passes, so a new
+// field is silently lost unless every one of them carries it across —
+// exactly the trap `Origin` fell into. The grammar below is shaped so
+// that each rebuilding pass has a spanned production to mangle:
+//
+//	doc   probe dispatch      rewriteProbeDispatches' rebuild
+//	expr  direct left rec.    eliminateDirectLeftRec's star return
+//	lead  leading ref         substituteLeadingRef
+//	triv  trivial self-ref    eliminateDirectLeftRec's seeds-only return
+//	all   —                   eliminateLeftRecursion's working copy, desugar
+//
+// Every one of them must come out the far end still knowing where the
+// author wrote it.
+func TestProductionSpansSurviveTheRewritePasses(t *testing.T) {
+	want := map[string]*SrcSpan{
+		"doc":  at(0, 24, 1, 1),
+		"x":    at(24, 40, 2, 1),
+		"y":    at(40, 56, 3, 1),
+		"expr": at(56, 80, 4, 1),
+		"lead": at(80, 96, 5, 1),
+		"triv": at(96, 112, 6, 1),
+	}
+	optGroup := optOf(&Element{Kind: KindGroup, Alts: []Sequence{
+		{ref("x"), term("@")},
+	}})
+	g := &Grammar{Productions: []*Production{
+		// The optional prefix shares vocabulary with the tail, so the
+		// probe rewriter rebuilds `doc`.
+		{Name: "doc", Sp: want["doc"], Alts: []Sequence{{optGroup, ref("y")}}},
+		{Name: "x", Sp: want["x"], Alts: []Sequence{{term("a")}, {term("b")}}},
+		{Name: "y", Sp: want["y"], Alts: []Sequence{{term("a")}, {term("c")}}},
+		{Name: "expr", Sp: want["expr"], Alts: []Sequence{
+			{ref("expr"), term("+"), ref("x")},
+			{ref("x")},
+		}},
+		// A leading reference Paull's substitution inlines.
+		{Name: "lead", Sp: want["lead"], Alts: []Sequence{{ref("expr"), term("!")}}},
+		// A trivial self-reference, dropped rather than eliminated.
+		{Name: "triv", Sp: want["triv"], Alts: []Sequence{{ref("triv")}, {term("z")}}},
+	}}
+
+	// The rewrite pipeline emitGrammarSpec runs, in its order.
+	const start = "doc"
+	out := cloneGrammar(g)
+	if err := resolveProseTerminals(out); err != nil {
+		t.Fatalf("resolveProseTerminals: %v", err)
+	}
+	liftLiteralTokens(out, start)
+	normalizeBuiltinTokens(out)
+	out = eliminateLeftRecursion(out)
+	out = rewriteProbeDispatches(out)
+	out = leftFactor(out)
+	out = rewriteTailRepeats(out, start)
+	out = desugar(out)
+
+	got := map[string]*Production{}
+	for _, p := range out.Productions {
+		got[p.Name] = p
+	}
+	for name, sp := range want {
+		p := got[name]
+		if p == nil {
+			t.Errorf("rule %q did not survive the rewrite passes", name)
+			continue
+		}
+		if !sameSpan(p.Sp, sp) {
+			t.Errorf("rule %q: Sp = %+v, want %+v — a rebuild site dropped it",
+				name, p.Sp, sp)
+		}
+	}
+	// The probe rewriter must actually have fired, or `doc` proves
+	// nothing about its rebuild site.
+	probed := false
+	for _, p := range out.Productions {
+		if p.ProbeDisp != nil {
+			probed = true
+		}
+	}
+	if !probed {
+		t.Error("no probe dispatcher was synthesised; the grammar no longer " +
+			"exercises rewriteProbeDispatches' rebuild")
+	}
+	// Synthesised productions locate themselves by Origin, not by a span
+	// the author never wrote.
+	for _, p := range out.Productions {
+		if p.Origin != "" && p.Sp != nil {
+			t.Errorf("synthesised rule %q carries a span (%+v) the author did not write",
+				p.Name, p.Sp)
+		}
+	}
+	// The caller's own IR is untouched.
+	for _, p := range g.Productions {
+		if !sameSpan(p.Sp, want[p.Name]) {
+			t.Errorf("caller's rule %q: Sp = %+v, want %+v", p.Name, p.Sp, want[p.Name])
+		}
+	}
+}
+
+// emitFailure runs the emitter and returns its failure however it is
+// raised — as an error return, or as the panic value the front-ends'
+// emitSafely recovers.
+func emitFailure(t *testing.T, g *Grammar) (failure error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(error)
+			if !ok {
+				panic(r)
+			}
+			failure = e
+		}
+	}()
+	_, err := EmitGrammarSpec(g, &ConvertOptions{Tag: "demo"})
+	if err == nil {
+		t.Fatal("expected a compile failure")
+	}
+	return err
+}
+
+// TestConvertedFailureMessagesAreByteIdentical: EmitError changes the
+// failure's TYPE at five sites. The message is the part callers have
+// historically matched on — including this repo's own suite and the
+// front-ends, which restamp the prefix and pass the rest through — so it
+// must not move. Compared against the published compiler's exact
+// strings. Mirrors the TS
+// "keeps every converted failure message byte-identical".
+func TestConvertedFailureMessagesAreByteIdentical(t *testing.T) {
+	prose := func(text string) *Element {
+		return &Element{Kind: KindProse, Text: text}
+	}
+	cases := []struct {
+		name    string
+		grammar *Grammar
+		message string
+	}{
+		{"unknown rule reference", &Grammar{Productions: []*Production{
+			{Name: "doc", Alts: []Sequence{{ref("nope")}}}}},
+			"demo: rule 'doc' references unknown rule 'nope'"},
+		{"purely left-recursive", &Grammar{Productions: []*Production{
+			{Name: "loop", Alts: []Sequence{
+				{ref("loop"), term("x")},
+				{ref("loop"), term("y")}}}}},
+			"demo: rule 'loop' is purely left-recursive " +
+				"(no seed alternative); cannot eliminate"},
+		{"prose inside an expression", &Grammar{Productions: []*Production{
+			{Name: "doc", Alts: []Sequence{{term("a"), prose("stuff")}}}}},
+			"demo: rule 'doc' uses prose ('<stuff>') inside an expression; " +
+				"prose may only stand alone as the whole definition of a " +
+				"built-in lexer token."},
+		{"prose as a whole definition", &Grammar{Productions: []*Production{
+			{Name: "doc", Alts: []Sequence{{prose("stuff")}}}}},
+			"demo: rule 'doc' is defined only by prose ('<stuff>'), which " +
+				"describes a terminal but does not define one. Prose is allowed " +
+				"only for built-in lexer tokens (TX, NR, ST, VL)."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := emitFailure(t, c.grammar)
+			var ee *EmitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("failure is %T (%v), want *EmitError", err, err)
+			}
+			if ee.Error() != c.message {
+				t.Errorf("message drifted:\n got %q\nwant %q", ee.Error(), c.message)
+			}
+		})
+	}
+}
+
+// TestSpansDoNotChangeTheEmittedGrammar: spans are metadata for
+// diagnostics and must be invisible in the output.
+func TestSpansDoNotChangeTheEmittedGrammar(t *testing.T) {
+	strip := func(g *Grammar) string {
+		t.Helper()
+		spec, err := EmitGrammarSpec(g, &ConvertOptions{Tag: "demo", Builtins: true})
+		if err != nil {
+			t.Fatalf("emit failed: %v", err)
+		}
+		pure, err := ToPureSpec(spec)
+		if err != nil {
+			t.Fatalf("ToPureSpec failed: %v", err)
+		}
+		return ToJsonic(pure, true, 0)
+	}
+	withSpans := &Grammar{Productions: []*Production{{
+		Name: "doc",
+		Alts: []Sequence{{&Element{
+			Kind: KindTerm, Literal: "a", Sp: at(0, 3, 1, 1)}}},
+		Sp: at(0, 9, 1, 1),
+	}}}
+	without := &Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{term("a")}}},
+	}}
+	if a, b := strip(withSpans), strip(without); a != b {
+		t.Errorf("spans must be invisible in the emitted grammar\n with spans: %s\n without:    %s",
+			a, b)
+	}
 }
