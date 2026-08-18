@@ -20,6 +20,39 @@ import (
 	tabnas "github.com/tabnas/parser/go"
 )
 
+// Recovery sync groups (@tabnas/parser `parse.recover.syncGroups`, whose
+// shipped default is exactly ['close','comma','end']). A close alternate
+// tagged with one of these offers its LEADING token as a resynchronisation
+// point after a syntax error.
+//
+// Two rules govern how these are stamped, and both are the engine's, not
+// preferences:
+//
+//  1. Only a CLOSE alternate that NAMES A TOKEN can be a sync point. An
+//     open alternate contributes nothing, and a close alternate with no
+//     `s` is skipped before its tags are even read. Exactly two of this
+//     emitter's alternates qualify: the `__start__` wrapper's `#ZZ`, and
+//     a tail repeat's separator continuation. Everything else it emits
+//     closes by capturing a child, naming no token.
+//
+//  2. Tag ALL of them or NONE. The engine falls back to "every close
+//     alternate's leading token on the stack" only while the tagged set
+//     is EMPTY — and that test is over the whole live rule stack, not
+//     per rule. So one tagged alternate anywhere switches the fallback
+//     off for every rule below it too. Tagging half of them would
+//     therefore silently DELETE the other half's sync points. Since the
+//     two sites below are the complete set, tagging both is exactly
+//     equivalent to the fallback for a grammar parsed on its own — and
+//     strictly better when it is composed with an already-tagged
+//     grammar, where the host's tags would otherwise disable the
+//     fallback these rules were relying on.
+//
+// Emitted as a comma-separated string because that is the form BOTH
+// runtimes accept (`g` as an array is TypeScript-only), with no spaces
+// around the comma (the TS grammar builder rejects a padded tag).
+// Mirrors the TS `syncG`.
+func syncG(tag, group string) string { return tag + "," + group }
+
 // emitGrammarSpec converts an ABNF grammar AST into a tabnas GrammarSpec.
 func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpec, error) {
 	if opts == nil {
@@ -205,8 +238,26 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 	refs.useBuiltins = opts.Builtins
 	refs.emitMarks = opts.Marks
 
+	// Synthetic-rule provenance, accumulated as rules are emitted (see
+	// `Production.Origin`). Recorded here rather than derived from the
+	// emitted names afterwards: the names compose
+	// (`_gen6_star__gen5_group$alt0$step1`), and a front-end's notation may
+	// allow `$` in a rule name, so parsing a name back into its parts would
+	// be guesswork. Each minting site knows the answer; it just has to say.
+	// Nil (not merely empty) when the caller turned provenance off, which
+	// is what every recording site tests.
+	var prov map[string]string
+	if opts.provenanceOn() {
+		prov = map[string]string{}
+	}
+
 	ruleSpec := map[string]*tabnas.GrammarRuleSpec{}
 	for _, prod := range grammar.Productions {
+		// Productions synthesised by the rewrite passes (sugar helpers,
+		// factored tails, probe branches) are emitted under their own names.
+		if prov != nil && originOf(prod) != prod.Name {
+			prov[prod.Name] = originOf(prod)
+		}
 		if prod.ProbeHelper != nil {
 			emitProbeHelper(prod, tag, ruleSpec, literals, regexTokens)
 			continue
@@ -217,16 +268,40 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 		}
 		if err := emitProduction(prod, grammar, literals, regexTokens, knownRules,
 			tag, ruleSpec, firstSets, nullable, refs,
-			followSets, followPairs, cc); err != nil {
+			followSets, followPairs, cc, prov); err != nil {
 			return nil, err
 		}
 	}
 
 	// __start__ wrapper consumes #ZZ.
+	//
+	// The IR reserves no names, so a grammar is free to contain a
+	// production actually called that. Assigning unconditionally would
+	// overwrite the author's rule — and if it were also the start rule,
+	// the wrapper would push itself forever. Fall back to a numbered
+	// variant, matching TypeScript.
 	startWrapper := "__start__"
+	if knownRules[startWrapper] {
+		for n := 2; ; n++ {
+			cand := fmt.Sprintf("__start%d__", n)
+			if !knownRules[cand] {
+				startWrapper = cand
+				break
+			}
+		}
+	}
+	// The wrapper stands in for the start rule, so that is what it is
+	// named after: a rule stack reading `__start__` helps nobody. This
+	// has to come AFTER the collision check — recording a name the
+	// author wrote would claim their rule was generated.
+	if prov != nil {
+		prov[startWrapper] = start
+	}
 	bubbleClose := refs.bubble()
 	bubbleClose["s"] = "#ZZ"
-	bubbleClose["g"] = tag
+	// End of source: the one anchor every grammar has, and the last
+	// resort for a parse that cannot resynchronise anywhere else.
+	bubbleClose["g"] = syncG(tag, "end")
 	ruleSpec[startWrapper] = &tabnas.GrammarRuleSpec{
 		Open:  []*tabnas.GrammarAltSpec{mapToAlt(map[string]any{"p": start, "g": tag})},
 		Close: []*tabnas.GrammarAltSpec{mapToAlt(bubbleClose)},
@@ -246,6 +321,25 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 		Ref:     refs.refMap(),
 		Options: opt,
 		Rule:    ruleSpec,
+	}
+
+	// Engine-ignored tool metadata (tabnas.GrammarSpec.Meta): the map from
+	// each generated rule name to the author-written production it came
+	// from. Built over sorted keys, so a serialised grammar is byte-stable
+	// across runs and a committed fixture diffs cleanly. Values are held as
+	// `any` because that is the shape the serialiser and the cross-runtime
+	// JSON door both read.
+	if prov != nil && 0 < len(prov) {
+		names := make([]string, 0, len(prov))
+		for name := range prov {
+			names = append(names, name)
+		}
+		sortStrings(names)
+		provenance := make(map[string]any, len(names))
+		for _, name := range names {
+			provenance[name] = prov[name]
+		}
+		spec.Meta = map[string]any{"provenance": provenance}
 	}
 
 	// `<remove>` directives. `<all> = <remove>` maps to the engine's Clear,
@@ -636,7 +730,13 @@ func emitTailRepeat(prod *Production, literals, regexTokens map[string]string,
 	repeat := map[string]any{
 		"s": strings.Join(sepSeg.terms, " "),
 		"r": prod.Name,
-		"g": tag,
+		// The separator continuation of a repetition — the `,` of a comma
+		// list, whatever the grammar spells it as. Recovering here drops one
+		// bad item and keeps the rest of the list, which is the single most
+		// useful resync point a list grammar has. Only the separator's FIRST
+		// token becomes the sync point; a multi-token separator syncs on its
+		// leading token.
+		"g": syncG(tag, "comma"),
 	}
 	for k, v := range refs.fold(len(sepSeg.terms)) {
 		repeat[k] = v
@@ -663,7 +763,8 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	knownRules map[string]bool, tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec,
 	firstSets map[string]map[string]bool, nullable map[string]bool, refs *refRegistry,
 	followSets map[string]map[string]bool,
-	followPairs map[string]map[string]map[string]bool, cc *contestCtx) error {
+	followPairs map[string]map[string]map[string]bool, cc *contestCtx,
+	prov map[string]string) error {
 
 	for _, alt := range prod.Alts {
 		if err := validateRefs(alt, knownRules, prod.Name); err != nil {
@@ -873,7 +974,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	}
 
 	if len(prod.Alts) == 1 {
-		emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag, ruleSpec, refs, prodKind)
+		// Single-alt, multi-segment: chain rules directly on the production.
+		emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag, ruleSpec,
+			refs, prodKind, prov, originOf(prod))
 		return nil
 	}
 
@@ -896,7 +999,18 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			emptyAltSeen = true
 			continue
 		}
-		emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs, "helper")
+
+		// One impl rule per alternative of a multi-segment dispatch: the
+		// author wrote one rule with alternatives, not N rules. Recorded
+		// here, beside the emission, because an EMPTY alternative continues
+		// above without emitting anything — claiming a rule that does not
+		// exist is worse than omitting one that does.
+		if prov != nil {
+			prov[implName] = originOf(prod)
+		}
+
+		emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs,
+			"helper", prov, originOf(prod))
 
 		dispatchKind := prodKind
 		initDispatchFields := refs.node(map[string]any{
@@ -1019,8 +1133,12 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 }
 
 // emitChain emits a (possibly single-step) chain of rules for one alt.
+// prov / origin are the provenance map and the author-written rule the
+// chain belongs to; both nil/empty when the caller has no attribution to
+// give (provenance turned off).
 func emitChain(headName string, alt Sequence, literals, regexTokens map[string]string,
-	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry, headKind string) {
+	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
+	headKind string, prov map[string]string, origin string) {
 
 	segs := segmentize(alt, literals, regexTokens)
 	chainName := func(i int) string {
@@ -1042,6 +1160,12 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			headAlt["m"] = altDiscriminator(alt, literals, regexTokens)
 		}
 		rs := &tabnas.GrammarRuleSpec{Open: mapsToAlts([]map[string]any{headAlt})}
+
+		// Step rules exist only because the alternative had more than one
+		// segment; nothing in the author's grammar is named after them.
+		if 0 < i && prov != nil && origin != "" {
+			prov[name] = origin
+		}
 
 		isLast := i == len(segs)-1
 		if !isLast {

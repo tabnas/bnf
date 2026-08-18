@@ -7,6 +7,7 @@
 package bnf
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -485,4 +486,431 @@ func TestTailRepeatSeparatorGetsAToken(t *testing.T) {
 	if !strings.HasPrefix(sep, "#") {
 		t.Fatalf("separator alternate s = %q, want a #token name", sep)
 	}
+}
+
+// ---- provenance ----------------------------------------------------
+//
+// `Meta["provenance"]` maps every rule the compiler MINTED back to the
+// author-written production it came from. A compiled grammar carries an
+// order of magnitude more rules than the author wrote, and all of them
+// surface in rule stacks, hover and completion, so a tool that cannot
+// resolve a generated name has nothing useful to show. Mirrored by
+// ts/test/bnf.test.js.
+
+// `doc` repeats `item`. The star helper is generated FOR doc, and the
+// only rule name embedded in its own generated name is `item` — the rule
+// being repeated. Attributing it to `item` is the mistake the map exists
+// to prevent, and the mistake any name-parsing implementation would
+// make.
+func repeatGrammar() *Grammar {
+	return &Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{
+			{ref("item"), {Kind: KindStar, Inner: ref("item")}},
+		}},
+		{Name: "item", Alts: []Sequence{{term("a")}, {term("b")}}},
+	}}
+}
+
+func provenanceOf(t *testing.T, spec *tabnas.GrammarSpec) map[string]string {
+	t.Helper()
+	if spec.Meta == nil {
+		t.Fatal("spec carries no meta")
+	}
+	raw, ok := spec.Meta["provenance"].(map[string]any)
+	if !ok {
+		t.Fatalf("meta.provenance missing or wrong shape: %#v", spec.Meta)
+	}
+	out := map[string]string{}
+	for name, origin := range raw {
+		s, ok := origin.(string)
+		if !ok {
+			t.Fatalf("provenance[%q] = %#v, want a rule name", name, origin)
+		}
+		out[name] = s
+	}
+	return out
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestProvenanceAttributesAHelperToItsEnclosingRule(t *testing.T) {
+	spec := emitOrFail(t, repeatGrammar())
+	prov := provenanceOf(t, spec)
+
+	star := ""
+	for name := range spec.Rule {
+		if strings.HasPrefix(name, "_gen") && strings.Contains(name, "star_item") &&
+			!strings.Contains(name, "$") {
+			star = name
+		}
+	}
+	if star == "" {
+		t.Fatal("expected a generated star helper named after item")
+	}
+	if got := prov[star]; got != "doc" {
+		t.Errorf("%s belongs to doc, which repeats item — not to %q itself",
+			star, got)
+	}
+}
+
+func TestProvenanceAttributesEveryGeneratedRuleAndOnlyToAuthoredOnes(t *testing.T) {
+	grammar := repeatGrammar()
+	authored := map[string]bool{}
+	for _, p := range grammar.Productions {
+		authored[p.Name] = true
+	}
+	spec := emitOrFail(t, grammar)
+	prov := provenanceOf(t, spec)
+
+	for name := range spec.Rule {
+		if authored[name] {
+			if _, listed := prov[name]; listed {
+				t.Errorf("%s is author-written and must not be listed", name)
+			}
+			continue
+		}
+		origin, listed := prov[name]
+		if !listed {
+			t.Errorf("generated rule %s has no provenance", name)
+			continue
+		}
+		if !authored[origin] {
+			t.Errorf("%s resolves to %s, which the author never wrote", name, origin)
+		}
+	}
+
+	// An entry naming a rule that was never emitted is a phantom: the
+	// empty alternative of a repetition helper allocates a `$altN` name
+	// and then continues without emitting anything.
+	for name := range prov {
+		if _, emitted := spec.Rule[name]; !emitted {
+			t.Errorf("%s has provenance but was not emitted", name)
+		}
+	}
+}
+
+func TestProvenanceNamesTheStartWrapperAfterTheStartRule(t *testing.T) {
+	spec := emitOrFail(t, repeatGrammar())
+	if got := provenanceOf(t, spec)["__start__"]; got != "doc" {
+		t.Errorf("__start__ provenance = %q, want the start rule doc", got)
+	}
+}
+
+func TestProvenanceSurvivesCompilation(t *testing.T) {
+	// The consumer that needs provenance most loads COMPILED grammars,
+	// and every shape rebuilds the spec from {options, rule} alone.
+	spec, err := EmitGrammarSpec(repeatGrammar(),
+		&ConvertOptions{Tag: "demo", Start: "doc", Builtins: true})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+
+	shapes := map[string]func(*tabnas.GrammarSpec) (map[string]any, error){
+		"ToPureSpec":        ToPureSpec,
+		"ToRecognitionSpec": ToRecognitionSpec,
+	}
+	for name, shape := range shapes {
+		out, err := shape(spec)
+		if err != nil {
+			t.Fatalf("%s failed: %v", name, err)
+		}
+		meta, _ := out["meta"].(map[string]any)
+		prov, _ := meta["provenance"].(map[string]any)
+		if prov["__start__"] != "doc" {
+			t.Errorf("%s dropped meta.provenance (got %#v)", name, out["meta"])
+		}
+	}
+
+	// ...and through serialisation, which is how it reaches a tool.
+	pure, err := ToPureSpec(spec)
+	if err != nil {
+		t.Fatalf("ToPureSpec failed: %v", err)
+	}
+	var round map[string]any
+	if err := json.Unmarshal([]byte(ToJsonic(pure, true, 0)), &round); err != nil {
+		t.Fatalf("serialised grammar is not JSON: %v", err)
+	}
+	meta, _ := round["meta"].(map[string]any)
+	prov, _ := meta["provenance"].(map[string]any)
+	if prov["__start__"] != "doc" {
+		t.Errorf("serialisation dropped meta.provenance (got %#v)", round["meta"])
+	}
+}
+
+func TestProvenanceCanBeTurnedOff(t *testing.T) {
+	// Off is opt-IN: a caller that says nothing gets the map, exactly as
+	// the TypeScript `{tag: 'demo'}` does.
+	spec, err := EmitGrammarSpec(repeatGrammar(),
+		&ConvertOptions{Tag: "demo", Start: "doc", Provenance: boolPtr(false)})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if spec.Meta != nil {
+		t.Errorf("expected no meta with provenance off, got %#v", spec.Meta)
+	}
+}
+
+// ---- recovery sync tags --------------------------------------------
+//
+// Only a CLOSE alternate that names a token can be a recovery sync
+// point, and this emitter produces exactly two: the `__start__`
+// wrapper's `#ZZ` and a tail repeat's separator continuation. Tagging
+// half of them would silently delete the other half's sync points, so
+// both carry their group appended to the caller's tag.
+
+// listGrammar is `doc = list`, `list = DIGIT [ "," list ]` — the tail
+// repeat whose separator alternate is the second taggable close alt.
+func listGrammar() *Grammar {
+	return &Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ref("list")}}},
+		{Name: "list", Alts: []Sequence{{
+			{Kind: KindRegex, Pattern: "[0-9]"},
+			{Kind: KindOpt, Inner: &Element{Kind: KindGroup, Alts: []Sequence{
+				{term(","), ref("list")},
+			}}},
+		}}},
+	}}
+}
+
+func TestSyncTagsOnTheOnlyTwoTokenNamingCloseAlts(t *testing.T) {
+	spec, err := EmitGrammarSpec(listGrammar(),
+		&ConvertOptions{Tag: "demo", Start: "doc"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+
+	closeAlt := func(rule string, idx int) *tabnas.GrammarAltSpec {
+		t.Helper()
+		rs := spec.Rule[rule]
+		if rs == nil {
+			t.Fatalf("no rule %s", rule)
+		}
+		alts := altListOf(rs.Close)
+		if len(alts) <= idx {
+			t.Fatalf("%s has %d close alternates, wanted at least %d",
+				rule, len(alts), idx+1)
+		}
+		return alts[idx]
+	}
+
+	end := closeAlt("__start__", 0)
+	if s, _ := end.S.(string); s != "#ZZ" {
+		t.Fatalf("the start wrapper's close alt should name #ZZ, got %#v", end.S)
+	}
+	if end.G != "demo,end" {
+		t.Errorf("__start__ close g = %q, want the tag with the end group", end.G)
+	}
+
+	sep := closeAlt("list", 0)
+	if s, _ := sep.S.(string); !strings.HasPrefix(s, "#") {
+		t.Fatalf("the separator close alt should name a token, got %#v", sep.S)
+	}
+	if sep.G != "demo,comma" {
+		t.Errorf("separator close g = %q, want the tag with the comma group", sep.G)
+	}
+
+	// Every OTHER close alternate names no token, so tagging it would be
+	// dead weight — and the tag it carries must stay the caller's own.
+	for name, rs := range spec.Rule {
+		if rs == nil {
+			continue
+		}
+		for i, a := range altListOf(rs.Close) {
+			if name == "__start__" || (name == "list" && i == 0) {
+				continue
+			}
+			if s, _ := a.S.(string); s != "" {
+				t.Errorf("%s close alt %d names token %q — a third sync "+
+					"candidate the emitter is not accounting for", name, i, s)
+			}
+			if a.G != "demo" {
+				t.Errorf("%s close alt %d g = %q, want the bare tag", name, i, a.G)
+			}
+		}
+	}
+}
+
+// Strip the sync groups back off, and recovery must get measurably
+// worse — otherwise the tags are decoration and this suite proves
+// nothing about them. Mirrors the TS `sync tags` recovery test.
+func TestSyncTagsKeepTheRestOfAListUnderATaggedHost(t *testing.T) {
+	syncGroups := map[string]bool{"close": true, "comma": true, "end": true}
+
+	closeAlts := func(rules map[string]any, rule string) []any {
+		rm, _ := rules[rule].(map[string]any)
+		cl, _ := rm["close"].([]any)
+		return cl
+	}
+
+	// A host rule with its own sync tag, standing in for the grammar this
+	// one gets embedded in. Its single tag is what disables the fallback
+	// the generated rules would otherwise have relied on.
+	underHost := func(data map[string]any) map[string]any {
+		rules, _ := data["rule"].(map[string]any)
+		rules["host"] = map[string]any{
+			"open":  []any{map[string]any{"p": "doc", "g": "host"}},
+			"close": []any{map[string]any{"s": "#ZZ", "a": "@bubble$", "g": "host,end"}},
+		}
+		opts, _ := data["options"].(map[string]any)
+		rule, _ := opts["rule"].(map[string]any)
+		rule["start"] = "host"
+		return data
+	}
+
+	strip := func(data map[string]any) map[string]any {
+		rules, _ := data["rule"].(map[string]any)
+		for name := range rules {
+			for _, av := range closeAlts(rules, name) {
+				am, _ := av.(map[string]any)
+				g, ok := am["g"].(string)
+				if !ok {
+					continue
+				}
+				kept := []string{}
+				for _, tg := range strings.Split(g, ",") {
+					if !syncGroups[tg] {
+						kept = append(kept, tg)
+					}
+				}
+				am["g"] = strings.Join(kept, ",")
+			}
+		}
+		return data
+	}
+
+	// ToPureSpec clones, so each call yields an independent tree.
+	pure := func() map[string]any {
+		spec, err := EmitGrammarSpec(listGrammar(),
+			&ConvertOptions{Start: "doc", Tag: "demo", Builtins: true})
+		if err != nil {
+			t.Fatalf("emit failed: %v", err)
+		}
+		data, err := ToPureSpec(spec)
+		if err != nil {
+			t.Fatalf("ToPureSpec failed: %v", err)
+		}
+		return data
+	}
+
+	// The whole point of a sync group is what the ENGINE does with it, so
+	// the grammar goes through the serialised cross-runtime door and is
+	// parsed for real.
+	var srcOf func(v any) string
+	srcOf = func(v any) string {
+		switch x := v.(type) {
+		case map[string]any:
+			if s, ok := x["src"].(string); ok {
+				return s
+			}
+			return srcOf(x["kids"])
+		case []any:
+			out := ""
+			for _, e := range x {
+				out += srcOf(e)
+			}
+			return out
+		case string:
+			return x
+		}
+		return ""
+	}
+	parse := func(what string, data map[string]any, src string) (int, string) {
+		t.Helper()
+		gs, err := tabnas.GrammarSpecFromJSON([]byte(ToJsonic(data, true, 0)))
+		if err != nil {
+			t.Fatalf("%s: loading the serialised grammar: %v", what, err)
+		}
+		j := tabnas.Make(tabnas.Options{Parse: &tabnas.ParseOptions{
+			Recover: &tabnas.RecoverOptions{Enabled: true}}})
+		if err := j.Grammar(gs); err != nil {
+			t.Fatalf("%s: installing the grammar: %v", what, err)
+		}
+		value, errs, err := j.ParseRecover(src)
+		if err != nil {
+			t.Fatalf("%s: parse failed outright: %v", what, err)
+		}
+		return len(errs), srcOf(value)
+	}
+
+	taggedErrs, taggedSrc := parse("tagged", underHost(pure()), "1,!,3")
+	bareErrs, bareSrc := parse("untagged", underHost(strip(pure())), "1,!,3")
+
+	if taggedErrs != 1 || bareErrs != 1 {
+		t.Fatalf("expected one recovered error each, got tagged=%d untagged=%d",
+			taggedErrs, bareErrs)
+	}
+	// Tagged: resynchronises at the separator, so the trailing `3`
+	// survives. Untagged: the host's tag has disabled the fallback, the
+	// separator is no longer a sync point, and everything after the bad
+	// token is lost.
+	if !strings.Contains(taggedSrc, "3") {
+		t.Errorf("tagged: the item after the error should survive, got %q", taggedSrc)
+	}
+	if strings.Contains(bareSrc, "3") {
+		t.Errorf("untagged: without the separator sync point the tail is lost — "+
+			"if this now passes, the tags are no longer doing anything (got %q)",
+			bareSrc)
+	}
+}
+
+// A grammar is free to contain a production actually called
+// `__start__` — the IR reserves no names. The wrapper must then take a
+// numbered name, as TypeScript does, or it silently overwrites the
+// author's rule. With provenance on, the consequence is sharper still:
+// recording the colliding name would claim an AUTHOR-WRITTEN rule was
+// generated, breaking the map's one invariant.
+func TestStartWrapperAvoidsAnAuthoredName(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ref("__start__")}}},
+		{Name: "__start__", Alts: []Sequence{{tok("#NR")}}},
+	}}, &ConvertOptions{Tag: "demo", Start: "doc"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if _, ok := spec.Rule["__start2__"]; !ok {
+		t.Fatalf("wrapper did not take a numbered name; rules: %v", ruleNames(spec))
+	}
+	prov, _ := spec.Meta["provenance"].(map[string]any)
+	if _, listed := prov["__start__"]; listed {
+		t.Error("the author's __start__ rule is listed as generated")
+	}
+	if prov["__start2__"] != "doc" {
+		t.Errorf("__start2__ provenance = %v, want doc", prov["__start2__"])
+	}
+}
+
+// Meta is JSON-serialisable by contract, but a caller can hold ordinary
+// typed Go containers in it. cloneData and ToJsonic recognise only the
+// generic map[string]any / []any forms, so without normalisation those
+// values serialise as `null` — the metadata silently replaced by
+// nothing on the way out.
+func TestCarriedMetaNormalisesTypedContainers(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "v", Alts: []Sequence{{tok("#NR")}}},
+	}}, &ConvertOptions{Tag: "demo", Builtins: true})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	spec.Meta = map[string]any{
+		"pairs": map[string]string{"k": "v"},
+		"tags":  []string{"a", "b"},
+	}
+	text := SpecToJSON(spec, 2)
+	if strings.Contains(text, "null") {
+		t.Errorf("typed containers serialised as null:\n%s", text)
+	}
+	for _, want := range []string{`"pairs"`, `"tags"`, `"a"`, `"b"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("serialised meta lost %s:\n%s", want, text)
+		}
+	}
+}
+
+func ruleNames(spec *tabnas.GrammarSpec) []string {
+	out := []string{}
+	for n := range spec.Rule {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
