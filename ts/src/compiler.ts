@@ -1793,12 +1793,20 @@ function emitProbeDispatch(
 // than re-deriving identifiers char-by-char (which, since whitespace is
 // ignored between tokens, would greedily merge across spaces). A user (or
 // core) rule of the same name always wins.
-const BUILTIN_TOKENS: Record<string, string> = {
-  TX: '#TX',  // bareword / identifier (text matcher)
-  NR: '#NR',  // number (number matcher)
-  ST: '#ST',  // quoted string (string matcher)
-  VL: '#VL',  // keyword value: true / false / null (value matcher)
-}
+// Allocated without a prototype: this table is looked up by names taken from
+// the grammar TEXT, so on a plain literal `BUILTIN_TOKENS['__proto__']` is
+// Object.prototype - truthy - and a production named __proto__ was skipped as
+// if the lexer already defined it. Two of the three lookups here were bare
+// index reads; only `isBuiltinTokenRef` guarded with hasOwnProperty.
+const BUILTIN_TOKENS: Record<string, string> = Object.assign(
+  Object.create(null),
+  {
+    TX: '#TX',  // bareword / identifier (text matcher)
+    NR: '#NR',  // number (number matcher)
+    ST: '#ST',  // quoted string (string matcher)
+    VL: '#VL',  // keyword value: true / false / null (value matcher)
+  },
+)
 
 
 // The one prose directive the compiler acts on. Matched case-insensitively
@@ -2296,8 +2304,9 @@ function emitGrammarSpec(
   const literals = new Map<string, string>()        // literal-key -> token name
   const regexTokens = new Map<string, string>()     // regex key -> token name
   const usedNames = new Set<string>()
-  const fixedTokens: Record<string, string> = {}
-  const matchTokens: Record<string, RegExp> = {}
+  // Token tables are keyed by grammar-supplied names too.
+  const fixedTokens: Record<string, string> = Object.create(null)
+  const matchTokens: Record<string, RegExp> = Object.create(null)
 
   // Gather every terminal first. Probe-helper productions store their
   // vocab as AbnfElements rather than in `alts`, so walk those too. The
@@ -2432,7 +2441,12 @@ function emitGrammarSpec(
   const prov: Map<string, string> | undefined =
     false === opts?.provenance ? undefined : new Map()
 
-  const ruleSpec: NonNullable<GrammarSpec['rule']> = {}
+  // Keyed by production name, which comes from the grammar TEXT being
+  // compiled - untrusted whenever the grammar is user-supplied. On a plain
+  // `{}` literal a production named __proto__ never becomes a key: the
+  // assignment runs the Object.prototype setter, so the rule silently
+  // vanishes and the generated parser fails with "unknown rule: __proto__".
+  const ruleSpec: NonNullable<GrammarSpec['rule']> = Object.create(null)
   for (const prod of grammar.productions) {
     // Productions synthesised by the rewrite passes (sugar helpers,
     // factored tails, probe branches) are emitted under their own names.
@@ -2520,7 +2534,8 @@ function emitGrammarSpec(
   // it came from. Sorted, so a serialised grammar is byte-stable across
   // runs and a committed fixture diffs cleanly.
   if (null != prov && 0 < prov.size) {
-    const provenance: Record<string, string> = {}
+    // Keyed by generated/production rule name.
+    const provenance: Record<string, string> = Object.create(null)
     for (const name of [...prov.keys()].sort()) {
       provenance[name] = prov.get(name) as string
     }
@@ -2636,7 +2651,11 @@ function validateRefs(
 // still declarative: every function appears once, keyed by name,
 // under the spec's `ref` map.
 class RefRegistry {
-  private refs: Record<string, Function> = {}
+  // Keyed by ref name. Values are functions, so on a plain literal a lookup
+  // of an inherited name returns an Object.prototype method rather than
+  // undefined - and reading `.name` off it yields a plausible-looking string,
+  // which is how `constructor` failed while `toString` accidentally worked.
+  private refs: Record<string, Function> = Object.create(null)
   private counter = 0
   // When set, tree-building actions are emitted as engine `$`-builtin
   // refs + `k` config (pure data) instead of registered closures. See
