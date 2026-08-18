@@ -50,6 +50,13 @@ export type ConvertOptions = {
   // `"v"` before a hex digit in an RFC grammar must still match). Off by
   // default so existing grammars are unchanged.
   wordKeywords?: boolean
+  // Emit `meta.provenance` — the map from each generated rule name back
+  // to the author-written production it came from (see
+  // `Production.origin`). On by default: the names are otherwise
+  // unattributable, and every tool that shows a rule name to a human
+  // needs it. Set `false` to keep an embedded grammar as small as
+  // possible.
+  provenance?: boolean
 }
 
 
@@ -166,6 +173,30 @@ type Production = {
   //     user rule transparently.
   // Unset is treated as 'user' (default for freshly parsed productions).
   nodeKind?: 'user' | 'core' | 'helper'
+  // The author-written production this one descends from. Set by every
+  // pass that SYNTHESISES a production (desugar's sugar helpers, left
+  // factoring's `$fact` tails, the probe rewriter's dispatch branches)
+  // to the origin of the production being rewritten. ABSENT means the
+  // production is itself author-written — so the source rule is always
+  // `origin ?? name`, which is what `originOf` returns.
+  //
+  // A compiled grammar carries an order of magnitude more rules than the
+  // author wrote (a 12-production ABNF grammar emits 118), and every one
+  // of the extra names surfaces in rule stacks, hover and completion.
+  // Carrying the origin is what lets `emitGrammarSpec` export the map
+  // back out (`spec.meta.provenance`) so a tool can name the user's rule
+  // instead of the machinery's.
+  origin?: string
+}
+
+
+// The author-written production a (possibly synthesised) production
+// descends from. Synthetic productions carry `origin`; an author-written
+// one is its own origin. Always read `origin` through this — a bare
+// `p.origin` is undefined for exactly the productions whose name is
+// already the answer.
+function originOf(prod: Production): string {
+  return prod.origin ?? prod.name
 }
 
 // Configuration attached to a synthesised dispatcher production. The
@@ -323,6 +354,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
         name: p.name,
         alts: p.alts.map((a) => a.slice()),
         nodeKind: p.nodeKind,
+        origin: p.origin,
       })),
     ),
   )
@@ -541,7 +573,12 @@ function substituteLeadingRef(
       newAlts.push(alt)
     }
   }
-  return { name: target.name, alts: newAlts, nodeKind: target.nodeKind }
+  return {
+    name: target.name,
+    alts: newAlts,
+    nodeKind: target.nodeKind,
+    origin: target.origin,
+  }
 }
 
 
@@ -615,7 +652,12 @@ function eliminateDirectLeftRec(
   if (nonTrivialRecursive.length === 0) {
     // Either no recursion at all, or only trivial self-refs — keep
     // just the seeds.
-    return { name: prod.name, alts: seeds, nodeKind: prod.nodeKind }
+    return {
+      name: prod.name,
+      alts: seeds,
+      nodeKind: prod.nodeKind,
+      origin: prod.origin,
+    }
   }
   if (seeds.length === 0) {
     throw new Error(
@@ -657,6 +699,7 @@ function eliminateDirectLeftRec(
     name: prod.name,
     alts: [[seedElement, star]],
     nodeKind: prod.nodeKind,
+    origin: prod.origin,
   }
 }
 
@@ -972,7 +1015,8 @@ function leftFactor(grammar: Grammar): Grammar {
     }
     let alts = prod.alts
     for (;;) {
-      const next = factorOnce(prod.name, alts, freshName, queue, grammar)
+      const next = factorOnce(
+        prod.name, originOf(prod), alts, freshName, queue, grammar)
       if (null == next) break
       alts = next
     }
@@ -997,6 +1041,7 @@ function leftFactor(grammar: Grammar): Grammar {
 // is beyond any finite lookahead, and factoring is the only fix.
 function factorOnce(
   prodName: string,
+  prodOrigin: string,
   alts: Sequence[],
   freshName: (base: string) => string,
   queue: Production[],
@@ -1083,6 +1128,7 @@ function factorOnce(
         name: helper,
         alts: tails,
         nodeKind: 'helper',
+        origin: prodOrigin,
       }
       if (tails.some((t) => 0 === t.length)) helperProd.repeatHelper = true
       queue.push(helperProd)
@@ -1138,6 +1184,14 @@ function desugar(grammar: Grammar): Grammar {
   const extra: Production[] = []
   const used = new Set(grammar.productions.map((p) => p.name))
 
+  // Origin of the production currently being desugared: every helper
+  // minted below belongs to it, and says so, so the emitted provenance
+  // map can point `_gen7_star_DIGIT` back at the rule the author wrote.
+  // Closure state rather than a parameter because `desugarAlt` is
+  // handed straight to `Array.map`, which would fill a second parameter
+  // with the array index.
+  let origin = ''
+
   function freshName(hint: string): string {
     // Collision-avoiding name like `_gen1`, `_gen2`, …
     let i = extra.length
@@ -1172,7 +1226,7 @@ function desugar(grammar: Grammar): Grammar {
       // then emit a helper production whose body is those alts.
       const innerAlts = el.alts.map((a) => desugarAlt(a))
       const name = freshName('group')
-      extra.push({ name, alts: innerAlts, nodeKind: 'helper' })
+      extra.push({ name, alts: innerAlts, nodeKind: 'helper', origin })
       return { kind: 'ref', name }
     }
 
@@ -1192,6 +1246,7 @@ function desugar(grammar: Grammar): Grammar {
       const name = freshName('opt_' + hint)
       extra.push({
         name, alts: [[inner], []], nodeKind: 'helper', repeatHelper: true,
+        origin,
       })
       return { kind: 'ref', name }
     }
@@ -1205,6 +1260,7 @@ function desugar(grammar: Grammar): Grammar {
         alts: [[inner, selfRef], []],
         nodeKind: 'helper',
         repeatHelper: true,
+        origin,
       }
       // A left-recursion tail loop that may have to yield to an
       // enclosing suffix carries its counter onto the helper it becomes
@@ -1224,11 +1280,13 @@ function desugar(grammar: Grammar): Grammar {
         alts: [[inner, tailRef], []],
         nodeKind: 'helper',
         repeatHelper: true,
+        origin,
       })
       extra.push({
         name: plusName,
         alts: [[inner, tailRef]],
         nodeKind: 'helper',
+        origin,
       })
       return { kind: 'ref', name: plusName }
     }
@@ -1256,6 +1314,7 @@ function desugar(grammar: Grammar): Grammar {
         alts: [[inner, tailStarRef], []],
         nodeKind: 'helper',
         repeatHelper: true,
+        origin,
       })
       repAlt.push(tailStarRef)
     } else {
@@ -1277,7 +1336,7 @@ function desugar(grammar: Grammar): Grammar {
       for (let i = 0; i < max - min; i++) {
         const seq: Sequence = nestedRef ? [inner, nestedRef] : [inner]
         const groupName = freshName('group')
-        extra.push({ name: groupName, alts: [seq], nodeKind: 'helper' })
+        extra.push({ name: groupName, alts: [seq], nodeKind: 'helper', origin })
         const groupRef: Element = { kind: 'ref', name: groupName }
         const optName = freshName('opt_' + groupName)
         extra.push({
@@ -1285,21 +1344,26 @@ function desugar(grammar: Grammar): Grammar {
           alts: [[groupRef], []],
           nodeKind: 'helper',
           repeatHelper: true,
+          origin,
         })
         nestedRef = { kind: 'ref', name: optName }
       }
       if (nestedRef) repAlt.push(nestedRef)
     }
 
-    extra.push({ name: repName, alts: [desugarAlt(repAlt)], nodeKind: 'helper' })
+    extra.push({
+      name: repName, alts: [desugarAlt(repAlt)], nodeKind: 'helper', origin,
+    })
     return { kind: 'ref', name: repName }
   }
 
   const rewritten: Production[] = grammar.productions.map((p) => {
+    origin = originOf(p)
     const out: Production = {
       name: p.name,
       alts: p.alts.map(desugarAlt),
       nodeKind: p.nodeKind,
+      origin: p.origin,
     }
     // Probe-dispatch and tail-repeat flags survive desugar unchanged —
     // the emitter routes around the standard alt-compilation path for
@@ -1520,17 +1584,20 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
           alts: [],
           probeHelper: { vocabElements: [...vocab.values()] },
           nodeKind: 'helper',
+          origin: originOf(prod),
         })
         // Synthesise the committed branches. `with` = X D Y, `no` = Y.
         extra.push({
           name: withName,
           alts: [[...info.xSeq, info.disambiguator, ...ySeq]],
           nodeKind: 'helper',
+          origin: originOf(prod),
         })
         extra.push({
           name: noName,
           alts: [ySeq],
           nodeKind: 'helper',
+          origin: originOf(prod),
         })
         // Synthesise the dispatcher. The `alts` list is a "virtual"
         // spec — two ref-only alts — that exists solely to feed
@@ -1551,6 +1618,7 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
             noBranch: noName,
           },
           nodeKind: 'helper',
+          origin: originOf(prod),
         })
 
         reports.push({
@@ -1572,6 +1640,7 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
         name: prod.name,
         alts: newAlts,
         nodeKind: prod.nodeKind,
+        origin: prod.origin,
       })
     } else {
       rewritten.push(prod)
@@ -2086,6 +2155,41 @@ function diagName(): string {
   return _diagName
 }
 
+
+// Recovery sync groups (@tabnas/parser `parse.recover.syncGroups`, whose
+// shipped default is exactly ['close','comma','end']). A close alternate
+// tagged with one of these offers its LEADING token as a resynchronisation
+// point after a syntax error.
+//
+// Two rules govern how these are stamped, and both are the engine's, not
+// preferences:
+//
+//  1. Only a CLOSE alternate that NAMES A TOKEN can be a sync point. An
+//     open alternate contributes nothing, and a close alternate with no
+//     `s` is skipped before its tags are even read. Exactly two of this
+//     emitter's alternates qualify: the `__start__` wrapper's `#ZZ`, and
+//     a tail repeat's separator continuation. Everything else it emits
+//     closes by capturing a child, naming no token.
+//
+//  2. Tag ALL of them or NONE. The engine falls back to "every close
+//     alternate's leading token on the stack" only while the tagged set
+//     is EMPTY — and that test is over the whole live rule stack, not
+//     per rule. So one tagged alternate anywhere switches the fallback
+//     off for every rule below it too. Tagging half of them would
+//     therefore silently DELETE the other half's sync points. Since the
+//     two sites below are the complete set, tagging both is exactly
+//     equivalent to the fallback for a grammar parsed on its own — and
+//     strictly better when it is composed with an already-tagged
+//     grammar, where the host's tags would otherwise disable the
+//     fallback these rules were relying on.
+//
+// Emitted as a comma-separated string because that is the form BOTH
+// runtimes accept (`g` as an array is TypeScript-only), with no spaces
+// around the comma (the TS grammar builder rejects a padded tag).
+function syncG(tag: string, group: 'close' | 'comma' | 'end'): string {
+  return tag + ',' + group
+}
+
 // Wrap a pattern in a non-capturing group if — and only if — it has
 // top-level alternation.
 //
@@ -2319,8 +2423,22 @@ function emitGrammarSpec(
   refs.useBuiltins = !!opts?.builtins
   refs.emitMarks = !!opts?.marks
 
+  // Synthetic-rule provenance, accumulated as rules are emitted (see
+  // `Production.origin`). Recorded here rather than derived from the
+  // emitted names afterwards: the names compose
+  // (`_gen6_star__gen5_group$alt0$step1`), and a front-end's notation may
+  // allow `$` in a rule name, so parsing a name back into its parts would
+  // be guesswork. Each minting site knows the answer; it just has to say.
+  const prov: Map<string, string> | undefined =
+    false === opts?.provenance ? undefined : new Map()
+
   const ruleSpec: NonNullable<GrammarSpec['rule']> = {}
   for (const prod of grammar.productions) {
+    // Productions synthesised by the rewrite passes (sugar helpers,
+    // factored tails, probe branches) are emitted under their own names.
+    if (null != prov && originOf(prod) !== prod.name) {
+      prov.set(prod.name, originOf(prod))
+    }
     if (prod.probeHelper) {
       emitProbeHelper(prod, tag, ruleSpec, literals, regexTokens)
       continue
@@ -2336,7 +2454,7 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap,
+      tokensOverlap, prov,
     )
   }
 
@@ -2357,6 +2475,10 @@ function emitGrammarSpec(
     while (knownRules.has(`__start${n}__`)) n++
     startWrapper = `__start${n}__`
   }
+  // The wrapper stands in for the start rule, so that is what it is
+  // named after: a rule stack reading `__start__` helps nobody.
+  if (null != prov) prov.set(startWrapper, start)
+
   ruleSpec[startWrapper] = {
     open: [{
       p: start,
@@ -2373,7 +2495,9 @@ function emitGrammarSpec(
           r.node = r.child.node
         }
       }),
-      g: tag,
+      // End of source: the one anchor every grammar has, and the last
+      // resort for a parse that cannot resynchronise anywhere else.
+      g: syncG(tag, 'end'),
     }],
   }
 
@@ -2389,6 +2513,18 @@ function emitGrammarSpec(
     ref: refs.map,
     options,
     rule: ruleSpec,
+  }
+
+  // Engine-ignored tool metadata (@tabnas/parser GrammarSpec.meta): the
+  // map from each generated rule name to the author-written production
+  // it came from. Sorted, so a serialised grammar is byte-stable across
+  // runs and a committed fixture diffs cleanly.
+  if (null != prov && 0 < prov.size) {
+    const provenance: Record<string, string> = {}
+    for (const name of [...prov.keys()].sort()) {
+      provenance[name] = prov.get(name) as string
+    }
+    spec.meta = { provenance }
   }
 
   // `<remove>` directives. `* = <remove>` maps to the engine's `clear`,
@@ -2726,7 +2862,13 @@ function emitTailRepeat(
     r: prod.name,
     ...refs.fold({ cN: sepSeg.terms.length },
       mkFoldClosure(sepSeg.terms.length)),
-    g: tag,
+    // The separator continuation of a repetition — the `,` of a comma
+    // list, whatever the grammar spells it as. Recovering here drops one
+    // bad item and keeps the rest of the list, which is the single most
+    // useful resync point a list grammar has. Only the separator's FIRST
+    // token becomes the sync point; a multi-token separator syncs on its
+    // leading token.
+    g: syncG(tag, 'comma'),
   }
   if (marks) repeat.m = marks.get(sep)
 
@@ -2755,6 +2897,7 @@ function emitProduction(
   followPairs: Map<string, Map<string, Set<string>>>,
   tokenRangesOf: (tok: string) => Array<[number, number]> | null,
   tokensOverlap: (a: string, b: string) => boolean,
+  prov?: Map<string, string>,
 ) {
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
@@ -3245,7 +3388,7 @@ function emitProduction(
     // Single-alt, multi-segment: chain rules directly on the
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
-      ruleSpec, refs, prod.nodeKind ?? 'user')
+      ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod))
     return
   }
 
@@ -3274,8 +3417,15 @@ function emitProduction(
       continue
     }
 
+    // One impl rule per alternative of a multi-segment dispatch: the
+    // author wrote one rule with alternatives, not N rules. Recorded
+    // here, beside the emission, because an EMPTY alternative returns
+    // above without emitting anything — claiming a rule that does not
+    // exist is worse than omitting one that does.
+    if (null != prov) prov.set(implName, originOf(prod))
+
     emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs,
-      'helper')
+      'helper', prov, originOf(prod))
 
     // Fan out this alt into one dispatch entry per concrete token
     // sequence it can start with. Up to LOOKAHEAD_K tokens per
@@ -3414,6 +3564,8 @@ function emitChain(
   ruleSpec: NonNullable<GrammarSpec['rule']>,
   refs: RefRegistry,
   headKind: Production['nodeKind'] = 'helper',
+  prov?: Map<string, string>,
+  origin?: string,
 ) {
   const segs = segmentize(alt, literals, regexTokens)
   const chainName = (i: number) =>
@@ -3432,6 +3584,10 @@ function emitChain(
     }
     const open = [headAlt]
     const rs: any = { open }
+
+    // Step rules exist only because the alternative had more than one
+    // segment; nothing in the author's grammar is named after them.
+    if (0 < i && null != prov && null != origin) prov.set(name, origin)
 
     const isLast = i === segs.length - 1
     if (!isLast) {

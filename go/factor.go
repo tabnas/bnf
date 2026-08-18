@@ -285,7 +285,8 @@ func leftFactor(grammar *Grammar) *Grammar {
 
 		alts := prod.Alts
 		for {
-			next, more := factorOnce(prod.Name, alts, freshName, &queue, grammar)
+			next, more := factorOnce(
+				prod.Name, originOf(prod), alts, freshName, &queue, grammar)
 			if !more {
 				break
 			}
@@ -330,7 +331,8 @@ func sameAlts(a, b []Sequence) bool {
 // on. A prefix that can span lookaheadK tokens or has unbounded token
 // length (`identifier ws "=" … / identifier ws "(" …`) is beyond any
 // finite lookahead, and factoring is the only fix.
-func factorOnce(prodName string, alts []Sequence, freshName func(string) string,
+func factorOnce(prodName, prodOrigin string, alts []Sequence,
+	freshName func(string) string,
 	queue *[]*Production, grammar *Grammar) ([]Sequence, bool) {
 
 	views := make([]Sequence, len(alts))
@@ -464,6 +466,7 @@ func factorOnce(prodName string, alts []Sequence, freshName func(string) string,
 				Name:     helper,
 				Alts:     tails,
 				NodeKind: "helper",
+				Origin:   prodOrigin,
 			}
 			if hasEmpty {
 				helperProd.RepeatHelper = true

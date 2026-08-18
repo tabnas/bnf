@@ -157,6 +157,33 @@ type Production struct {
 	// peek, without which a repetition followed by a character class
 	// cannot terminate. See computeFollowSets.
 	RepeatHelper bool
+
+	// Origin is the author-written production this one descends from. Set
+	// by every pass that SYNTHESISES a production (desugar's sugar
+	// helpers, left factoring's `$fact` tails, the probe rewriter's
+	// dispatch branches) to the origin of the production being rewritten.
+	// EMPTY means the production is itself author-written — so the source
+	// rule is always `Origin or Name`, which is what originOf returns.
+	//
+	// A compiled grammar carries an order of magnitude more rules than the
+	// author wrote (a 12-production ABNF grammar emits 118), and every one
+	// of the extra names surfaces in rule stacks, hover and completion.
+	// Carrying the origin is what lets emitGrammarSpec export the map back
+	// out (`spec.Meta["provenance"]`) so a tool can name the user's rule
+	// instead of the machinery's. Mirrors the TS `Production.origin`.
+	Origin string
+}
+
+// originOf is the author-written production a (possibly synthesised)
+// production descends from. Synthetic productions carry Origin; an
+// author-written one is its own origin. Always read Origin through this —
+// a bare `p.Origin` is empty for exactly the productions whose name is
+// already the answer. Mirrors the TS `originOf`.
+func originOf(prod *Production) string {
+	if prod.Origin == "" {
+		return prod.Name
+	}
+	return prod.Origin
 }
 
 type TailRepeatSpec struct {
@@ -202,6 +229,22 @@ type ConvertOptions struct {
 	// `wordKeywords` option (which uses a `(?![A-Za-z0-9_])` lookahead; the Go
 	// engine's RE2 has no lookahead, so `\b` — equivalent here — is used).
 	WordKeywords bool
+	// Provenance emits `Meta["provenance"]` — the map from each generated
+	// rule name back to the author-written production it came from (see
+	// `Production.Origin`). DEFAULT TRUE, hence the pointer: the names are
+	// otherwise unattributable, and every tool that shows a rule name to a
+	// human needs it. Point it at false to keep an embedded grammar as
+	// small as possible. Mirrors the TS `provenance?: boolean`, which is
+	// likewise on unless explicitly `false`.
+	Provenance *bool
+}
+
+// provenanceOn reports whether the provenance map should be emitted:
+// absent means ON, so a caller writing `&ConvertOptions{Tag: "x"}` gets
+// the same answer as TypeScript's `{tag: 'x'}`. Only an explicit `false`
+// turns it off.
+func (o *ConvertOptions) provenanceOn() bool {
+	return o == nil || o.Provenance == nil || *o.Provenance
 }
 
 // ParseError is raised by the shared compiler for a grammar the IR

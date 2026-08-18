@@ -176,7 +176,8 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 		for j, a := range p.Alts {
 			alts[j] = append(Sequence{}, a...)
 		}
-		copies[i] = &Production{Name: p.Name, Alts: alts, NodeKind: p.NodeKind}
+		copies[i] = &Production{
+			Name: p.Name, Alts: alts, NodeKind: p.NodeKind, Origin: p.Origin}
 	}
 	// Order productions so that rules referenced at a leading position are
 	// processed before the rules that reference them. Paull's substitution
@@ -421,7 +422,12 @@ func substituteLeadingRef(target, source *Production) *Production {
 			newAlts = append(newAlts, alt)
 		}
 	}
-	return &Production{Name: target.Name, Alts: newAlts, NodeKind: target.NodeKind}
+	return &Production{
+		Name:     target.Name,
+		Alts:     newAlts,
+		NodeKind: target.NodeKind,
+		Origin:   target.Origin,
+	}
 }
 
 // freshDebtCounter allocates a suffix-debt counter name for a production.
@@ -491,7 +497,12 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		}
 	}
 	if len(nonTrivial) == 0 {
-		return &Production{Name: prod.Name, Alts: seeds, NodeKind: prod.NodeKind}
+		return &Production{
+			Name:     prod.Name,
+			Alts:     seeds,
+			NodeKind: prod.NodeKind,
+			Origin:   prod.Origin,
+		}
 	}
 	if len(seeds) == 0 {
 		panic(fmt.Sprintf(diagName()+": rule '%s' is purely left-recursive "+
@@ -533,6 +544,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		Name:     prod.Name,
 		Alts:     []Sequence{{seedElement, star}},
 		NodeKind: prod.NodeKind,
+		Origin:   prod.Origin,
 	}
 }
 
@@ -623,6 +635,13 @@ func desugar(grammar *Grammar) *Grammar {
 	for _, p := range grammar.Productions {
 		used[p.Name] = true
 	}
+
+	// Origin of the production currently being desugared: every helper
+	// minted below belongs to it, and says so, so the emitted provenance
+	// map can point `_gen7_star_DIGIT` back at the rule the author wrote.
+	// Closure state rather than a parameter, matching the TS pass this
+	// mirrors (there `desugarAlt` is handed straight to `Array.map`).
+	origin := ""
 	freshName := func(hint string) string {
 		i := len(extra)
 		var name string
@@ -659,7 +678,8 @@ func desugar(grammar *Grammar) *Grammar {
 				innerAlts[i] = desugarAlt(a)
 			}
 			name := freshName("group")
-			extra = append(extra, &Production{Name: name, Alts: innerAlts, NodeKind: "helper"})
+			extra = append(extra, &Production{
+				Name: name, Alts: innerAlts, NodeKind: "helper", Origin: origin})
 			return &Element{Kind: KindRef, Name: name}
 		}
 
@@ -685,14 +705,14 @@ func desugar(grammar *Grammar) *Grammar {
 			name := freshName("opt_" + hint)
 			extra = append(extra, &Production{
 				Name: name, Alts: []Sequence{{inner}, {}}, NodeKind: "helper",
-				RepeatHelper: true})
+				RepeatHelper: true, Origin: origin})
 			return &Element{Kind: KindRef, Name: name}
 		case KindStar:
 			name := freshName("star_" + hint)
 			selfRef := &Element{Kind: KindRef, Name: name}
 			helper := &Production{
 				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper",
-				RepeatHelper: true}
+				RepeatHelper: true, Origin: origin}
 			// A left-recursion tail loop that may have to yield to an enclosing
 			// suffix carries its counter onto the helper it becomes — the rule
 			// the guard is actually emitted on.
@@ -705,9 +725,10 @@ func desugar(grammar *Grammar) *Grammar {
 			tailRef := &Element{Kind: KindRef, Name: tailName}
 			extra = append(extra, &Production{
 				Name: tailName, Alts: []Sequence{{inner, tailRef}, {}}, NodeKind: "helper",
-				RepeatHelper: true})
+				RepeatHelper: true, Origin: origin})
 			extra = append(extra, &Production{
-				Name: plusName, Alts: []Sequence{{inner, tailRef}}, NodeKind: "helper"})
+				Name: plusName, Alts: []Sequence{{inner, tailRef}}, NodeKind: "helper",
+				Origin: origin})
 			return &Element{Kind: KindRef, Name: plusName}
 		}
 
@@ -723,7 +744,7 @@ func desugar(grammar *Grammar) *Grammar {
 			tailStarRef := &Element{Kind: KindRef, Name: tailStarName}
 			extra = append(extra, &Production{
 				Name: tailStarName, Alts: []Sequence{{inner, tailStarRef}, {}}, NodeKind: "helper",
-				RepeatHelper: true})
+				RepeatHelper: true, Origin: origin})
 			repAlt = append(repAlt, tailStarRef)
 		} else {
 			// Nest (max - min) optionals: [A [A [A ...]]].
@@ -747,13 +768,14 @@ func desugar(grammar *Grammar) *Grammar {
 				}
 				groupName := freshName("group")
 				extra = append(extra, &Production{
-					Name: groupName, Alts: []Sequence{seq}, NodeKind: "helper"})
+					Name: groupName, Alts: []Sequence{seq}, NodeKind: "helper",
+					Origin: origin})
 				groupRef := &Element{Kind: KindRef, Name: groupName}
 				optName := freshName("opt_" + groupName)
 				extra = append(extra, &Production{
 					Name: optName,
 					Alts: []Sequence{{groupRef}, {}}, NodeKind: "helper",
-					RepeatHelper: true})
+					RepeatHelper: true, Origin: origin})
 				nestedRef = &Element{Kind: KindRef, Name: optName}
 			}
 			if nestedRef != nil {
@@ -761,13 +783,15 @@ func desugar(grammar *Grammar) *Grammar {
 			}
 		}
 		extra = append(extra, &Production{
-			Name: repName, Alts: []Sequence{desugarAlt(repAlt)}, NodeKind: "helper"})
+			Name: repName, Alts: []Sequence{desugarAlt(repAlt)}, NodeKind: "helper",
+			Origin: origin})
 		return &Element{Kind: KindRef, Name: repName}
 	}
 
 	rewritten := []*Production{}
 	for _, p := range grammar.Productions {
-		out := &Production{Name: p.Name, NodeKind: p.NodeKind}
+		origin = originOf(p)
+		out := &Production{Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin}
 		alts := make([]Sequence, len(p.Alts))
 		for i, a := range p.Alts {
 			alts[i] = desugarAlt(a)

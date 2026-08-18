@@ -185,13 +185,16 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 					Alts:        []Sequence{},
 					ProbeHelper: &ProbeHelperSpec{VocabElements: vocabElems},
 					NodeKind:    "helper",
+					Origin:      originOf(prod),
 				})
 				withAlt := append(append(Sequence{}, xSeq...), disamb)
 				withAlt = append(withAlt, ySeq...)
 				extra = append(extra, &Production{
-					Name: withName, Alts: []Sequence{withAlt}, NodeKind: "helper"})
+					Name: withName, Alts: []Sequence{withAlt}, NodeKind: "helper",
+					Origin: originOf(prod)})
 				extra = append(extra, &Production{
-					Name: noName, Alts: []Sequence{ySeq}, NodeKind: "helper"})
+					Name: noName, Alts: []Sequence{ySeq}, NodeKind: "helper",
+					Origin: originOf(prod)})
 				extra = append(extra, &Production{
 					Name: dispatchName,
 					Alts: []Sequence{
@@ -205,6 +208,7 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 						NoBranch:      noName,
 					},
 					NodeKind: "helper",
+					Origin:   originOf(prod),
 				})
 
 				reports = append(reports, AmbiguityReport{
@@ -220,7 +224,8 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 		}
 		if touched {
 			rewritten = append(rewritten, &Production{
-				Name: prod.Name, Alts: newAlts, NodeKind: prod.NodeKind})
+				Name: prod.Name, Alts: newAlts, NodeKind: prod.NodeKind,
+				Origin: prod.Origin})
 		} else {
 			rewritten = append(rewritten, prod)
 		}

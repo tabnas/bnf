@@ -690,3 +690,198 @@ describe('tail-repeat separator', () => {
     assert.match(alts[0].s, /^#/)
   })
 })
+
+
+// `spec.meta.provenance` maps every rule the compiler MINTED back to the
+// author-written production it came from. A compiled grammar carries an
+// order of magnitude more rules than the author wrote, and all of them
+// surface in rule stacks, hover and completion, so a tool that cannot
+// resolve a generated name has nothing useful to show.
+describe('provenance', () => {
+  // `doc` repeats `item`. The star helper is generated FOR doc, and the
+  // only rule name embedded in its own generated name is `item` — the
+  // rule being repeated. Attributing it to `item` is the mistake the map
+  // exists to prevent, and the mistake any name-parsing implementation
+  // would make.
+  const repeatGrammar = () => ({
+    productions: [
+      { name: 'doc', alts: [[ref('item'), { kind: 'star', inner: ref('item') }]] },
+      { name: 'item', alts: [[term('a')], [term('b')]] },
+    ],
+  })
+
+  it('attributes a helper to its ENCLOSING rule, not the repeated one', () => {
+    const spec = emitGrammarSpec(repeatGrammar(), { start: 'doc', tag: 'demo' })
+    const prov = spec.meta.provenance
+    const star = Object.keys(spec.rule).find((n) => n.startsWith('_gen') &&
+      n.includes('star_item'))
+    assert.ok(star, 'expected a generated star helper named after item')
+    assert.equal(prov[star], 'doc',
+      `${star} belongs to doc, which repeats item — not to item itself`)
+  })
+
+  it('attributes every generated rule, and only to author-written rules', () => {
+    const grammar = repeatGrammar()
+    const authored = new Set(grammar.productions.map((p) => p.name))
+    const spec = emitGrammarSpec(grammar, { start: 'doc', tag: 'demo' })
+    const prov = spec.meta.provenance
+
+    for (const name of Object.keys(spec.rule)) {
+      if (authored.has(name)) {
+        assert.ok(!(name in prov),
+          `${name} is author-written and must not be listed`)
+      } else {
+        assert.ok(name in prov, `generated rule ${name} has no provenance`)
+        assert.ok(authored.has(prov[name]),
+          `${name} resolves to ${prov[name]}, which the author never wrote`)
+      }
+    }
+    // An entry naming a rule that was never emitted is a phantom: the
+    // empty alternative of a repetition helper allocates a `$altN` name
+    // and then returns without emitting anything.
+    for (const name of Object.keys(prov)) {
+      assert.ok(name in spec.rule, `${name} has provenance but was not emitted`)
+    }
+  })
+
+  it('names the start wrapper after the start rule', () => {
+    const spec = emitGrammarSpec(repeatGrammar(), { start: 'doc', tag: 'demo' })
+    assert.equal(spec.meta.provenance['__start__'], 'doc')
+  })
+
+  it('survives compilation to pure and recognition specs', () => {
+    // The consumer that needs provenance most loads COMPILED grammars,
+    // and both shapes rebuild the spec from {options, rule} alone.
+    const spec = emitGrammarSpec(repeatGrammar(),
+      { start: 'doc', tag: 'demo', builtins: true })
+    for (const shape of [toPureSpec, toRecognitionSpec]) {
+      const out = shape(spec)
+      assert.equal(out.meta.provenance['__start__'], 'doc',
+        `${shape.name} dropped meta.provenance`)
+    }
+    // ...and through serialisation, which is how it reaches a tool.
+    const text = compileSpec(spec, { strict: true, recognition: false })
+    assert.equal(JSON.parse(text).meta.provenance['__start__'], 'doc')
+  })
+
+  it('can be turned off for size-sensitive embedded grammars', () => {
+    const spec = emitGrammarSpec(repeatGrammar(),
+      { start: 'doc', tag: 'demo', provenance: false })
+    assert.equal(spec.meta, undefined)
+  })
+})
+
+
+// Recovery sync tags on the emitted close alternates.
+//
+// The engine derives resynchronisation points from CLOSE alternates that
+// NAME A TOKEN and carry a tag in `parse.recover.syncGroups` (shipped
+// default: close, comma, end). Exactly two of this emitter's alternates
+// name a token, and both are tagged — which has to be all-or-nothing,
+// because the engine's structural fallback engages only while the tagged
+// set is empty ACROSS THE WHOLE RULE STACK. Tagging some of them would
+// switch the fallback off and silently delete the rest.
+describe('sync tags', () => {
+  const { Tabnas } = require('@tabnas/parser')
+  const SYNC = ['close', 'comma', 'end']
+
+  // `list = DIGIT [ "," list ]` — a tail repeat, so the emitter produces
+  // its separator-continuation close alternate.
+  const listSpec = () => toPureSpec(emitGrammarSpec({
+    productions: [
+      { name: 'doc', alts: [[ref('list')]] },
+      {
+        name: 'list',
+        alts: [[
+          { kind: 'regex', pattern: '[0-9]', flags: '' },
+          {
+            kind: 'opt',
+            inner: { kind: 'group', alts: [[term(','), ref('list')]] },
+          },
+        ]],
+      },
+    ],
+  }, { start: 'doc', tag: 'demo', builtins: true }))
+
+  const closeAlts = (spec, rule) => {
+    const c = spec.rule[rule].close
+    return Array.isArray(c) ? c : (c && c.alts) || []
+  }
+  const tagsOf = (alt) => String(alt.g || '').split(',')
+
+  it('tags the end-of-source anchor and the separator continuation', () => {
+    const spec = listSpec()
+    assert.ok(tagsOf(closeAlts(spec, '__start__').find((a) => a.s)).includes('end'))
+    assert.ok(tagsOf(closeAlts(spec, 'list').find((a) => a.s)).includes('comma'))
+  })
+
+  it('tags EVERY close alternate that names a token, or none is any use', () => {
+    // Partial tagging is worse than none: the first tagged alternate
+    // disables the fallback for every rule on the stack, including the
+    // untagged ones.
+    const spec = listSpec()
+    for (const rule of Object.keys(spec.rule)) {
+      for (const alt of closeAlts(spec, rule)) {
+        if (!alt.s) continue
+        assert.ok(tagsOf(alt).some((t) => SYNC.includes(t)),
+          `${rule} has a token-naming close alt with no sync group: ` +
+          JSON.stringify(alt))
+      }
+    }
+  })
+
+  // Strip the sync groups back off, and recovery must get measurably
+  // worse — otherwise the tags are decoration and this suite proves
+  // nothing about them.
+  const strip = (spec) => {
+    const s = structuredClone(spec)
+    for (const rule of Object.keys(s.rule)) {
+      for (const alt of closeAlts(s, rule)) {
+        if (alt && 'string' === typeof alt.g) {
+          alt.g = alt.g.split(',').filter((t) => !SYNC.includes(t)).join(',')
+        }
+      }
+    }
+    return s
+  }
+
+  // A host rule with its own sync tag, standing in for the grammar this
+  // one gets embedded in. Its single tag is what disables the fallback
+  // the generated rules would otherwise have relied on.
+  const underHost = (spec) => {
+    const s = structuredClone(spec)
+    s.rule.host = {
+      open: [{ p: 'doc', g: 'host' }],
+      close: [{ s: '#ZZ', a: '@bubble$', g: 'host,end' }],
+    }
+    s.options = { ...s.options, rule: { ...s.options.rule, start: 'host' } }
+    return s
+  }
+
+  const recover = (spec, src) => {
+    const tn = new Tabnas({ parse: { recover: { enabled: true } } })
+    tn.grammar(spec)
+    const out = tn.parse(src)
+    return { errors: (out.errors || []).length, src: srcOf(out.value) }
+  }
+  const srcOf = (n) => (n && 'object' === typeof n)
+    ? (undefined !== n.src ? n.src : srcOf(n.kids)) : n
+
+  it('keeps the rest of a list when embedded in a tagged host grammar', () => {
+    const spec = listSpec()
+    const tagged = recover(underHost(spec), '1,!,3')
+    const bare = recover(underHost(strip(spec)), '1,!,3')
+
+    assert.equal(tagged.errors, 1)
+    assert.equal(bare.errors, 1)
+    // Tagged: resynchronises at the separator, so the trailing `3`
+    // survives. Untagged: the host's tag has disabled the fallback, the
+    // separator is no longer a sync point, and everything after the bad
+    // token is lost.
+    assert.match(tagged.src, /3/,
+      'tagged: the item after the error should survive')
+    assert.doesNotMatch(bare.src, /3/,
+      'untagged: without the separator sync point the tail is lost — if ' +
+      'this now passes, the tags are no longer doing anything')
+  })
+})

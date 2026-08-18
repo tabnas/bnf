@@ -143,6 +143,7 @@ export function toRecognitionSpec(spec: GrammarSpec): GrammarSpec {
   // Declare the builtin config-schema version so the engine can refuse a
   // grammar that needs a newer schema than it implements.
   out.v = BUILTIN_SCHEMA_VERSION
+  carryMeta(spec, out)
   stripMarks(out)
   return out
 }
@@ -165,6 +166,7 @@ export function toPureSpec(spec: GrammarSpec): GrammarSpec {
   }
   const out = cloneData({ options: spec.options, rule: spec.rule }) as GrammarSpec
   out.v = BUILTIN_SCHEMA_VERSION
+  carryMeta(spec, out)
   stripMarks(out)
   return out
 }
@@ -418,6 +420,21 @@ export function compileSpec(spec: GrammarSpec, opts: CompileOptions = {}): strin
     ? toPureSpec(spec)
     : toRecognitionSpec(spec)
   return toJsonic(out, { strict: opts.strict, indent: opts.indent })
+}
+
+
+// Carry the engine-ignored `meta` block across a spec transform.
+//
+// Both transforms rebuild the spec from `{options, rule}` alone, which is
+// the right default — everything else on a converted spec is either
+// closures or compiler-internal. `meta` is the exception: it is pure JSON
+// that describes the grammar rather than defining it, and the consumer
+// that needs it most (a language server resolving a generated rule name
+// back to the author's rule) loads exactly these compiled specs. Dropping
+// it here would mean provenance survived only in the in-memory spec,
+// which no tool ever sees.
+function carryMeta(from: GrammarSpec, to: GrammarSpec): void {
+  if (null != from.meta) to.meta = cloneData(from.meta)
 }
 
 

@@ -89,6 +89,7 @@ func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 	}
 
 	data := map[string]any{"options": options, "rule": rules}
+	carryMeta(spec, data)
 	if len(offenders) > 0 {
 		off := make([]string, 0, len(offenders))
 		for r := range offenders {
@@ -98,6 +99,32 @@ func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 		return data, off, nil
 	}
 	return data, nil, nil
+}
+
+// carryMeta carries the engine-ignored `meta` block across a spec
+// transform.
+//
+// Every transform here rebuilds the spec from `{options, rule}` alone,
+// which is the right default — everything else on a converted spec is
+// either closures or compiler-internal. `meta` is the exception: it is
+// pure data that describes the grammar rather than defining it, and the
+// consumer that needs it most (a language server resolving a generated
+// rule name back to the author's rule) loads exactly these compiled
+// specs. Dropping it would mean provenance survived only in the
+// in-memory spec, which no tool ever sees.
+//
+// Done once here, in specToData, rather than at each exported transform:
+// ToRecognitionSpec, ToPureSpec and SpecToData all funnel through it, so
+// this is the single point every serialised shape passes. Mirrors the TS
+// `carryMeta`, which the two TS transforms call individually because
+// they do not share a builder.
+func carryMeta(from *tabnas.GrammarSpec, to map[string]any) {
+	if from == nil || from.Meta == nil {
+		return
+	}
+	if m, ok := cloneData(from.Meta).(map[string]any); ok {
+		to["meta"] = m
+	}
 }
 
 // regexHolder wraps a regexp with its eager flag for serialisation.
