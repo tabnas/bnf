@@ -13,6 +13,7 @@ package bnf
 // closures.
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -122,7 +123,27 @@ func carryMeta(from *tabnas.GrammarSpec, to map[string]any) {
 	if from == nil || from.Meta == nil {
 		return
 	}
-	if m, ok := cloneData(from.Meta).(map[string]any); ok {
+	// Normalise through JSON before cloning. Meta is JSON-serialisable
+	// BY CONTRACT, but a caller can perfectly reasonably hold ordinary
+	// typed Go containers in it — `map[string]string`, `[]string` — and
+	// neither cloneData nor ToJsonic recognises those: they handle only
+	// the generic `map[string]any` / `[]any` forms and everything else
+	// falls through to `null`. The metadata would then be silently
+	// replaced by nothing on the way out, which is the worst of the
+	// available outcomes. A round-trip converts every JSON-compatible
+	// value to the generic forms.
+	//
+	// A value that cannot be marshalled at all is dropped rather than
+	// written out: a missing key is honest, a null one is not.
+	raw, err := json.Marshal(from.Meta)
+	if err != nil {
+		return
+	}
+	var norm map[string]any
+	if err := json.Unmarshal(raw, &norm); err != nil {
+		return
+	}
+	if m, ok := cloneData(norm).(map[string]any); ok {
 		to["meta"] = m
 	}
 }

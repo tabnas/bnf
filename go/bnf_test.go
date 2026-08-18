@@ -852,3 +852,65 @@ func TestSyncTagsKeepTheRestOfAListUnderATaggedHost(t *testing.T) {
 			bareSrc)
 	}
 }
+
+// A grammar is free to contain a production actually called
+// `__start__` — the IR reserves no names. The wrapper must then take a
+// numbered name, as TypeScript does, or it silently overwrites the
+// author's rule. With provenance on, the consequence is sharper still:
+// recording the colliding name would claim an AUTHOR-WRITTEN rule was
+// generated, breaking the map's one invariant.
+func TestStartWrapperAvoidsAnAuthoredName(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ref("__start__")}}},
+		{Name: "__start__", Alts: []Sequence{{tok("#NR")}}},
+	}}, &ConvertOptions{Tag: "demo", Start: "doc"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	if _, ok := spec.Rule["__start2__"]; !ok {
+		t.Fatalf("wrapper did not take a numbered name; rules: %v", ruleNames(spec))
+	}
+	prov, _ := spec.Meta["provenance"].(map[string]any)
+	if _, listed := prov["__start__"]; listed {
+		t.Error("the author's __start__ rule is listed as generated")
+	}
+	if prov["__start2__"] != "doc" {
+		t.Errorf("__start2__ provenance = %v, want doc", prov["__start2__"])
+	}
+}
+
+// Meta is JSON-serialisable by contract, but a caller can hold ordinary
+// typed Go containers in it. cloneData and ToJsonic recognise only the
+// generic map[string]any / []any forms, so without normalisation those
+// values serialise as `null` — the metadata silently replaced by
+// nothing on the way out.
+func TestCarriedMetaNormalisesTypedContainers(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "v", Alts: []Sequence{{tok("#NR")}}},
+	}}, &ConvertOptions{Tag: "demo", Builtins: true})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	spec.Meta = map[string]any{
+		"pairs": map[string]string{"k": "v"},
+		"tags":  []string{"a", "b"},
+	}
+	text := SpecToJSON(spec, 2)
+	if strings.Contains(text, "null") {
+		t.Errorf("typed containers serialised as null:\n%s", text)
+	}
+	for _, want := range []string{`"pairs"`, `"tags"`, `"a"`, `"b"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("serialised meta lost %s:\n%s", want, text)
+		}
+	}
+}
+
+func ruleNames(spec *tabnas.GrammarSpec) []string {
+	out := []string{}
+	for n := range spec.Rule {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}

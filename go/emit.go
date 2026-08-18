@@ -274,9 +274,26 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 	}
 
 	// __start__ wrapper consumes #ZZ.
+	//
+	// The IR reserves no names, so a grammar is free to contain a
+	// production actually called that. Assigning unconditionally would
+	// overwrite the author's rule — and if it were also the start rule,
+	// the wrapper would push itself forever. Fall back to a numbered
+	// variant, matching TypeScript.
 	startWrapper := "__start__"
+	if knownRules[startWrapper] {
+		for n := 2; ; n++ {
+			cand := fmt.Sprintf("__start%d__", n)
+			if !knownRules[cand] {
+				startWrapper = cand
+				break
+			}
+		}
+	}
 	// The wrapper stands in for the start rule, so that is what it is
-	// named after: a rule stack reading `__start__` helps nobody.
+	// named after: a rule stack reading `__start__` helps nobody. This
+	// has to come AFTER the collision check — recording a name the
+	// author wrote would claim their rule was generated.
 	if prov != nil {
 		prov[startWrapper] = start
 	}
