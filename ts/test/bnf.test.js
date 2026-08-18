@@ -21,6 +21,7 @@ const {
   markListing,
   toPureSpec,
   toRecognitionSpec,
+  EmitError,
   VERSION,
 } = require('../dist/bnf')
 
@@ -883,5 +884,167 @@ describe('sync tags', () => {
     assert.doesNotMatch(bare.src, /3/,
       'untagged: without the separator sync point the tail is lost — if ' +
       'this now passes, the tags are no longer doing anything')
+  })
+})
+
+
+// Source spans on the IR, and the compile errors that carry them.
+//
+// A front-end that records where each element came from gets compile
+// errors with a range, so a tool can underline the offending text
+// instead of parsing it back out of the message. A front-end that
+// records nothing compiles to exactly the same grammar and gets the
+// same messages — every assertion below has a no-span counterpart.
+describe('source spans', () => {
+  const at = (s, e, r, c) => ({ s, e, r, c })
+
+  it('carries the offending element span on an unknown rule reference', () => {
+    // The most common author-facing compile error, and the one an
+    // editor most wants to underline.
+    const span = at(10, 15, 2, 7)
+    try {
+      emitGrammarSpec({
+        productions: [
+          { name: 'doc', alts: [[{ kind: 'ref', name: 'nope', sp: span }]] },
+        ],
+      }, { tag: 'demo' })
+      assert.fail('expected an unknown-rule failure')
+    } catch (e) {
+      assert.ok(e instanceof EmitError, `expected EmitError, got ${e.name}`)
+      assert.ok(e instanceof Error, 'EmitError must stay an Error')
+      assert.match(e.message, /references unknown rule 'nope'/)
+      assert.equal(e.rule, 'doc')
+      assert.deepEqual(e.sp, span)
+    }
+  })
+
+  it('still fails identically when the front-end records no spans', () => {
+    try {
+      emitGrammarSpec({
+        productions: [{ name: 'doc', alts: [[ref('nope')]] }],
+      }, { tag: 'demo' })
+      assert.fail('expected an unknown-rule failure')
+    } catch (e) {
+      assert.ok(e instanceof EmitError)
+      assert.match(e.message, /references unknown rule 'nope'/)
+      assert.equal(e.sp, undefined, 'no span recorded, so none reported')
+    }
+  })
+
+  it('carries the production span on a purely left-recursive rule', () => {
+    const span = at(0, 12, 1, 1)
+    try {
+      emitGrammarSpec({
+        // Every alternative re-enters the rule and consumes something,
+        // so there is no seed to start from. (A bare `loop = loop` is a
+        // trivial self-reference and is dropped instead.)
+        productions: [{
+          name: 'loop',
+          alts: [[ref('loop'), term('x')], [ref('loop'), term('y')]],
+          sp: span,
+        }],
+      }, { tag: 'demo' })
+      assert.fail('expected a left-recursion failure')
+    } catch (e) {
+      assert.match(e.message, /purely left-recursive/)
+      assert.deepEqual(e.sp, span)
+      assert.equal(e.rule, 'loop')
+    }
+  })
+
+  it('leaves spans on the elements the rewrite passes carry through', () => {
+    // Elements are shared by reference through cloning and Paull's
+    // substitution, so a span recorded at parse time survives to the
+    // emitter. If that ever stops being true, the unknown-rule span
+    // above would be the first casualty — this pins the mechanism
+    // rather than one symptom of it.
+    const span = at(20, 24, 3, 1)
+    const el = { kind: 'ref', name: 'gone', sp: span }
+    const grammar = {
+      productions: [
+        { name: 'doc', alts: [[ref('mid')]] },
+        { name: 'mid', alts: [[el, term('x')]] },
+      ],
+    }
+    try {
+      emitGrammarSpec(grammar, { start: 'doc', tag: 'demo' })
+      assert.fail('expected an unknown-rule failure')
+    } catch (e) {
+      assert.deepEqual(e.sp, span,
+        'the span did not survive the rewrite passes')
+    }
+    // ...and the caller's own element object is untouched.
+    assert.deepEqual(el.sp, span)
+  })
+
+  it('carries a production span through Paull substitution', () => {
+    // `a` starts with a reference to `b`, so Paull's substitution
+    // inlines `b` INTO `a` — rebuilding `a` field by field — and the
+    // result is purely left-recursive, which fails carrying `a`'s span.
+    // The span therefore has to survive `substituteLeadingRef`'s
+    // rebuild to be reported, which the left-recursion test above does
+    // not exercise: that one fails before substitution runs.
+    //
+    // Every rewrite pass rebuilds productions this way, and a rebuild
+    // that forgets a field drops it silently. This is the shape of test
+    // that catches that.
+    const span = at(5, 20, 2, 1)
+    try {
+      emitGrammarSpec({
+        productions: [
+          { name: 'a', alts: [[ref('b'), term('x')]], sp: span },
+          { name: 'b', alts: [[ref('a')]] },
+        ],
+      }, { start: 'a', tag: 'demo' })
+      assert.fail('expected a left-recursion failure')
+    } catch (e) {
+      assert.match(e.message, /purely left-recursive/)
+      assert.deepEqual(e.sp, span,
+        'the span was dropped by a rewrite pass rebuilding the production')
+    }
+  })
+
+  it('keeps every converted failure message byte-identical', () => {
+    // EmitError changes the error's TYPE at five sites. The message is
+    // the part callers have historically matched on — including this
+    // repo's own suite and the front-ends' diagnostics — so it must not
+    // move. Compared against the published compiler's exact strings.
+    const prose = (text) => ({ kind: 'prose', text })
+    const cases = [
+      [{ productions: [{ name: 'doc', alts: [[ref('nope')]] }] },
+        "demo: rule 'doc' references unknown rule 'nope'"],
+      [{ productions: [{ name: 'loop', alts: [[ref('loop'), term('x')],
+                                              [ref('loop'), term('y')]] }] },
+        "demo: rule 'loop' is purely left-recursive " +
+        '(no seed alternative); cannot eliminate'],
+      [{ productions: [{ name: 'doc', alts: [[term('a'), prose('stuff')]] }] },
+        "demo: rule 'doc' uses prose ('<stuff>') inside an expression; " +
+        'prose may only stand alone as the whole definition of a ' +
+        'built-in lexer token.'],
+    ]
+    for (const [grammar, message] of cases) {
+      assert.throws(() => emitGrammarSpec(grammar, { tag: 'demo' }),
+        (e) => e instanceof EmitError && e.message === message,
+        `message drifted for: ${message}`)
+    }
+  })
+
+  it('does not change the grammar a spanned IR compiles to', () => {
+    const withSpans = {
+      productions: [
+        {
+          name: 'doc',
+          alts: [[{ kind: 'term', literal: 'a', sp: at(0, 3, 1, 1) }]],
+          sp: at(0, 9, 1, 1),
+        },
+      ],
+    }
+    const without = {
+      productions: [{ name: 'doc', alts: [[term('a')]] }],
+    }
+    const strip = (g) => toJsonic(toPureSpec(
+      emitGrammarSpec(g, { tag: 'demo', builtins: true })), { strict: true })
+    assert.equal(strip(withSpans), strip(without),
+      'spans must be invisible in the emitted grammar')
   })
 })

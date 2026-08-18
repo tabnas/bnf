@@ -225,7 +225,7 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 		if touched {
 			rewritten = append(rewritten, &Production{
 				Name: prod.Name, Alts: newAlts, NodeKind: prod.NodeKind,
-				Origin: prod.Origin})
+				Origin: prod.Origin, Sp: prod.Sp})
 		} else {
 			rewritten = append(rewritten, prod)
 		}
