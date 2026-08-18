@@ -2203,6 +2203,17 @@ function emitGrammarSpec(
   for (const prod of grammar.productions) {
     for (const alt of prod.alts) terminals.push(...alt)
     if (prod.probeHelper) terminals.push(...prod.probeHelper.vocabElements)
+    // A tail repeat's separator is REMOVED from `alts` by
+    // `rewriteTailRepeats` and stashed here, so walking `alts` alone
+    // misses it. Every other terminal in the grammar is reachable from
+    // `alts`, which is why the omission survived: a separator normally
+    // shares its literal with some other rule and picks up that rule's
+    // token. When it does not — `list = %x30-39 [ "," list ]`, where the
+    // comma appears nowhere else — no token is allocated, the emitted
+    // separator alternate comes out as `s: ''`, and the repeat can never
+    // match. The grammar then silently accepts one element instead of a
+    // list.
+    if (prod.tailRepeat) terminals.push(...prod.tailRepeat.sep)
   }
 
   // Terminals carrying a lifted production name are allocated first, so
