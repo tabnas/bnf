@@ -151,6 +151,18 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 		if prod.ProbeHelper != nil {
 			terminals = append(terminals, prod.ProbeHelper.VocabElements...)
 		}
+		// A tail repeat's separator is REMOVED from Alts by rewriteTailRepeats
+		// and stashed here, so walking Alts alone misses it. Every other
+		// terminal in the grammar is reachable from Alts, which is why the
+		// omission survived: a separator normally shares its literal with some
+		// other rule and picks up that rule's token. When it does not —
+		// `list = %x30-39 [ "," list ]`, where the comma appears nowhere else —
+		// no token is allocated, the emitted separator alternate comes out as
+		// `s: ""`, and the repeat can never match. The grammar then silently
+		// accepts one element instead of a list.
+		if prod.TailRepeat != nil {
+			terminals = append(terminals, prod.TailRepeat.Sep...)
+		}
 	}
 
 	// Terminals carrying a lifted production name are allocated first, so the

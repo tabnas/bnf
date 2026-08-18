@@ -448,3 +448,41 @@ func sameStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// A tail repeat's separator is moved out of Alts and stashed on
+// TailRepeat, so token allocation — which walks Alts — never saw it. A
+// separator whose literal appears nowhere else in the grammar therefore
+// got no token, the emitted separator alternate came out as `s: ""`, and
+// the repeat could never match: the grammar silently accepted a single
+// element instead of a list. Mirrored by ts/test/bnf.test.js.
+func TestTailRepeatSeparatorGetsAToken(t *testing.T) {
+	// `list = DIGIT [ "," list ]`, with the comma used NOWHERE else, is
+	// the isolating case. Real grammars usually reuse the separator
+	// literal in another rule and pick up that rule's token by accident,
+	// which is how this survived.
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ref("list")}}},
+		{Name: "list", Alts: []Sequence{{
+			{Kind: KindRegex, Pattern: "[0-9]"},
+			{Kind: KindOpt, Inner: &Element{Kind: KindGroup, Alts: []Sequence{
+				{term(","), ref("list")},
+			}}},
+		}}},
+	}}, &ConvertOptions{Tag: "demo", Start: "doc"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+
+	alts, ok := spec.Rule["list"].Close.([]*tabnas.GrammarAltSpec)
+	if !ok || 0 == len(alts) {
+		t.Fatalf("list has no close alternates: %#v", spec.Rule["list"])
+	}
+	sep, _ := alts[0].S.(string)
+	if "" == sep {
+		t.Fatalf("separator alternate names no token (s: %#v) — the comma "+
+			"was never allocated one, so the repeat can never match", alts[0].S)
+	}
+	if !strings.HasPrefix(sep, "#") {
+		t.Fatalf("separator alternate s = %q, want a #token name", sep)
+	}
+}

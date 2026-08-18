@@ -650,3 +650,43 @@ describe('marks do not reach the wire', () => {
       'toPureSpec stripped marks from the in-memory spec, not just its output')
   })
 })
+
+
+// A tail repeat's separator is moved out of `alts` and stashed on
+// `tailRepeat`, so token allocation — which walks `alts` — never saw it.
+// A separator whose literal appears nowhere else in the grammar
+// therefore got no token, the emitted separator alternate came out as
+// `s: ''`, and the repeat could never match. Mirrored by
+// go/bnf_test.go TestTailRepeatSeparatorGetsAToken.
+describe('tail-repeat separator', () => {
+  // `list = DIGIT [ "," list ]` with the comma used NOWHERE else is the
+  // isolating case. Real grammars usually reuse the separator literal in
+  // another rule and pick up that rule's token by accident, which is how
+  // this survived.
+  const listGrammar = () => ({
+    productions: [
+      { name: 'doc', alts: [[ref('list')]] },
+      {
+        name: 'list',
+        alts: [[
+          { kind: 'regex', pattern: '[0-9]', flags: '' },
+          {
+            kind: 'opt',
+            inner: { kind: 'group', alts: [[term(','), ref('list')]] },
+          },
+        ]],
+      },
+    ],
+  })
+
+  it('allocates a token for the separator', () => {
+    const spec = emitGrammarSpec(listGrammar(), { start: 'doc', tag: 'demo' })
+    const close = spec.rule.list.close
+    const alts = Array.isArray(close) ? close : (close && close.alts) || []
+    assert.ok(0 < alts.length, 'list has no close alternates')
+    assert.ok(alts[0].s,
+      'separator alternate names no token — the comma was never allocated ' +
+      'one, so the repeat can never match')
+    assert.match(alts[0].s, /^#/)
+  })
+})
