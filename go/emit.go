@@ -54,7 +54,33 @@ import (
 func syncG(tag, group string) string { return tag + "," + group }
 
 // emitGrammarSpec converts an ABNF grammar AST into a tabnas GrammarSpec.
-func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpec, error) {
+func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.GrammarSpec, err error) {
+	// A grammar this compiler cannot compile is INVALID USER INPUT, and the
+	// contract for that in a Go library is an error return. TS throws a
+	// catchable EmitError; the port panicked, so `A = A "y"` took the process
+	// down where TypeScript handed you an error object.
+	//
+	// Three places in this fleet had already reached that conclusion and
+	// deferred it — bnf's own test ("the wrong contract for a Go library —
+	// invalid user input should be an error return. Recorded rather than
+	// changed, since the ABNF front-end's suite pins the current behaviour"),
+	// gbnf's emitSafely, and abnf's leftrec test. This closes it at the
+	// source rather than in each front-end.
+	//
+	// ONLY *EmitError is converted. The other panics in this package say
+	// "internal — unexpected kind", and those are compiler BUGS, not user
+	// input: a bug that returns an error looks like a rejected grammar, and
+	// the caller gets a diagnostic about their input for a fault that is
+	// ours. Those keep panicking, exactly as an unexpected throw would in TS.
+	defer func() {
+		if r := recover(); nil != r {
+			ee, ok := r.(*EmitError)
+			if !ok {
+				panic(r)
+			}
+			spec, err = nil, ee
+		}
+	}()
 	if opts == nil {
 		opts = &ConvertOptions{}
 	}
@@ -317,7 +343,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 		}
 	}
 
-	spec := &tabnas.GrammarSpec{
+	spec = &tabnas.GrammarSpec{
 		Ref:     refs.refMap(),
 		Options: opt,
 		Rule:    ruleSpec,

@@ -94,33 +94,22 @@ func TestDiagnosticsNameTheNotation(t *testing.T) {
 	// A front-end's users should see their own notation's name on an
 	// error about their own syntax, never "bnf:".
 	//
-	// NOTE the shape of this test: the Go pipeline *panics* on a grammar
-	// it cannot compile, where the TypeScript one throws a catchable
-	// error. That is inherited from the pre-extraction code, not
-	// introduced here, but it is the wrong contract for a Go library —
-	// invalid user input should be an error return. Recorded rather than
-	// changed, since the ABNF front-end's suite pins the current
-	// behaviour.
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected a purely left-recursive rule to be refused")
-		}
-		msg, _ := r.(error)
-		text := ""
-		if msg != nil {
-			text = msg.Error()
-		} else {
-			text, _ = r.(string)
-		}
-		if !strings.HasPrefix(text, "gbnf: ") {
-			t.Errorf("expected the caller's tag to prefix the diagnostic, got %q",
-				text)
-		}
-	}()
-	_, _ = EmitGrammarSpec(&Grammar{Productions: []*Production{
+	// This test used to recover a PANIC, and said so: "the wrong contract
+	// for a Go library — invalid user input should be an error return.
+	// Recorded rather than changed, since the ABNF front-end's suite pins
+	// the current behaviour." It is changed now, at the source: a grammar
+	// this compiler cannot compile is an error return, matching TS, which
+	// throws a catchable EmitError.
+	_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
 		{Name: "A", Alts: []Sequence{{ref("A"), term("x")}}},
 	}}, &ConvertOptions{Tag: "gbnf"})
+	if err == nil {
+		t.Fatal("expected a purely left-recursive rule to be refused")
+	}
+	if !strings.HasPrefix(err.Error(), "gbnf: ") {
+		t.Errorf("expected the caller's tag to prefix the diagnostic, got %q",
+			err.Error())
+	}
 }
 
 func TestEscapeRegexp(t *testing.T) {
@@ -998,34 +987,34 @@ func TestUnknownRuleRefWithoutSpansStillFailsIdentically(t *testing.T) {
 // message it always saw.
 func TestPurelyLeftRecursiveCarriesTheProductionSpan(t *testing.T) {
 	sp := at(0, 12, 1, 1)
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected a left-recursion failure")
-		}
-		ee, ok := r.(*EmitError)
-		if !ok {
-			t.Fatalf("panic value is %T (%v), want *EmitError", r, r)
-		}
-		if !strings.Contains(ee.Error(), "purely left-recursive") {
-			t.Errorf("message = %q, want it to mention 'purely left-recursive'", ee.Error())
-		}
-		if ee.Rule != "loop" {
-			t.Errorf("Rule = %q, want %q", ee.Rule, "loop")
-		}
-		if !sameSpan(ee.Sp, sp) {
-			t.Errorf("Sp = %+v, want %+v", ee.Sp, sp)
-		}
-	}()
 	// Every alternative re-enters the rule and consumes something, so
 	// there is no seed to start from. (A bare `loop = loop` is a trivial
 	// self-reference and is dropped instead.)
-	_, _ = EmitGrammarSpec(&Grammar{Productions: []*Production{
+	_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
 		{Name: "loop", Sp: sp, Alts: []Sequence{
 			{ref("loop"), term("x")},
 			{ref("loop"), term("y")},
 		}},
 	}}, &ConvertOptions{Tag: "demo"})
+	if err == nil {
+		t.Fatal("expected a left-recursion failure")
+	}
+	// errors.As, not a type assertion: the value now travels as a returned
+	// error rather than a panic value, and a front-end is free to wrap it.
+	// The span has to survive that, which is the whole point of this test.
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("error is %T (%v), want *EmitError", err, err)
+	}
+	if !strings.Contains(ee.Error(), "purely left-recursive") {
+		t.Errorf("message = %q, want it to mention 'purely left-recursive'", ee.Error())
+	}
+	if ee.Rule != "loop" {
+		t.Errorf("Rule = %q, want %q", ee.Rule, "loop")
+	}
+	if !sameSpan(ee.Sp, sp) {
+		t.Errorf("Sp = %+v, want %+v", ee.Sp, sp)
+	}
 }
 
 // TestElementSpansSurviveToTheEmitter: elements are shared by reference
@@ -1258,4 +1247,55 @@ func TestSpansDoNotChangeTheEmittedGrammar(t *testing.T) {
 		t.Errorf("spans must be invisible in the emitted grammar\n with spans: %s\n without:    %s",
 			a, b)
 	}
+}
+
+// TestEmitFailureIsAnErrorNotAPanic pins the contract this package now
+// keeps: a grammar the compiler cannot compile is INVALID USER INPUT, and
+// invalid user input is an error return. TS throws a catchable EmitError for
+// the same grammar, so this is also the parity assertion — `A = A "y"` used
+// to take a Go process down where TypeScript handed you an error object.
+//
+// The second half is the part that keeps the first half honest. The recover
+// that converts the panic is deliberately narrow: it converts *EmitError and
+// re-panics everything else, because the other panics in this package say
+// "internal — unexpected kind" and those are COMPILER BUGS. A bug returned as
+// an error looks like a rejected grammar, and the user gets a diagnostic
+// about their input for a fault that is ours. If someone widens that recover
+// to `case error:` or drops the type check, this fails.
+func TestEmitFailureIsAnErrorNotAPanic(t *testing.T) {
+	t.Run("invalid input is an error", func(t *testing.T) {
+		defer func() {
+			if r := recover(); nil != r {
+				t.Fatalf("panicked on invalid user input: %v", r)
+			}
+		}()
+		_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+			{Name: "A", Alts: []Sequence{{ref("A"), term("y")}}},
+		}}, &ConvertOptions{Tag: "bnf"})
+		if err == nil {
+			t.Fatal("expected an error for a purely left-recursive rule")
+		}
+		var ee *EmitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("error is %T, want *EmitError", err)
+		}
+	})
+
+	t.Run("an internal invariant still panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("an unexpected element kind must still panic — a " +
+					"compiler bug returned as an error reads as a rejected " +
+					"grammar and blames the user for our fault")
+			}
+			if _, isEmit := r.(*EmitError); isEmit {
+				t.Errorf("internal invariant raised *EmitError (%v); the "+
+					"recover must convert only genuine input rejections", r)
+			}
+		}()
+		_, _ = EmitGrammarSpec(&Grammar{Productions: []*Production{
+			{Name: "A", Alts: []Sequence{{&Element{Kind: ElemKind("not-a-kind")}}}},
+		}}, &ConvertOptions{Tag: "bnf"})
+	})
 }
