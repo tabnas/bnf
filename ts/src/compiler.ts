@@ -2339,6 +2339,15 @@ function emitGrammarSpec(
   // pass had already removed them.
   grammar = cloneGrammar(grammar)
 
+  // Diagnostics name the notation the grammar was written in, not this
+  // package. Set this BEFORE `resolveProseTerminals`: that pass raises
+  // five of this file's diagnostics, so assigning afterwards left every
+  // one of them carrying the prefix from the PREVIOUS conversion in the
+  // process — or the `'bnf'` default on the first. `go/emit.go` has always
+  // set it first, and its comment claims to mirror this file; now it does.
+  const tag = opts?.tag ?? 'bnf'
+  _diagName = tag
+
   // Drop informational prose definitions (`NR = <number>`) first, so the
   // names they document fall through to the built-in tokens — and so a
   // leading prose line is never mistaken for the start rule.
@@ -2350,9 +2359,10 @@ function emitGrammarSpec(
   const removeNames = grammar.remove ? [...grammar.remove] : []
   const clearAll = !!grammar.clearAll
 
+  // `start` stays here, after the prose pass: resolving prose can drop a
+  // leading informational line that would otherwise be read as the start
+  // rule. Only the diagnostic prefix moved up.
   const start = opts?.start ?? grammar.productions[0].name
-  const tag = opts?.tag ?? 'bnf'
-  _diagName = tag
   const wordKeywords = !!opts?.wordKeywords
 
   // Turn single-literal productions (`PL = "+"`) into named lexer
