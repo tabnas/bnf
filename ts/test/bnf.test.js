@@ -1048,3 +1048,38 @@ describe('source spans', () => {
       'spans must be invisible in the emitted grammar')
   })
 })
+
+// A REMOVAL is a rule entry of `null`, and markListing has to walk past one.
+//
+// Audit item B8. `spec.rule.gone = null` is how a spec says "gone is removed"
+// (Grammar.remove), and markListing dereferenced it:
+// "TypeError: Cannot read properties of null (reading 'open')" — an uncaught
+// crash, on a spec shape this package produces itself.
+//
+// The Go port reached the same place from the opposite side and is why this
+// pins the listing CONTENT rather than just the absence of a throw: there,
+// cloneGrammar dropped the Remove field, so the entry never existed, MarkListing
+// walked a grammar with no removal in it and returned "" — no crash, and no
+// listing either. Preserving the field is what makes the nil reachable, so the
+// clone fix and this guard have to land together.
+describe('removals in a listing', () => {
+  it('markListing skips a removed rule instead of crashing on it', () => {
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[term('x')], [term('y')]] },
+        { name: 'gone', alts: [[term('z')]] },
+      ],
+      remove: ['gone'],
+    }, { tag: 'demo', marks: true })
+
+    // The removal survived as the null marker — without this the test would
+    // pass on a spec that simply has no removal in it.
+    assert.ok('gone' in spec.rule, 'the removal entry is missing entirely')
+    assert.equal(spec.rule.gone, null)
+
+    const listing = markListing(spec)
+    const rules = listing.split('\n').filter(Boolean).map((l) => l.split(/\s+/)[0])
+    assert.deepEqual([...new Set(rules)], ['top'])
+    assert.ok(!listing.includes('gone'), 'a removed rule must not be listed')
+  })
+})

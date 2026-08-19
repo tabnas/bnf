@@ -1337,3 +1337,51 @@ func TestEmitRemovalOnlyGrammarErrors(t *testing.T) {
 		t.Errorf("removal-only grammar: got %q, want it to name the cause", err)
 	}
 }
+
+// TestMarkListingSkipsARemovedRule is the Go half of the TS
+// "markListing skips a removed rule instead of crashing on it".
+//
+// Audit item B8, and the two ports reached it from opposite sides.
+// `spec.Rule["gone"] = nil` is how a spec says "gone is removed"
+// (Grammar.Remove). TS dereferenced the null and threw an uncaught TypeError;
+// here cloneGrammar dropped the Remove field entirely, so the entry never
+// existed, MarkListing walked a grammar with no removal in it and returned ""
+// — no crash, and no listing either.
+//
+// Preserving the field is what makes the nil REACHABLE, which is why this
+// test lives on the same branch as that fix: without the guard, MarkListing
+// panics with a nil pointer dereference the moment removals survive.
+//
+// It pins the listing CONTENT, not just the absence of a panic. Asserting
+// only "did not crash" would pass on the old behaviour, where the removal was
+// gone before MarkListing ever saw it.
+func TestMarkListingSkipsARemovedRule(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{
+		Productions: []*Production{
+			{Name: "top", Alts: []Sequence{{term("x")}, {term("y")}}},
+			{Name: "gone", Alts: []Sequence{{term("z")}}},
+		},
+		Remove: []string{"gone"},
+	}, &ConvertOptions{Tag: "demo", Marks: true})
+	if nil != err {
+		t.Fatalf("emit: %v", err)
+	}
+
+	// The removal survived as the nil marker — without this the test would
+	// pass on a spec that simply has no removal in it.
+	entry, present := spec.Rule["gone"]
+	if !present {
+		t.Fatal("the removal entry is missing entirely")
+	}
+	if nil != entry {
+		t.Fatalf("removal entry = %v, want nil", entry)
+	}
+
+	listing := MarkListing(spec)
+	if strings.Contains(listing, "gone") {
+		t.Errorf("a removed rule must not be listed:\n%s", listing)
+	}
+	if !strings.Contains(listing, "top") {
+		t.Errorf("the surviving rule's marks are missing:\n%s", listing)
+	}
+}

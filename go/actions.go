@@ -210,6 +210,18 @@ func MarkListing(spec *tabnas.GrammarSpec) string {
 	sort.Strings(ruleNames)
 	for _, rule := range ruleNames {
 		rspec := spec.Rule[rule]
+		// A REMOVAL, not a rule. `spec.Rule["B"] = nil` is how a spec says "B
+		// is removed" (Grammar.Remove), and a removed rule has no alternates
+		// to mark, so it contributes no lines.
+		//
+		// This guard is load-bearing rather than defensive: before removals
+		// survived cloneGrammar the entry was dropped entirely and this loop
+		// never saw one, so MarkListing quietly returned "" for a grammar
+		// whose removals TS listed. Preserving the field is what makes the
+		// nil reachable — the fix and the guard have to land together.
+		if nil == rspec {
+			continue
+		}
 		for _, ph := range []struct{ field, sym string }{{"open", "o"}, {"close", "c"}} {
 			var list []*tabnas.GrammarAltSpec
 			if ph.field == "open" {
