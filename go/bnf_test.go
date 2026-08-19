@@ -1259,3 +1259,41 @@ func TestSpansDoNotChangeTheEmittedGrammar(t *testing.T) {
 			a, b)
 	}
 }
+
+// TestCloneGrammarKeepsEveryField pins the whole-struct copy.
+//
+// cloneGrammar rebuilt the Grammar from Productions alone, so Remove,
+// ClearAll and Ambiguities were dropped on every clone — and emitGrammarSpec
+// reads Remove/ClearAll OFF THE CLONE, so a front-end that set them directly
+// on the IR had its removals silently ignored. TypeScript's cloneGrammar
+// spreads the grammar and documents why; this is the same contract.
+//
+// Written field-by-field rather than with reflect.DeepEqual on purpose: a new
+// Grammar field added later should make a reviewer decide whether it must be
+// carried, and DeepEqual on a copied struct would pass silently either way.
+func TestCloneGrammarKeepsEveryField(t *testing.T) {
+	g := &Grammar{
+		Productions: []*Production{{Name: "top", Alts: []Sequence{{}}}},
+		Remove:      []string{"gone"},
+		ClearAll:    true,
+		Ambiguities: []AmbiguityReport{{Rule: "top", Reason: "test"}},
+	}
+	c := cloneGrammar(g)
+
+	if 1 != len(c.Remove) || "gone" != c.Remove[0] {
+		t.Errorf("Remove: got %v, want [gone]", c.Remove)
+	}
+	if !c.ClearAll {
+		t.Error("ClearAll: got false, want true")
+	}
+	if 1 != len(c.Ambiguities) {
+		t.Errorf("Ambiguities: got %d, want 1", len(c.Ambiguities))
+	}
+
+	// Still a CLONE: mutating the copy's productions must not reach the
+	// original, which is the reason cloneGrammar exists at all.
+	c.Productions[0].Name = "changed"
+	if "top" != g.Productions[0].Name {
+		t.Error("clone shares production storage with the original")
+	}
+}
