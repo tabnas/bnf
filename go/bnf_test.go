@@ -9,6 +9,7 @@ package bnf
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -54,6 +55,191 @@ func TestStampsCallerTag(t *testing.T) {
 	if strings.Contains(text, `"abnf"`) {
 		t.Error("must not assume a notation")
 	}
+}
+
+func TestDefaultsTagToBnf(t *testing.T) {
+	// The default is this package's own name. It was "abnf" — a notation,
+	// and AGENTS.md rule 3 says "Do not hard-code a notation's tag." A
+	// caller who omitted the tag got an emitted `g:"abnf"` asserting a
+	// syntax nothing here can know. TypeScript has always defaulted to
+	// 'bnf' (ts/src/compiler.ts, `opts?.tag ?? 'bnf'`).
+	//
+	// TestStampsCallerTag does not cover this: it supplies a tag, so the
+	// default branch never runs, and it greps for `"abnf"` in quotes,
+	// which the emitted `"g": "abnf"` would in fact have matched — the
+	// test was sound and simply never reached the defect.
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "top", Alts: []Sequence{{term("x")}}},
+	}}, &ConvertOptions{})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	// Read the group tags themselves rather than grepping the whole
+	// document for "abnf": the emitted action refs are still named
+	// `@abnf_a<n>` (a separate divergence from TypeScript's `@bnf_a<n>`,
+	// not fixed here because two of abnf/go's assertions are written
+	// against that prefix), so a document-wide grep would fail for a
+	// reason that has nothing to do with the tag.
+	tags := groupTags(t, spec)
+	if len(tags) == 0 {
+		t.Fatal("no group tags emitted, so this test proves nothing")
+	}
+	for _, tag := range tags {
+		if tag != "bnf" {
+			t.Errorf("group tag %q: the default must be this package's "+
+				"own name, never a notation", tag)
+		}
+	}
+}
+
+// groupTags collects the head of every emitted `g` tag. A tag may carry
+// suffixes ("bnf,end"); the head is the part that names the notation.
+func groupTags(t *testing.T, spec *tabnas.GrammarSpec) []string {
+	t.Helper()
+	var out []string
+	for _, m := range regexp.MustCompile(`"g": *"([^",]*)`).
+		FindAllStringSubmatch(SpecToJSON(spec, 0), -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func TestAttachActionsDoesNotReuseRefs(t *testing.T) {
+	// Two calls must not collide. Resetting the counter to 0 on every
+	// call meant the second call reused "@abnf_user0", overwrote the
+	// first call's function, and left the first alt pointing at the
+	// replacement. Measured downstream on abnf's `op = "inc" / "dec"`
+	// before the fix: the INC alt's action ran zero times and the DEC
+	// alt's ran twice, with no error anywhere. TypeScript scans the ref
+	// map first (ts/src/spec.ts:342) and was unaffected.
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "op", Alts: []Sequence{{term("inc")}, {term("dec")}}},
+	}}, &ConvertOptions{Tag: "demo", Marks: true})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	noop := func(_ *tabnas.Rule, _ *tabnas.Context) {}
+	for _, key := range []string{"@op:o:INC", "@op:o:DEC"} {
+		if err := AttachActions(spec, ActionsMap{key: {noop}}); err != nil {
+			t.Fatalf("attach %s failed: %v", key, err)
+		}
+	}
+
+	// Two separate calls, each attaching to one alt, so two distinct
+	// refs must exist and each must hold a function.
+	var refs []string
+	for k, v := range spec.Ref {
+		if !strings.Contains(string(k), "_user") {
+			continue
+		}
+		if v == nil {
+			t.Errorf("ref %s holds nothing", k)
+		}
+		refs = append(refs, string(k))
+	}
+	sort.Strings(refs)
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 user-action refs after 2 calls, got %d: %v",
+			len(refs), refs)
+	}
+
+	// The refs existing is not enough: the alts must point at different
+	// ones. A collision that happened to leave two keys behind would
+	// still run one alt's action on the other's alt.
+	used := map[string]bool{}
+	for _, alt := range altSpecsOf(spec.Rule["op"]) {
+		for _, name := range refNamesIn(alt.A) {
+			if strings.Contains(name, "_user") {
+				if used[name] {
+					t.Errorf("two alts share the action ref %s", name)
+				}
+				used[name] = true
+			}
+		}
+	}
+	if len(used) != 2 {
+		t.Errorf("expected the two alts to carry 2 distinct user refs, "+
+			"got %d: %v", len(used), used)
+	}
+}
+
+func altSpecsOf(rs *tabnas.GrammarRuleSpec) []*tabnas.GrammarAltSpec {
+	if rs == nil {
+		return nil
+	}
+	out := altListOf(rs.Open)
+	return append(out, altListOf(rs.Close)...)
+}
+
+func refNamesIn(a any) []string {
+	switch v := a.(type) {
+	case nil:
+		return nil
+	case string:
+		return []string{v}
+	case []any:
+		var out []string
+		for _, e := range v {
+			out = append(out, refNamesIn(e)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// OPEN DIVERGENCE — the compiler-generated action refs are named
+// "@abnf_a<n>" here and "@bnf_a<n>" in TypeScript, whichever tag the
+// caller passes. Two ports, two names for the same thing.
+//
+// It is pinned rather than fixed, and pinned on BOTH sides (the TS twin
+// is in ts/test/bnf.test.js), so the record cannot outlive the
+// divergence: repairing either port turns that port's test red and
+// forces this pair to be revisited together.
+//
+// Not fixed here because the repair has to land downstream first.
+// abnf/go/compile_test.go:66 and :251 assert
+// `!strings.Contains(text, "@abnf_a")` to prove ToRecognitionSpec
+// strips closure refs. Rename the prefix and those two assertions stop
+// testing anything while staying green — a real check silently traded
+// for a vacuous one. TypeScript's twin (abnf/ts/test/compile.test.js)
+// already derives the names from the spec's own ref map instead of
+// hard-coding them, so the order is: make abnf/go's assertions
+// prefix-independent the same way, then rename here.
+//
+// This is the same defect class as TestDefaultsTagToBnf above — this
+// package naming a notation it cannot know — but a strictly larger
+// change, so it gets its own.
+func TestActionRefPrefixDivergesFromTypeScript(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "top", Alts: []Sequence{{term("x")}}},
+	}}, &ConvertOptions{Tag: "demo"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	got := actionRefPrefixes(t, SpecToJSON(spec, 0))
+	if len(got) == 0 {
+		t.Fatal("no action refs emitted, so this test proves nothing")
+	}
+	for _, prefix := range got {
+		if prefix != "abnf" {
+			t.Errorf("action ref prefix %q: if this port has been "+
+				"repaired, delete this test and its TypeScript twin in "+
+				"ts/test/bnf.test.js together", prefix)
+		}
+	}
+}
+
+// actionRefPrefixes collects the notation part of every compiler-generated
+// action ref (`@<prefix>_a<n>`) in an emitted spec.
+func actionRefPrefixes(t *testing.T, doc string) []string {
+	t.Helper()
+	var out []string
+	for _, m := range regexp.MustCompile(`"@([a-z]+)_a[0-9]+"`).
+		FindAllStringSubmatch(doc, -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
 
 func TestLiftsSingleLiteralProduction(t *testing.T) {
