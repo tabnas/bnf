@@ -51,6 +51,13 @@ func cloneGrammar(grammar *Grammar) *Grammar {
 	// is the same repair, and `cg := *grammar` is Go's spread.
 	cg := *grammar
 	cg.Productions = prods
+	// The struct copy duplicates the slice HEADERS, not their backing arrays,
+	// so an append on the clone can write into caller storage whenever the
+	// original slice has spare capacity — resolveProseTerminals appends to
+	// Remove, and it runs on the clone. Copying them keeps cloneGrammar's
+	// actual guarantee: emission cannot disturb the caller's AST.
+	cg.Remove = append([]string(nil), grammar.Remove...)
+	cg.Ambiguities = append([]AmbiguityReport(nil), grammar.Ambiguities...)
 	return &cg
 }
 

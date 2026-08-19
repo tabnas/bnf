@@ -90,6 +90,17 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 
 	start := opts.Start
 	if start == "" {
+		// A grammar carrying only removals has no production to take a start
+		// rule from. That shape became REACHABLE when cloneGrammar began
+		// preserving Remove/ClearAll — before, they were dropped on the clone
+		// and resolveProseTerminals rejected the grammar as ruleless first, so
+		// this index was never hit. Report it rather than panicking with
+		// "index out of range".
+		if 0 == len(grammar.Productions) {
+			return nil, &EmitError{Message: diagPrefix +
+				": grammar has no productions to start from" +
+				" (a removal-only grammar needs an explicit start rule)"}
+		}
 		start = grammar.Productions[0].Name
 	}
 	tag := opts.Tag

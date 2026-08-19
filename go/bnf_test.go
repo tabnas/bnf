@@ -1297,3 +1297,43 @@ func TestCloneGrammarKeepsEveryField(t *testing.T) {
 		t.Error("clone shares production storage with the original")
 	}
 }
+
+// TestCloneGrammarDoesNotAliasCallerSlices pins the isolation the whole-struct
+// copy could otherwise break. A struct copy duplicates slice HEADERS, so an
+// append on the clone writes into the caller's backing array whenever the
+// original has spare capacity — and resolveProseTerminals appends to Remove,
+// on the clone. Found in review of the whole-struct copy, not afterwards.
+func TestCloneGrammarDoesNotAliasCallerSlices(t *testing.T) {
+	rm := make([]string, 1, 4) // spare capacity is the whole point
+	rm[0] = "first"
+	g := &Grammar{
+		Productions: []*Production{{Name: "top", Alts: []Sequence{{}}}},
+		Remove:      rm,
+		Ambiguities: make([]AmbiguityReport, 1, 4),
+	}
+	c := cloneGrammar(g)
+	c.Remove = append(c.Remove, "added-on-clone")
+	c.Ambiguities = append(c.Ambiguities, AmbiguityReport{Rule: "added"})
+
+	if got := rm[:2][1]; "" != got {
+		t.Errorf("clone's append reached caller storage: %q", got)
+	}
+	if 1 != len(g.Remove) {
+		t.Errorf("caller Remove length changed: %d", len(g.Remove))
+	}
+}
+
+// TestEmitRemovalOnlyGrammarErrors pins the shape that preserving Remove made
+// reachable. With Remove dropped on the clone, resolveProseTerminals rejected
+// a production-less grammar as ruleless before anything indexed Productions[0].
+// Preserving it let that grammar through to the start-rule selection, where an
+// empty slice panicked. An error is the contract; a panic is not.
+func TestEmitRemovalOnlyGrammarErrors(t *testing.T) {
+	_, err := EmitGrammarSpec(&Grammar{Remove: []string{"gone"}}, nil)
+	if nil == err {
+		t.Fatal("removal-only grammar: got nil error, want a controlled error")
+	}
+	if !strings.Contains(err.Error(), "no productions") {
+		t.Errorf("removal-only grammar: got %q, want it to name the cause", err)
+	}
+}
