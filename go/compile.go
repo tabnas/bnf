@@ -79,6 +79,17 @@ func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 
 	rules := map[string]any{}
 	for name, rspec := range spec.Rule {
+		// A nil entry is the engine's documented representation of a REMOVAL —
+		// grammarspec.go: "a nil entry removes that rule" — so it must survive
+		// serialisation AS one. TypeScript carries it through as null (its
+		// cloneData never dereferences the entry), and dereferencing it here
+		// panicked every serialisation entry point for any grammar that
+		// carried a removal: SpecToDataErr, ToRecognitionSpec and ToPureSpec
+		// alike.
+		if nil == rspec {
+			rules[name] = nil
+			continue
+		}
 		rm := map[string]any{}
 		if rspec.Open != nil {
 			rm["open"] = altsToData(rspec.Open, name, offenders)
