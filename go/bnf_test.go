@@ -1445,3 +1445,51 @@ func TestSpansDoNotChangeTheEmittedGrammar(t *testing.T) {
 			a, b)
 	}
 }
+
+// TestRemovalSurvivesSerialisation pins the nil-entry contract.
+//
+// The engine documents a nil Rule entry as a REMOVAL — grammarspec.go: "a nil
+// entry removes that rule" — so it has to survive serialisation as one. Every
+// entry point here dereferenced it instead, and panicked on any grammar
+// carrying a removal. TypeScript never had the bug: its cloneData copies the
+// entry structurally and carries null through, which is what makes null the
+// right answer rather than a choice.
+//
+// All three entry points are covered because all three panicked.
+func TestRemovalSurvivesSerialisation(t *testing.T) {
+	newSpec := func() *tabnas.GrammarSpec {
+		return &tabnas.GrammarSpec{
+			Rule: map[string]*tabnas.GrammarRuleSpec{"gone": nil, "kept": {}},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		fn   func(*tabnas.GrammarSpec) (map[string]any, error)
+	}{
+		{"SpecToDataErr", SpecToDataErr},
+		{"ToRecognitionSpec", ToRecognitionSpec},
+		{"ToPureSpec", ToPureSpec},
+	} {
+		data, err := tc.fn(newSpec())
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+			continue
+		}
+		rules, ok := data["rule"].(map[string]any)
+		if !ok {
+			t.Errorf("%s: rule block missing or not a map: %T", tc.name, data["rule"])
+			continue
+		}
+		got, present := rules["gone"]
+		if !present {
+			t.Errorf("%s: removal dropped entirely; want a nil entry", tc.name)
+			continue
+		}
+		if nil != got {
+			t.Errorf("%s: removal serialised as %v, want nil", tc.name, got)
+		}
+		if _, present := rules["kept"]; !present {
+			t.Errorf("%s: surviving rule was dropped", tc.name)
+		}
+	}
+}
