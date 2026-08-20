@@ -132,12 +132,33 @@ func altMark(a *tabnas.GrammarAltSpec) string {
 	return m
 }
 
+// userRefName names the nth user-action ref. One definition, so the
+// scan below cannot drift from what the loop actually writes: a scan
+// looking for a prefix the emitter no longer uses would find nothing
+// taken, reset to 0, and restore the very collision it exists to stop.
+func userRefName(n int) string { return fmt.Sprintf("@abnf_user%d", n) }
+
 // AttachActions attaches user semantic actions to a spec in place.
 func AttachActions(spec *tabnas.GrammarSpec, actions ActionsMap) error {
 	if spec.Ref == nil {
 		spec.Ref = map[tabnas.FuncRef]any{}
 	}
+	// Start past whatever the ref map already holds. Resetting to 0 on
+	// every call meant a second AttachActions reused "@abnf_user0",
+	// overwrote the first call's function, and left the earlier alt
+	// pointing at the replacement — so one action ran twice and the other
+	// never ran at all. Measured on `op = "inc" / "dec"` with an action
+	// attached to each mark in its own call: TypeScript emitted
+	// @bnf_user0 and @bnf_user1 and ran each action once; Go emitted one
+	// ref and ran the INC alt's action zero times and the DEC alt's twice.
+	// TypeScript has carried this scan since ts/src/spec.ts:342.
 	counter := 0
+	for {
+		if _, taken := spec.Ref[tabnas.FuncRef(userRefName(counter))]; !taken {
+			break
+		}
+		counter++
+	}
 	// Deterministic ordering over the action keys.
 	keys := make([]string, 0, len(actions))
 	for k := range actions {
@@ -159,7 +180,7 @@ func AttachActions(spec *tabnas.GrammarSpec, actions ActionsMap) error {
 			continue
 		}
 		for _, alt := range target.alts {
-			userRef := tabnas.FuncRef(fmt.Sprintf("@abnf_user%d", counter))
+			userRef := tabnas.FuncRef(userRefName(counter))
 			counter++
 			spec.Ref[userRef] = seqActions(fns)
 			alt.A = appendAction(alt.A, string(userRef))

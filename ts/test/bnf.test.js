@@ -53,10 +53,90 @@ describe('bnf', () => {
   })
 
   it('defaults the tag to bnf', () => {
+    // /bnf/ was the whole assertion here, and 'abnf' contains it: the
+    // default could have been a notation name and this test would still
+    // have passed. Measured — setting the default to 'abnf' left all 56
+    // tests green. Go's default WAS 'abnf', and its twin test was blind
+    // the same way, so the divergence survived on both sides at once.
+    // Read the group tags instead, and require the head of each to be
+    // this package's own name.
     const spec = emitGrammarSpec({
       productions: [{ name: 'top', alts: [[term('x')]] }],
     })
-    assert.match(JSON.stringify(spec), /bnf/)
+    const tags = [...JSON.stringify(spec).matchAll(/"g":"([^",]*)/g)]
+      .map((m) => m[1])
+    assert.notEqual(tags.length, 0, 'no group tags, so this proves nothing')
+    for (const tag of tags) {
+      assert.equal(tag, 'bnf',
+        'the default must be this package own name, never a notation')
+    }
+  })
+
+  it('does not reuse an action ref across attachActions calls', () => {
+    // Two calls must not collide. Resetting the counter to 0 each call
+    // would make the second overwrite the first call's function and
+    // leave the first alt pointing at the replacement. TypeScript scans
+    // the ref map first (src/spec.ts) and is correct; nothing pinned it
+    // until now. Go reset the counter, and downstream on abnf's
+    // `op = "inc" / "dec"` the INC alt's action ran zero times and the
+    // DEC alt's ran twice, silently.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'op', alts: [[term('inc')], [term('dec')]] },
+      ],
+    }, { tag: 'demo', marks: true })
+
+    const noop = () => undefined
+    for (const key of ['@op:o:INC', '@op:o:DEC']) {
+      attachActions(spec, { [key]: [noop] })
+    }
+
+    const refs = Object.keys(spec.ref ?? {}).filter((k) => k.includes('_user'))
+    assert.equal(refs.length, 2,
+      'two calls, each attaching to one alt, must leave two refs: ' +
+      JSON.stringify(refs))
+
+    // The refs existing is not enough: the alts must point at different
+    // ones, or one alt still runs the other's action.
+    const used = new Set()
+    const rs = spec.rule.op
+    for (const alt of [...(rs.open ?? []), ...(rs.close ?? [])]) {
+      for (const name of [alt.a].flat(9).filter((x) => 'string' === typeof x)) {
+        if (name.includes('_user')) {
+          assert.equal(used.has(name), false, 'two alts share ' + name)
+          used.add(name)
+        }
+      }
+    }
+    assert.equal(used.size, 2,
+      'expected the two alts to carry 2 distinct user refs, got ' +
+      JSON.stringify([...used]))
+  })
+
+  // OPEN DIVERGENCE — the twin of Go's
+  // TestActionRefPrefixDivergesFromTypeScript (go/bnf_test.go). The
+  // compiler-generated action refs are named `@bnf_a<n>` here and
+  // `@abnf_a<n>` in Go, whichever tag the caller passes.
+  //
+  // Pinned on both sides so the record cannot outlive the divergence:
+  // repairing either port turns that port's test red and forces the pair
+  // to be revisited together. The repair belongs on the Go side (this
+  // port's name is the correct one — it names no notation), and it has to
+  // wait for abnf/go/compile_test.go:66 and :251, which assert the
+  // literal "@abnf_a" and would go vacuous the moment it changes.
+  it('names generated action refs @bnf_a<n> (Go says @abnf_a<n>)', () => {
+    const spec = emitGrammarSpec({
+      productions: [{ name: 'top', alts: [[term('x')]] }],
+    }, { tag: 'demo' })
+    const prefixes = [...JSON.stringify(spec).matchAll(/"@([a-z]+)_a[0-9]+"/g)]
+      .map((m) => m[1])
+    assert.notEqual(prefixes.length, 0,
+      'no action refs emitted, so this proves nothing')
+    for (const prefix of prefixes) {
+      assert.equal(prefix, 'bnf',
+        'if this port has been repaired, delete this test and its Go ' +
+        'twin in go/bnf_test.go together')
+    }
   })
 
   it('lifts a single-literal production into a named lexer token', () => {

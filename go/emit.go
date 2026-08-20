@@ -94,7 +94,22 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpe
 	}
 	tag := opts.Tag
 	if tag == "" {
-		tag = "abnf"
+		// "bnf", this package's own name — NOT a notation.
+		//
+		// This defaulted to "abnf", which is a notation, and AGENTS.md rule
+		// 3 says in as many words: "Do not hard-code a notation's tag."
+		// Nothing here knows what syntax a grammar was written in, so a
+		// caller who omits the tag was getting an emitted `g:"abnf"` that
+		// asserted one. TypeScript has always defaulted to 'bnf'
+		// (ts/src/compiler.ts, `opts?.tag ?? 'bnf'`).
+		//
+		// Zero blast radius on the front-ends, measured rather than
+		// assumed: abnf, gbnf and ebnf each set their own tag before
+		// calling in (abnf/go/bnf_alias.go:88, gbnf/go/facade.go:71,
+		// ebnf/go/facade.go:61), so none of them reaches this default. Only
+		// a direct caller of this package does, and it was the one being
+		// told a falsehood.
+		tag = "bnf"
 	}
 
 	// Turn single-literal productions (`PL = "+"`) into named lexer tokens,
