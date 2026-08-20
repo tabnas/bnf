@@ -116,11 +116,37 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 
 	start := opts.Start
 	if start == "" {
+		// A grammar carrying only removals has no production to take a start
+		// rule from. That shape became REACHABLE when cloneGrammar began
+		// preserving Remove/ClearAll — before, they were dropped on the clone
+		// and resolveProseTerminals rejected the grammar as ruleless first, so
+		// this index was never hit. Report it rather than panicking with
+		// "index out of range".
+		if 0 == len(grammar.Productions) {
+			return nil, &EmitError{Message: diagPrefix +
+				": grammar has no productions to start from" +
+				" (a removal-only grammar needs an explicit start rule)"}
+		}
 		start = grammar.Productions[0].Name
 	}
 	tag := opts.Tag
 	if tag == "" {
-		tag = "abnf"
+		// "bnf", this package's own name — NOT a notation.
+		//
+		// This defaulted to "abnf", which is a notation, and AGENTS.md rule
+		// 3 says in as many words: "Do not hard-code a notation's tag."
+		// Nothing here knows what syntax a grammar was written in, so a
+		// caller who omits the tag was getting an emitted `g:"abnf"` that
+		// asserted one. TypeScript has always defaulted to 'bnf'
+		// (ts/src/compiler.ts, `opts?.tag ?? 'bnf'`).
+		//
+		// Zero blast radius on the front-ends, measured rather than
+		// assumed: abnf, gbnf and ebnf each set their own tag before
+		// calling in (abnf/go/bnf_alias.go:88, gbnf/go/facade.go:71,
+		// ebnf/go/facade.go:61), so none of them reaches this default. Only
+		// a direct caller of this package does, and it was the one being
+		// told a falsehood.
+		tag = "bnf"
 	}
 
 	// Turn single-literal productions (`PL = "+"`) into named lexer tokens,

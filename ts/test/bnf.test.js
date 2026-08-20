@@ -53,10 +53,90 @@ describe('bnf', () => {
   })
 
   it('defaults the tag to bnf', () => {
+    // /bnf/ was the whole assertion here, and 'abnf' contains it: the
+    // default could have been a notation name and this test would still
+    // have passed. Measured — setting the default to 'abnf' left all 56
+    // tests green. Go's default WAS 'abnf', and its twin test was blind
+    // the same way, so the divergence survived on both sides at once.
+    // Read the group tags instead, and require the head of each to be
+    // this package's own name.
     const spec = emitGrammarSpec({
       productions: [{ name: 'top', alts: [[term('x')]] }],
     })
-    assert.match(JSON.stringify(spec), /bnf/)
+    const tags = [...JSON.stringify(spec).matchAll(/"g":"([^",]*)/g)]
+      .map((m) => m[1])
+    assert.notEqual(tags.length, 0, 'no group tags, so this proves nothing')
+    for (const tag of tags) {
+      assert.equal(tag, 'bnf',
+        'the default must be this package own name, never a notation')
+    }
+  })
+
+  it('does not reuse an action ref across attachActions calls', () => {
+    // Two calls must not collide. Resetting the counter to 0 each call
+    // would make the second overwrite the first call's function and
+    // leave the first alt pointing at the replacement. TypeScript scans
+    // the ref map first (src/spec.ts) and is correct; nothing pinned it
+    // until now. Go reset the counter, and downstream on abnf's
+    // `op = "inc" / "dec"` the INC alt's action ran zero times and the
+    // DEC alt's ran twice, silently.
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'op', alts: [[term('inc')], [term('dec')]] },
+      ],
+    }, { tag: 'demo', marks: true })
+
+    const noop = () => undefined
+    for (const key of ['@op:o:INC', '@op:o:DEC']) {
+      attachActions(spec, { [key]: [noop] })
+    }
+
+    const refs = Object.keys(spec.ref ?? {}).filter((k) => k.includes('_user'))
+    assert.equal(refs.length, 2,
+      'two calls, each attaching to one alt, must leave two refs: ' +
+      JSON.stringify(refs))
+
+    // The refs existing is not enough: the alts must point at different
+    // ones, or one alt still runs the other's action.
+    const used = new Set()
+    const rs = spec.rule.op
+    for (const alt of [...(rs.open ?? []), ...(rs.close ?? [])]) {
+      for (const name of [alt.a].flat(9).filter((x) => 'string' === typeof x)) {
+        if (name.includes('_user')) {
+          assert.equal(used.has(name), false, 'two alts share ' + name)
+          used.add(name)
+        }
+      }
+    }
+    assert.equal(used.size, 2,
+      'expected the two alts to carry 2 distinct user refs, got ' +
+      JSON.stringify([...used]))
+  })
+
+  // OPEN DIVERGENCE — the twin of Go's
+  // TestActionRefPrefixDivergesFromTypeScript (go/bnf_test.go). The
+  // compiler-generated action refs are named `@bnf_a<n>` here and
+  // `@abnf_a<n>` in Go, whichever tag the caller passes.
+  //
+  // Pinned on both sides so the record cannot outlive the divergence:
+  // repairing either port turns that port's test red and forces the pair
+  // to be revisited together. The repair belongs on the Go side (this
+  // port's name is the correct one — it names no notation), and it has to
+  // wait for abnf/go/compile_test.go:66 and :251, which assert the
+  // literal "@abnf_a" and would go vacuous the moment it changes.
+  it('names generated action refs @bnf_a<n> (Go says @abnf_a<n>)', () => {
+    const spec = emitGrammarSpec({
+      productions: [{ name: 'top', alts: [[term('x')]] }],
+    }, { tag: 'demo' })
+    const prefixes = [...JSON.stringify(spec).matchAll(/"@([a-z]+)_a[0-9]+"/g)]
+      .map((m) => m[1])
+    assert.notEqual(prefixes.length, 0,
+      'no action refs emitted, so this proves nothing')
+    for (const prefix of prefixes) {
+      assert.equal(prefix, 'bnf',
+        'if this port has been repaired, delete this test and its Go ' +
+        'twin in go/bnf_test.go together')
+    }
   })
 
   it('lifts a single-literal production into a named lexer token', () => {
@@ -1049,6 +1129,41 @@ describe('source spans', () => {
   })
 })
 
+// A REMOVAL is a rule entry of `null`, and markListing has to walk past one.
+//
+// Audit item B8. `spec.rule.gone = null` is how a spec says "gone is removed"
+// (Grammar.remove), and markListing dereferenced it:
+// "TypeError: Cannot read properties of null (reading 'open')" — an uncaught
+// crash, on a spec shape this package produces itself.
+//
+// The Go port reached the same place from the opposite side and is why this
+// pins the listing CONTENT rather than just the absence of a throw: there,
+// cloneGrammar dropped the Remove field, so the entry never existed, MarkListing
+// walked a grammar with no removal in it and returned "" — no crash, and no
+// listing either. Preserving the field is what makes the nil reachable, so the
+// clone fix and this guard have to land together.
+describe('removals in a listing', () => {
+  it('markListing skips a removed rule instead of crashing on it', () => {
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'top', alts: [[term('x')], [term('y')]] },
+        { name: 'gone', alts: [[term('z')]] },
+      ],
+      remove: ['gone'],
+    }, { tag: 'demo', marks: true })
+
+    // The removal survived as the null marker — without this the test would
+    // pass on a spec that simply has no removal in it.
+    assert.ok('gone' in spec.rule, 'the removal entry is missing entirely')
+    assert.equal(spec.rule.gone, null)
+
+    const listing = markListing(spec)
+    const rules = listing.split('\n').filter(Boolean).map((l) => l.split(/\s+/)[0])
+    assert.deepEqual([...new Set(rules)], ['top'])
+    assert.ok(!listing.includes('gone'), 'a removed rule must not be listed')
+  })
+})
+
 // The TypeScript half of the nil-entry contract. A null rule entry is the
 // engine's representation of a REMOVAL, and it must survive serialisation as
 // one. This port already behaved correctly — cloneData copies the entry
@@ -1064,6 +1179,5 @@ describe('removal-survives-serialisation', () => {
       assert.ok('gone' in out.rule, fn + ': removal dropped entirely')
       assert.equal(out.rule.gone, null, fn + ': removal must serialise as null')
       assert.ok('kept' in out.rule, fn + ': surviving rule was dropped')
-    }
-  })
+    }  })
 })

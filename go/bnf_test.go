@@ -9,6 +9,7 @@ package bnf
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -54,6 +55,191 @@ func TestStampsCallerTag(t *testing.T) {
 	if strings.Contains(text, `"abnf"`) {
 		t.Error("must not assume a notation")
 	}
+}
+
+func TestDefaultsTagToBnf(t *testing.T) {
+	// The default is this package's own name. It was "abnf" — a notation,
+	// and AGENTS.md rule 3 says "Do not hard-code a notation's tag." A
+	// caller who omitted the tag got an emitted `g:"abnf"` asserting a
+	// syntax nothing here can know. TypeScript has always defaulted to
+	// 'bnf' (ts/src/compiler.ts, `opts?.tag ?? 'bnf'`).
+	//
+	// TestStampsCallerTag does not cover this: it supplies a tag, so the
+	// default branch never runs, and it greps for `"abnf"` in quotes,
+	// which the emitted `"g": "abnf"` would in fact have matched — the
+	// test was sound and simply never reached the defect.
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "top", Alts: []Sequence{{term("x")}}},
+	}}, &ConvertOptions{})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	// Read the group tags themselves rather than grepping the whole
+	// document for "abnf": the emitted action refs are still named
+	// `@abnf_a<n>` (a separate divergence from TypeScript's `@bnf_a<n>`,
+	// not fixed here because two of abnf/go's assertions are written
+	// against that prefix), so a document-wide grep would fail for a
+	// reason that has nothing to do with the tag.
+	tags := groupTags(t, spec)
+	if len(tags) == 0 {
+		t.Fatal("no group tags emitted, so this test proves nothing")
+	}
+	for _, tag := range tags {
+		if tag != "bnf" {
+			t.Errorf("group tag %q: the default must be this package's "+
+				"own name, never a notation", tag)
+		}
+	}
+}
+
+// groupTags collects the head of every emitted `g` tag. A tag may carry
+// suffixes ("bnf,end"); the head is the part that names the notation.
+func groupTags(t *testing.T, spec *tabnas.GrammarSpec) []string {
+	t.Helper()
+	var out []string
+	for _, m := range regexp.MustCompile(`"g": *"([^",]*)`).
+		FindAllStringSubmatch(SpecToJSON(spec, 0), -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func TestAttachActionsDoesNotReuseRefs(t *testing.T) {
+	// Two calls must not collide. Resetting the counter to 0 on every
+	// call meant the second call reused "@abnf_user0", overwrote the
+	// first call's function, and left the first alt pointing at the
+	// replacement. Measured downstream on abnf's `op = "inc" / "dec"`
+	// before the fix: the INC alt's action ran zero times and the DEC
+	// alt's ran twice, with no error anywhere. TypeScript scans the ref
+	// map first (ts/src/spec.ts:342) and was unaffected.
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "op", Alts: []Sequence{{term("inc")}, {term("dec")}}},
+	}}, &ConvertOptions{Tag: "demo", Marks: true})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	noop := func(_ *tabnas.Rule, _ *tabnas.Context) {}
+	for _, key := range []string{"@op:o:INC", "@op:o:DEC"} {
+		if err := AttachActions(spec, ActionsMap{key: {noop}}); err != nil {
+			t.Fatalf("attach %s failed: %v", key, err)
+		}
+	}
+
+	// Two separate calls, each attaching to one alt, so two distinct
+	// refs must exist and each must hold a function.
+	var refs []string
+	for k, v := range spec.Ref {
+		if !strings.Contains(string(k), "_user") {
+			continue
+		}
+		if v == nil {
+			t.Errorf("ref %s holds nothing", k)
+		}
+		refs = append(refs, string(k))
+	}
+	sort.Strings(refs)
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 user-action refs after 2 calls, got %d: %v",
+			len(refs), refs)
+	}
+
+	// The refs existing is not enough: the alts must point at different
+	// ones. A collision that happened to leave two keys behind would
+	// still run one alt's action on the other's alt.
+	used := map[string]bool{}
+	for _, alt := range altSpecsOf(spec.Rule["op"]) {
+		for _, name := range refNamesIn(alt.A) {
+			if strings.Contains(name, "_user") {
+				if used[name] {
+					t.Errorf("two alts share the action ref %s", name)
+				}
+				used[name] = true
+			}
+		}
+	}
+	if len(used) != 2 {
+		t.Errorf("expected the two alts to carry 2 distinct user refs, "+
+			"got %d: %v", len(used), used)
+	}
+}
+
+func altSpecsOf(rs *tabnas.GrammarRuleSpec) []*tabnas.GrammarAltSpec {
+	if rs == nil {
+		return nil
+	}
+	out := altListOf(rs.Open)
+	return append(out, altListOf(rs.Close)...)
+}
+
+func refNamesIn(a any) []string {
+	switch v := a.(type) {
+	case nil:
+		return nil
+	case string:
+		return []string{v}
+	case []any:
+		var out []string
+		for _, e := range v {
+			out = append(out, refNamesIn(e)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// OPEN DIVERGENCE — the compiler-generated action refs are named
+// "@abnf_a<n>" here and "@bnf_a<n>" in TypeScript, whichever tag the
+// caller passes. Two ports, two names for the same thing.
+//
+// It is pinned rather than fixed, and pinned on BOTH sides (the TS twin
+// is in ts/test/bnf.test.js), so the record cannot outlive the
+// divergence: repairing either port turns that port's test red and
+// forces this pair to be revisited together.
+//
+// Not fixed here because the repair has to land downstream first.
+// abnf/go/compile_test.go:66 and :251 assert
+// `!strings.Contains(text, "@abnf_a")` to prove ToRecognitionSpec
+// strips closure refs. Rename the prefix and those two assertions stop
+// testing anything while staying green — a real check silently traded
+// for a vacuous one. TypeScript's twin (abnf/ts/test/compile.test.js)
+// already derives the names from the spec's own ref map instead of
+// hard-coding them, so the order is: make abnf/go's assertions
+// prefix-independent the same way, then rename here.
+//
+// This is the same defect class as TestDefaultsTagToBnf above — this
+// package naming a notation it cannot know — but a strictly larger
+// change, so it gets its own.
+func TestActionRefPrefixDivergesFromTypeScript(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "top", Alts: []Sequence{{term("x")}}},
+	}}, &ConvertOptions{Tag: "demo"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+	got := actionRefPrefixes(t, SpecToJSON(spec, 0))
+	if len(got) == 0 {
+		t.Fatal("no action refs emitted, so this test proves nothing")
+	}
+	for _, prefix := range got {
+		if prefix != "abnf" {
+			t.Errorf("action ref prefix %q: if this port has been "+
+				"repaired, delete this test and its TypeScript twin in "+
+				"ts/test/bnf.test.js together", prefix)
+		}
+	}
+}
+
+// actionRefPrefixes collects the notation part of every compiler-generated
+// action ref (`@<prefix>_a<n>`) in an emitted spec.
+func actionRefPrefixes(t *testing.T, doc string) []string {
+	t.Helper()
+	var out []string
+	for _, m := range regexp.MustCompile(`"@([a-z]+)_a[0-9]+"`).
+		FindAllStringSubmatch(doc, -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
 
 func TestLiftsSingleLiteralProduction(t *testing.T) {
@@ -1298,6 +1484,132 @@ func TestEmitFailureIsAnErrorNotAPanic(t *testing.T) {
 			{Name: "A", Alts: []Sequence{{&Element{Kind: ElemKind("not-a-kind")}}}},
 		}}, &ConvertOptions{Tag: "bnf"})
 	})
+}
+
+// TestCloneGrammarKeepsEveryField pins the whole-struct copy.
+//
+// cloneGrammar rebuilt the Grammar from Productions alone, so Remove,
+// ClearAll and Ambiguities were dropped on every clone — and emitGrammarSpec
+// reads Remove/ClearAll OFF THE CLONE, so a front-end that set them directly
+// on the IR had its removals silently ignored. TypeScript's cloneGrammar
+// spreads the grammar and documents why; this is the same contract.
+//
+// Written field-by-field rather than with reflect.DeepEqual on purpose: a new
+// Grammar field added later should make a reviewer decide whether it must be
+// carried, and DeepEqual on a copied struct would pass silently either way.
+func TestCloneGrammarKeepsEveryField(t *testing.T) {
+	g := &Grammar{
+		Productions: []*Production{{Name: "top", Alts: []Sequence{{}}}},
+		Remove:      []string{"gone"},
+		ClearAll:    true,
+		Ambiguities: []AmbiguityReport{{Rule: "top", Reason: "test"}},
+	}
+	c := cloneGrammar(g)
+
+	if 1 != len(c.Remove) || "gone" != c.Remove[0] {
+		t.Errorf("Remove: got %v, want [gone]", c.Remove)
+	}
+	if !c.ClearAll {
+		t.Error("ClearAll: got false, want true")
+	}
+	if 1 != len(c.Ambiguities) {
+		t.Errorf("Ambiguities: got %d, want 1", len(c.Ambiguities))
+	}
+
+	// Still a CLONE: mutating the copy's productions must not reach the
+	// original, which is the reason cloneGrammar exists at all.
+	c.Productions[0].Name = "changed"
+	if "top" != g.Productions[0].Name {
+		t.Error("clone shares production storage with the original")
+	}
+}
+
+// TestCloneGrammarDoesNotAliasCallerSlices pins the isolation the whole-struct
+// copy could otherwise break. A struct copy duplicates slice HEADERS, so an
+// append on the clone writes into the caller's backing array whenever the
+// original has spare capacity — and resolveProseTerminals appends to Remove,
+// on the clone. Found in review of the whole-struct copy, not afterwards.
+func TestCloneGrammarDoesNotAliasCallerSlices(t *testing.T) {
+	rm := make([]string, 1, 4) // spare capacity is the whole point
+	rm[0] = "first"
+	g := &Grammar{
+		Productions: []*Production{{Name: "top", Alts: []Sequence{{}}}},
+		Remove:      rm,
+		Ambiguities: make([]AmbiguityReport, 1, 4),
+	}
+	c := cloneGrammar(g)
+	c.Remove = append(c.Remove, "added-on-clone")
+	c.Ambiguities = append(c.Ambiguities, AmbiguityReport{Rule: "added"})
+
+	if got := rm[:2][1]; "" != got {
+		t.Errorf("clone's append reached caller storage: %q", got)
+	}
+	if 1 != len(g.Remove) {
+		t.Errorf("caller Remove length changed: %d", len(g.Remove))
+	}
+}
+
+// TestEmitRemovalOnlyGrammarErrors pins the shape that preserving Remove made
+// reachable. With Remove dropped on the clone, resolveProseTerminals rejected
+// a production-less grammar as ruleless before anything indexed Productions[0].
+// Preserving it let that grammar through to the start-rule selection, where an
+// empty slice panicked. An error is the contract; a panic is not.
+func TestEmitRemovalOnlyGrammarErrors(t *testing.T) {
+	_, err := EmitGrammarSpec(&Grammar{Remove: []string{"gone"}}, nil)
+	if nil == err {
+		t.Fatal("removal-only grammar: got nil error, want a controlled error")
+	}
+	if !strings.Contains(err.Error(), "no productions") {
+		t.Errorf("removal-only grammar: got %q, want it to name the cause", err)
+	}
+}
+
+// TestMarkListingSkipsARemovedRule is the Go half of the TS
+// "markListing skips a removed rule instead of crashing on it".
+//
+// Audit item B8, and the two ports reached it from opposite sides.
+// `spec.Rule["gone"] = nil` is how a spec says "gone is removed"
+// (Grammar.Remove). TS dereferenced the null and threw an uncaught TypeError;
+// here cloneGrammar dropped the Remove field entirely, so the entry never
+// existed, MarkListing walked a grammar with no removal in it and returned ""
+// — no crash, and no listing either.
+//
+// Preserving the field is what makes the nil REACHABLE, which is why this
+// test lives on the same branch as that fix: without the guard, MarkListing
+// panics with a nil pointer dereference the moment removals survive.
+//
+// It pins the listing CONTENT, not just the absence of a panic. Asserting
+// only "did not crash" would pass on the old behaviour, where the removal was
+// gone before MarkListing ever saw it.
+func TestMarkListingSkipsARemovedRule(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{
+		Productions: []*Production{
+			{Name: "top", Alts: []Sequence{{term("x")}, {term("y")}}},
+			{Name: "gone", Alts: []Sequence{{term("z")}}},
+		},
+		Remove: []string{"gone"},
+	}, &ConvertOptions{Tag: "demo", Marks: true})
+	if nil != err {
+		t.Fatalf("emit: %v", err)
+	}
+
+	// The removal survived as the nil marker — without this the test would
+	// pass on a spec that simply has no removal in it.
+	entry, present := spec.Rule["gone"]
+	if !present {
+		t.Fatal("the removal entry is missing entirely")
+	}
+	if nil != entry {
+		t.Fatalf("removal entry = %v, want nil", entry)
+	}
+
+	listing := MarkListing(spec)
+	if strings.Contains(listing, "gone") {
+		t.Errorf("a removed rule must not be listed:\n%s", listing)
+	}
+	if !strings.Contains(listing, "top") {
+		t.Errorf("the surviving rule's marks are missing:\n%s", listing)
+	}
 }
 
 // TestRemovalSurvivesSerialisation pins the nil-entry contract.

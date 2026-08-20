@@ -40,7 +40,25 @@ func cloneGrammar(grammar *Grammar) *Grammar {
 		cp.Alts = alts
 		prods[i] = &cp
 	}
-	return &Grammar{Productions: prods}
+	// Copy the WHOLE grammar, not just its productions. emitGrammarSpec reads
+	// Remove/ClearAll off the clone, so rebuilding it from Productions alone
+	// silently discarded them for any front-end that set those fields directly
+	// on the IR — a documented part of the Grammar contract — and discarded
+	// Ambiguities with them. abnf happened not to notice because it populates
+	// Remove via resolveProseTerminals, which runs ON the clone.
+	//
+	// TypeScript fixed exactly this and says so at its own cloneGrammar; this
+	// is the same repair, and `cg := *grammar` is Go's spread.
+	cg := *grammar
+	cg.Productions = prods
+	// The struct copy duplicates the slice HEADERS, not their backing arrays,
+	// so an append on the clone can write into caller storage whenever the
+	// original slice has spare capacity — resolveProseTerminals appends to
+	// Remove, and it runs on the clone. Copying them keeps cloneGrammar's
+	// actual guarantee: emission cannot disturb the caller's AST.
+	cg.Remove = append([]string(nil), grammar.Remove...)
+	cg.Ambiguities = append([]AmbiguityReport(nil), grammar.Ambiguities...)
+	return &cg
 }
 
 // ---- left-recursion elimination (Paull's) --------------------------
