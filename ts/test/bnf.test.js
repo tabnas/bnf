@@ -1048,3 +1048,22 @@ describe('source spans', () => {
       'spans must be invisible in the emitted grammar')
   })
 })
+
+// The TypeScript half of the nil-entry contract. A null rule entry is the
+// engine's representation of a REMOVAL, and it must survive serialisation as
+// one. This port already behaved correctly — cloneData copies the entry
+// structurally rather than reading its fields — so this pins the behaviour
+// the Go port was corrected to match, and would catch this side drifting
+// toward the bug instead.
+describe('removal-survives-serialisation', () => {
+  it('carries a null rule entry through both entry points', () => {
+    const Spec = require('../dist/spec')
+    const spec = { options: {}, rule: { gone: null, kept: { open: [] } } }
+    for (const fn of ['toRecognitionSpec', 'toPureSpec']) {
+      const out = Spec[fn](spec)
+      assert.ok('gone' in out.rule, fn + ': removal dropped entirely')
+      assert.equal(out.rule.gone, null, fn + ': removal must serialise as null')
+      assert.ok('kept' in out.rule, fn + ': surviving rule was dropped')
+    }
+  })
+})
