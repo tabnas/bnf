@@ -388,8 +388,15 @@ export function markListing(spec: GrammarSpec): string {
   const lines: string[] = []
   const rules = spec.rule ?? {}
   for (const rule of Object.keys(rules)) {
+    // A REMOVAL, not a rule. `spec.rule.B = null` is how a spec says "B is
+    // removed" (Grammar.remove), and a removed rule has no alternates to
+    // mark, so it contributes no lines. Dereferencing it threw
+    // "TypeError: Cannot read properties of null (reading 'open')" — an
+    // uncaught crash, on a spec shape this package produces itself.
+    const entry = (rules as any)[rule]
+    if (null == entry) continue
     for (const [ph, sym] of [['open', 'o'], ['close', 'c']] as const) {
-      const f = (rules as any)[rule][ph]
+      const f = entry[ph]
       const list: any[] = Array.isArray(f) ? f : (f && f.alts) || []
       for (const a of list) {
         if (a && null != a.m) {

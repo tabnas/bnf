@@ -1446,6 +1446,132 @@ func TestSpansDoNotChangeTheEmittedGrammar(t *testing.T) {
 	}
 }
 
+// TestCloneGrammarKeepsEveryField pins the whole-struct copy.
+//
+// cloneGrammar rebuilt the Grammar from Productions alone, so Remove,
+// ClearAll and Ambiguities were dropped on every clone — and emitGrammarSpec
+// reads Remove/ClearAll OFF THE CLONE, so a front-end that set them directly
+// on the IR had its removals silently ignored. TypeScript's cloneGrammar
+// spreads the grammar and documents why; this is the same contract.
+//
+// Written field-by-field rather than with reflect.DeepEqual on purpose: a new
+// Grammar field added later should make a reviewer decide whether it must be
+// carried, and DeepEqual on a copied struct would pass silently either way.
+func TestCloneGrammarKeepsEveryField(t *testing.T) {
+	g := &Grammar{
+		Productions: []*Production{{Name: "top", Alts: []Sequence{{}}}},
+		Remove:      []string{"gone"},
+		ClearAll:    true,
+		Ambiguities: []AmbiguityReport{{Rule: "top", Reason: "test"}},
+	}
+	c := cloneGrammar(g)
+
+	if 1 != len(c.Remove) || "gone" != c.Remove[0] {
+		t.Errorf("Remove: got %v, want [gone]", c.Remove)
+	}
+	if !c.ClearAll {
+		t.Error("ClearAll: got false, want true")
+	}
+	if 1 != len(c.Ambiguities) {
+		t.Errorf("Ambiguities: got %d, want 1", len(c.Ambiguities))
+	}
+
+	// Still a CLONE: mutating the copy's productions must not reach the
+	// original, which is the reason cloneGrammar exists at all.
+	c.Productions[0].Name = "changed"
+	if "top" != g.Productions[0].Name {
+		t.Error("clone shares production storage with the original")
+	}
+}
+
+// TestCloneGrammarDoesNotAliasCallerSlices pins the isolation the whole-struct
+// copy could otherwise break. A struct copy duplicates slice HEADERS, so an
+// append on the clone writes into the caller's backing array whenever the
+// original has spare capacity — and resolveProseTerminals appends to Remove,
+// on the clone. Found in review of the whole-struct copy, not afterwards.
+func TestCloneGrammarDoesNotAliasCallerSlices(t *testing.T) {
+	rm := make([]string, 1, 4) // spare capacity is the whole point
+	rm[0] = "first"
+	g := &Grammar{
+		Productions: []*Production{{Name: "top", Alts: []Sequence{{}}}},
+		Remove:      rm,
+		Ambiguities: make([]AmbiguityReport, 1, 4),
+	}
+	c := cloneGrammar(g)
+	c.Remove = append(c.Remove, "added-on-clone")
+	c.Ambiguities = append(c.Ambiguities, AmbiguityReport{Rule: "added"})
+
+	if got := rm[:2][1]; "" != got {
+		t.Errorf("clone's append reached caller storage: %q", got)
+	}
+	if 1 != len(g.Remove) {
+		t.Errorf("caller Remove length changed: %d", len(g.Remove))
+	}
+}
+
+// TestEmitRemovalOnlyGrammarErrors pins the shape that preserving Remove made
+// reachable. With Remove dropped on the clone, resolveProseTerminals rejected
+// a production-less grammar as ruleless before anything indexed Productions[0].
+// Preserving it let that grammar through to the start-rule selection, where an
+// empty slice panicked. An error is the contract; a panic is not.
+func TestEmitRemovalOnlyGrammarErrors(t *testing.T) {
+	_, err := EmitGrammarSpec(&Grammar{Remove: []string{"gone"}}, nil)
+	if nil == err {
+		t.Fatal("removal-only grammar: got nil error, want a controlled error")
+	}
+	if !strings.Contains(err.Error(), "no productions") {
+		t.Errorf("removal-only grammar: got %q, want it to name the cause", err)
+	}
+}
+
+// TestMarkListingSkipsARemovedRule is the Go half of the TS
+// "markListing skips a removed rule instead of crashing on it".
+//
+// Audit item B8, and the two ports reached it from opposite sides.
+// `spec.Rule["gone"] = nil` is how a spec says "gone is removed"
+// (Grammar.Remove). TS dereferenced the null and threw an uncaught TypeError;
+// here cloneGrammar dropped the Remove field entirely, so the entry never
+// existed, MarkListing walked a grammar with no removal in it and returned ""
+// — no crash, and no listing either.
+//
+// Preserving the field is what makes the nil REACHABLE, which is why this
+// test lives on the same branch as that fix: without the guard, MarkListing
+// panics with a nil pointer dereference the moment removals survive.
+//
+// It pins the listing CONTENT, not just the absence of a panic. Asserting
+// only "did not crash" would pass on the old behaviour, where the removal was
+// gone before MarkListing ever saw it.
+func TestMarkListingSkipsARemovedRule(t *testing.T) {
+	spec, err := EmitGrammarSpec(&Grammar{
+		Productions: []*Production{
+			{Name: "top", Alts: []Sequence{{term("x")}, {term("y")}}},
+			{Name: "gone", Alts: []Sequence{{term("z")}}},
+		},
+		Remove: []string{"gone"},
+	}, &ConvertOptions{Tag: "demo", Marks: true})
+	if nil != err {
+		t.Fatalf("emit: %v", err)
+	}
+
+	// The removal survived as the nil marker — without this the test would
+	// pass on a spec that simply has no removal in it.
+	entry, present := spec.Rule["gone"]
+	if !present {
+		t.Fatal("the removal entry is missing entirely")
+	}
+	if nil != entry {
+		t.Fatalf("removal entry = %v, want nil", entry)
+	}
+
+	listing := MarkListing(spec)
+	if strings.Contains(listing, "gone") {
+		t.Errorf("a removed rule must not be listed:\n%s", listing)
+	}
+	if !strings.Contains(listing, "top") {
+		t.Errorf("the surviving rule's marks are missing:\n%s", listing)
+	}
+}
+
 // TestRemovalSurvivesSerialisation pins the nil-entry contract.
 //
 // The engine documents a nil Rule entry as a REMOVAL — grammarspec.go: "a nil
