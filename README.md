@@ -3,6 +3,8 @@
 The shared compiler behind the BNF-family grammar front-ends for the
 [tabnas](https://github.com/tabnas/parser) parsing engine.
 
+Docs, guides, the error reference and the playground: **[tabnas.dev](https://tabnas.dev)**.
+
 This package holds **no notation of its own**. It defines an intermediate
 representation — a `Grammar` of `Production`s over `Element`s — and
 compiles that IR into a tabnas `GrammarSpec`. Each front-end parses one
