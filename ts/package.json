@@ -1,6 +1,6 @@
 {
   "name": "@tabnas/bnf",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "main": "dist/bnf.js",
   "type": "commonjs",
   "types": "dist/bnf.d.ts",
