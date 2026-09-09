@@ -2436,7 +2436,23 @@ function emitGrammarSpec(
       if (!regexTokens.has(key)) {
         const name = allocTokenName('rx_' + el.pattern, usedNames)
         regexTokens.set(key, name)
-        matchTokens[name] = new RegExp('^' + anchorable(el.pattern), el.flags)
+        // A character class fires at ANY lookahead position, not only at
+        // the slots the current rule's collated token column names. The
+        // column is path-blind: a `*digit` helper whose two-token prefix is
+        // `#DIGIT #DIGIT` lists only #DIGIT at slot 1, so the letter that
+        // ends the run (`12a`, `01a`) lexed as a fatal #BD there instead of
+        // as the letter class the shorter alternate needs — the engine has
+        // no way to fall through to that alternate once the lexer has
+        // refused the character. Eager is the same opt-out a case-
+        // insensitive literal already takes (emitLiteralToken), and the Go
+        // emitter has marked every range regex eager all along; this is
+        // what makes the two runtimes accept the same strings. The parser
+        // still rejects a token it does not expect at the current slot.
+        const re = new RegExp(
+          '^' + anchorable(el.pattern), el.flags,
+        ) as RegExp & { eager$?: boolean }
+        re.eager$ = true
+        matchTokens[name] = re
       }
     }
   }
