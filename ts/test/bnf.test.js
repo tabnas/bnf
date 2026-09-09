@@ -693,6 +693,35 @@ describe('bnf', () => {
   })
 
 
+  it('marks a character-class token eager, as a case-insensitive literal is', () => {
+    // A class must be able to fire at ANY lookahead slot. The engine gates
+    // match tokens on a per-rule collated column that is path-blind: the
+    // `*d` helper of `x = "0" [ *d t ]` peeks the two-token prefix
+    // `#D #D`, so slot 1 lists only #D, and the letter that ends a digit
+    // run lexed as a fatal bad token there — the engine cannot fall back
+    // to the one-token alternate once the lexer has refused the character.
+    // Go's emitter has always marked range regexes eager; this is what
+    // makes the two runtimes accept the same strings, and it is how the
+    // token serialises (`@~/…/`, the eager sentinel) on both sides.
+    const regex = (pattern) => ({ kind: 'regex', pattern, flags: '' })
+    const spec = emitGrammarSpec({
+      productions: [
+        { name: 'x', alts: [[term('0'), { kind: 'opt', inner: { kind: 'group', alts: [[
+          { kind: 'star', inner: ref('d') }, ref('t')]] } }]] },
+        { name: 'd', alts: [[regex('[\\u0031-\\u0039]')]] },
+        { name: 't', alts: [[regex('[\\u0061-\\u007a]')]] },
+      ],
+    }, { tag: 'demo' })
+    const tokens = Object.values(spec.options.match.token)
+    assert.equal(tokens.length, 2)
+    for (const re of tokens) {
+      assert.ok(re instanceof RegExp)
+      assert.equal(re.eager$, true, `class token ${re} should be eager`)
+    }
+    assert.match(toJsonic(spec.options.match.token), /@~\//)
+    assert.doesNotMatch(toJsonic(spec.options.match.token), /'@\//)
+  })
+
   it('exports a semver-shaped VERSION matching package.json', () => {
     assert.match(VERSION, /^\d+\.\d+\.\d+/)
     assert.equal(VERSION, require('../package.json').version)
