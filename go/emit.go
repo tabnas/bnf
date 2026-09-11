@@ -995,7 +995,10 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		// hang members on. Refuse rather than emit a differently-shaped
 		// value: this path used to return the AST silently.
 		if prod.Value != nil {
-			return &EmitError{Rule: originOf(prod), Message: fmt.Sprintf(
+			// Ranged, like every other annotation refusal. The rewrite
+			// mutates this production in place and keeps its span, so the
+			// author's own line is still locatable from here.
+			return &EmitError{Rule: originOf(prod), Sp: prod.Sp, Message: fmt.Sprintf(
 				diagName()+": rule '%s' has a value annotation, but it compiles "+
 					"to a same-depth repeat, which has no separate parts to "+
 					"name. Annotate the rule the repeat pushes instead.",
@@ -1653,7 +1656,18 @@ func useValueActions(spec map[string]any, actions []string, cfg map[string]any) 
 	if len(actions) == 1 {
 		spec["a"] = actions[0]
 	} else if len(actions) > 1 {
-		spec["a"] = actions
+		// []any, not []string. Everything downstream that reads a
+		// composed `a` type-switches on []any — appendAction, which
+		// attaches a user action or slot to an alt, is the one that
+		// matters — and a []string fell through its default branch and
+		// became a NESTED list: [["@object$","@key$"], userRef] where
+		// TypeScript builds the flat three. This is the first place in the
+		// emitter to compose actions at all, so nothing had exercised it.
+		as := make([]any, len(actions))
+		for i, a := range actions {
+			as[i] = a
+		}
+		spec["a"] = as
 	} else {
 		delete(spec, "a")
 	}

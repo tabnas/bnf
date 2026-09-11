@@ -225,11 +225,7 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 	// still inlined — that is where Paull's substitution is doing real work
 	// (`P = Q`, `Q = P a / b`).
 	cyclic := findLeadingRefCycleMembers(prods)
-	isExemptAlias := func(p *Production) bool {
-		return len(p.Alts) == 1 && len(p.Alts[0]) == 1 &&
-			p.Alts[0][0].Kind == KindRef &&
-			!cyclic[p.Name] && !cyclic[p.Alts[0][0].Name]
-	}
+	isExemptAlias := func(p *Production) bool { return exemptAlias(p, cyclic) }
 
 	// Paull's invariant is that after the inner loop no alternative of A_i
 	// begins with a ref to any A_j, j < i. A single increasing pass gives that

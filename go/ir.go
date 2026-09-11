@@ -423,6 +423,54 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 	}
 	plan := map[string][]bool{}
 
+	// Nothing annotated means nothing to predict, and this is the common
+	// case by a wide margin — every grammar in the conformance corpus.
+	anyValue := false
+	for _, p := range grammar.Productions {
+		if p.Value != nil {
+			anyValue = true
+			break
+		}
+	}
+	if !anyValue {
+		return plan, nil
+	}
+
+	// Which productions keep their leading reference. Computed on the
+	// AUTHORED grammar for the same reason everything else here is.
+	cyclic := findLeadingRefCycleMembers(grammar.Productions)
+
+	// Inlining an annotated rule erases the builders it was going to run,
+	// and that happens wherever the rule is a LEADING reference — not only
+	// where the caller is itself annotated. `top = leaf ","` with an
+	// annotated `leaf` silently handed back an ordinary AST, because
+	// nothing looked at `top` at all: it names no members, so the loop
+	// below skipped it.
+	//
+	// Every alternative, not just the first: Paull's pass substitutes into
+	// any alternative whose leading element is a reference.
+	for _, prod := range grammar.Productions {
+		if exemptAlias(prod, cyclic) {
+			continue
+		}
+		for _, alt := range prod.Alts {
+			if len(alt) == 0 || alt[0].Kind != KindRef {
+				continue
+			}
+			_, hit := resolveLeadingFold(alt[0].Name, byName)
+			if hit == "" {
+				continue
+			}
+			return nil, &EmitError{Rule: prod.Name, Sp: prod.Sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' begins with '%s', and '%s' is folded "+
+					"into '%s' by left-recursion elimination — which erases the "+
+					"value '%s' is annotated to build, so nothing would produce "+
+					"it. Put a literal before '%s', or remove the annotation on "+
+					"'%s'.",
+				prod.Name, alt[0].Name, hit, prod.Name, hit, alt[0].Name, hit)}
+		}
+	}
+
 	for _, prod := range grammar.Productions {
 		v := prod.Value
 		if v == nil {
@@ -516,19 +564,18 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		// boundary the author drew is lost — a trailing literal disappears
 		// from the member, and a second reference silently becomes a second
 		// member. Both are wrong VALUES rather than errors, so refuse.
-		if len(alt) > 0 && alt[0].Kind == KindRef {
-			ok, annotated := resolveLeadingFold(alt[0].Name, byName)
-			if annotated != "" {
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
-					diagName()+": rule '%s' names '%s' as its first member, but "+
-						"'%s' is folded into this rule by left-recursion "+
-						"elimination, which erases the value it would have built "+
-						"— the member would be an internal node rather than the "+
-						"object or array '%s' is annotated to build. Put a "+
-						"literal before '%s'.",
-					prod.Name, alt[0].Name, annotated, annotated, alt[0].Name)}
-			}
-			if !ok {
+		//
+		// Unless this rule is a pure alias, which that pass does not
+		// substitute into at all: `top = child` keeps its reference, so the
+		// chain allocates `top`'s container and assigns `child`'s value
+		// whole. Refusing that was a refusal of a shape that works.
+		//
+		// The annotated half of this — a leading member whose own rule
+		// builds a value — is caught by the scan above, which asks the same
+		// question of every production rather than only of this one. Only
+		// the shape check is left here.
+		if len(alt) > 0 && alt[0].Kind == KindRef && !exemptAlias(prod, cyclic) {
+			if ok, _ := resolveLeadingFold(alt[0].Name, byName); !ok {
 				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' names '%s' as its first member, but "+
 						"'%s' is folded into this rule by left-recursion "+
@@ -552,6 +599,28 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		plan[prod.Name] = flags
 	}
 	return plan, nil
+}
+
+// exemptAlias reports whether eliminateLeftRecursion will leave this
+// production's leading reference ALONE. Paull's pass exempts a *pure
+// alias* — one alternative that is one reference — from being
+// substituted into, unless it or its target is caught in a
+// leading-reference cycle, where the substitution is doing real work.
+// See that pass for the full reasoning.
+//
+// Shared with planValueAnnotations because the annotation checks are a
+// prediction of exactly this: whether a leading reference survives. Two
+// copies of the condition would be two predictions, and the one here
+// would be the wrong one. Mirrors the TS `exemptAlias`.
+func exemptAlias(p *Production, cyclic map[string]bool) bool {
+	if len(p.Alts) != 1 || len(p.Alts[0]) != 1 {
+		return false
+	}
+	el := p.Alts[0][0]
+	if el.Kind != KindRef {
+		return false
+	}
+	return !cyclic[p.Name] && !cyclic[el.Name]
 }
 
 // pushesValue reports whether an element produces a value when it is

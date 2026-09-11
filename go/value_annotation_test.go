@@ -459,7 +459,7 @@ func TestValueAnnotationRefusesAnAnnotatedLeadingMember(t *testing.T) {
 	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
 		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
 	if err == nil ||
-		!strings.Contains(err.Error(), "erases the value it would have built") {
+		!strings.Contains(err.Error(), "erases the value 'a' is annotated to build") {
 		t.Errorf("expected an erased-builder refusal, got %v", err)
 	}
 }
@@ -675,5 +675,121 @@ func TestConcurrentEmitsKeepTheirOwnDiagPrefix(t *testing.T) {
 	close(errs)
 	for e := range errs {
 		t.Error(e)
+	}
+}
+
+// An UNANNOTATED caller erases an annotated rule just as thoroughly, and
+// nothing was looking at it: the planner only ever walked productions
+// that named members. `top = leaf ","` with an annotated `leaf` returned
+// an ordinary AST — `{rule:"top",src:"x,",kids:[]}` — with the requested
+// value nowhere in it.
+func TestValueAnnotationRefusesAnUnannotatedLeadingCaller(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Alts: []Sequence{{refEl("leaf"), termEl(",")}}},
+		{Name: "leaf",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		{Name: "d", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil ||
+		!strings.Contains(err.Error(), "erases the value 'leaf' is annotated to build") {
+		t.Errorf("expected an erased-builder refusal, got %v", err)
+	}
+}
+
+// A pure alias is the one caller Paull's pass does NOT substitute into,
+// so `top = child` keeps its reference and an annotated `child` nests
+// whole. Refusing it was a refusal of a shape that works — and a
+// one-member wrapper is the most natural way to reach for it.
+func TestValueAnnotationNestsThroughAnAnnotatedAlias(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"child"}},
+			Alts:  []Sequence{{refEl("child")}}},
+		{Name: "child",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		{Name: "d", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "7")
+	want := map[string]any{"child": map[string]any{"d": "7"}}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// The tail-repeat refusal is ranged like the rest: the rewrite mutates
+// the production in place and keeps its span.
+func TestValueAnnotationTailRepeatRefusalCarriesTheSpan(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Alts: []Sequence{{refEl("add")}}},
+		{Name: "add",
+			Value: &ValueAnnotation{Kind: "array"},
+			Sp:    &SrcSpan{S: 5, E: 25},
+			// `add = [0-9]+ [ "+" add ]` — the prefix and the separator have
+			// to be BARE terminals for this to be read as a tail repeat; a
+			// `1*DIGIT` repetition is not one.
+			Alts: []Sequence{{rxEl("[0-9]+", ""),
+				&Element{Kind: KindOpt, Inner: groupEl(Sequence{termEl("+"), refEl("add")})}}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected an EmitError, got %v", err)
+	}
+	if !strings.Contains(ee.Message, "same-depth repeat") {
+		t.Fatalf("expected the tail-repeat refusal, got %q", ee.Message)
+	}
+	if ee.Sp == nil || ee.Sp.S != 5 || ee.Sp.E != 25 {
+		t.Errorf("span: got %#v, want S=5 E=25", ee.Sp)
+	}
+}
+
+// A composed `a` must stay FLAT when a user action or slot is attached
+// to it. The builders were stored as []string, which appendAction's type
+// switch did not recognise, so attaching produced the nested
+// [["@object$","@key$"], ref] where TypeScript produces the flat three —
+// and the engine cannot resolve a list inside a list. This is the first
+// place in the emitter to compose actions at all, so nothing had
+// exercised it.
+func TestValueAnnotationComposedActionStaysFlat(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"a", "b"}},
+			Alts:  []Sequence{{refEl("a"), termEl("."), refEl("b")}}},
+		{Name: "a", Alts: []Sequence{{digitsEl()}}},
+		{Name: "b", Alts: []Sequence{{digitsEl()}}},
+	}
+	spec, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true, Marks: true})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	open, ok := spec.Rule["top"].Open.([]*tabnas.GrammarAltSpec)
+	if !ok || len(open) == 0 {
+		t.Fatalf("top open is %T", spec.Rule["top"].Open)
+	}
+	mark, _ := open[0].U["m$"].(string)
+	ref := "@top:o:" + mark
+	if err := AttachActionSlots(spec, []string{ref}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	got, _ := json.Marshal(open[0].A)
+	want := `["@object$","@key$","` + ref + `"]`
+	if string(got) != want {
+		t.Errorf("composed action: got %s, want %s", got, want)
+	}
+}
+
+// appendAction itself must flatten a []string, not only a []any: a
+// composed `a` reaches it from a hand-written spec or a JSON round-trip
+// as readily as from this package.
+func TestAppendActionFlattensAStringSlice(t *testing.T) {
+	got, _ := json.Marshal(appendAction([]string{"x", "y"}, "z"))
+	if string(got) != `["x","y","z"]` {
+		t.Errorf("got %s, want [x y z]", got)
 	}
 }

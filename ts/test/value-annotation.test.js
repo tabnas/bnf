@@ -26,8 +26,8 @@ const term = (literal) => ({ kind: 'term', literal })
 const digits = () => ({ kind: 'plus', inner: { kind: 'regex', pattern: '[0-9]', flags: '' } })
 const letters = () => ({ kind: 'plus', inner: { kind: 'regex', pattern: '[a-z]', flags: '' } })
 
-const emit = (productions, start) =>
-  emitGrammarSpec({ productions }, { tag: 'tst', start, builtins: true })
+const emit = (productions, start, opts) =>
+  emitGrammarSpec({ productions }, { tag: 'tst', start, builtins: true, ...opts })
 
 const build = (productions, start, src) => {
   const j = new Tabnas()
@@ -296,7 +296,9 @@ describe('value annotations', () => {
   it('refuses a leading member whose own rule builds a value', () => {
     // Inlining erases that rule's builders, so the member held an
     // internal tree node — `{src:'1',kids:[]}` — where the author had
-    // asked for the object `a` is annotated to build.
+    // asked for the object `a` is annotated to build. The refusal comes
+    // from the whole-grammar scan, which asks this of every caller, not
+    // only of an annotated one.
     const prods = [
       { name: 'top', value: { kind: 'object', members: ['a', 'c'] },
         alts: [[ref('a'), term(','), ref('c')]] },
@@ -305,7 +307,8 @@ describe('value annotations', () => {
       { name: 'x', alts: [[digits()]] },
       { name: 'c', alts: [[digits()]] },
     ]
-    assert.throws(() => emit(prods, 'top'), /erases the value it would have built/)
+    assert.throws(() => emit(prods, 'top'),
+      /erases the value 'a' is annotated to build/)
   })
 
   it('nests a leading member once a literal guards it', () => {
@@ -409,5 +412,72 @@ describe('value annotations', () => {
       assert.equal(e.rule, 'top')
       return true
     })
+  })
+
+  // ---- Who gets inlined, and who does not ------------------------
+
+  it('refuses an UNANNOTATED caller that inlines an annotated rule', () => {
+    // The erasure does not need an annotated caller — it needs a
+    // LEADING reference. Nothing was looking at `top`, because the
+    // planner only ever walked productions that named members, so this
+    // returned an ordinary AST with the requested value nowhere in it.
+    const prods = [
+      { name: 'top', alts: [[ref('leaf'), term(',')]] },
+      { name: 'leaf', value: { kind: 'object', members: ['d'] },
+        alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'),
+      /erases the value 'leaf' is annotated to build/)
+  })
+
+  it('nests through an annotated pure alias', () => {
+    // A pure alias is the one caller left-recursion elimination does NOT
+    // substitute into, so `top = child` keeps its reference and an
+    // annotated `child` nests whole. Refusing it was a refusal of a
+    // shape that works — and a one-member wrapper is the most natural
+    // way to reach for it.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['child'] },
+        alts: [[ref('child')]] },
+      { name: 'child', value: { kind: 'object', members: ['d'] },
+        alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '7'), { child: { d: '7' } })
+  })
+
+  it('refuses an annotation on a same-depth repeat, with its span', () => {
+    // `add = [0-9]+ [ "+" add ]` compiles to a close-phase loop, so the
+    // parts the annotation named are no longer separate pushes. The
+    // prefix and separator have to be BARE terminals for the rewrite to
+    // fire — `1*DIGIT` is a repetition and is not one.
+    const rx = { kind: 'regex', pattern: '[0-9]+', flags: '' }
+    const sp = { s: 5, e: 25 }
+    const prods = [
+      { name: 'top', alts: [[ref('add')]] },
+      { name: 'add', value: { kind: 'array' }, sp,
+        alts: [[rx, { kind: 'opt', inner: { kind: 'group',
+          alts: [[term('+'), ref('add')]] } }]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), (e) => {
+      assert.match(e.message, /same-depth repeat/)
+      assert.deepEqual(e.sp, sp, 'ranged like every other annotation refusal')
+      return true
+    })
+  })
+
+  it('keeps a composed action flat when a slot is attached', () => {
+    // The canonical shape the Go port has to match: attaching a user
+    // action or slot to an alt that already carries value builders must
+    // extend the list, not nest inside it. Go stored the builders as
+    // []string, which its `appendAction` type switch did not recognise,
+    // so it produced [["@object$","@key$"], ref]. Pinned on both sides.
+    const { attachActionSlots } = require('..')
+    const spec = emit(TRIPLE, 'top', { marks: true })
+    const mark = spec.rule.top.open[0].m
+    const slot = '@top:o:' + mark
+    attachActionSlots(spec, [slot])
+    assert.deepEqual(spec.rule.top.open[0].a, ['@object$', '@key$', slot])
   })
 })

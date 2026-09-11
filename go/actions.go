@@ -215,6 +215,18 @@ func appendAction(existing any, added string) any {
 	switch e := existing.(type) {
 	case []any:
 		return append(append([]any{}, e...), added)
+	case []string:
+		// A composed `a` reaches here as []string from a hand-written
+		// spec or a JSON round-trip as readily as from this package, and
+		// falling through to the default below wrapped the whole list as
+		// ONE element — [["x","y"], added] instead of ["x","y",added].
+		// The emitter no longer produces []string, but nothing stops a
+		// caller from handing one in.
+		out := make([]any, 0, len(e)+1)
+		for _, v := range e {
+			out = append(out, v)
+		}
+		return append(out, added)
 	default:
 		return []any{existing, added}
 	}

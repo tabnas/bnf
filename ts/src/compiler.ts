@@ -286,6 +286,40 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
   const byName = new Map(grammar.productions.map((p) => [p.name, p]))
   const plan = new Map<string, boolean[]>()
 
+  // Nothing annotated means nothing to predict, and this is the common
+  // case by a wide margin — every grammar in the conformance corpus.
+  if (!grammar.productions.some((p) => null != p.value)) return plan
+
+  // Which productions keep their leading reference. Computed on the
+  // AUTHORED grammar for the same reason everything else here is.
+  const cyclic = findLeadingRefCycleMembers(grammar.productions)
+
+  // Inlining an annotated rule erases the builders it was going to run,
+  // and that happens wherever the rule is a LEADING reference — not only
+  // where the caller is itself annotated. `top = leaf ","` with an
+  // annotated `leaf` silently handed back an ordinary AST, because
+  // nothing looked at `top` at all: it names no members, so the loop
+  // below skipped it.
+  //
+  // Every alternative, not just the first: Paull's pass substitutes into
+  // any alternative whose leading element is a reference.
+  for (const prod of grammar.productions) {
+    if (exemptAlias(prod, cyclic)) continue
+    for (const alt of prod.alts) {
+      const first = alt[0]
+      if (null == first || 'ref' !== first.kind) continue
+      const hit = resolveLeadingFold(first.name, byName).annotated
+      if (null == hit) continue
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' begins with '${first.name}', ` +
+        `and '${hit}' is folded into '${prod.name}' by left-recursion ` +
+        `elimination — which erases the value '${hit}' is annotated to ` +
+        `build, so nothing would produce it. Put a literal before ` +
+        `'${first.name}', or remove the annotation on '${hit}'.`,
+        { rule: prod.name, sp: prod.sp })
+    }
+  }
+
   for (const prod of grammar.productions) {
     const v = prod.value
     if (null == v) continue
@@ -381,20 +415,21 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
     // boundary the author drew is lost — a trailing literal disappears
     // from the member, and a second reference silently becomes a second
     // member. Both are wrong VALUES rather than errors, so refuse here.
+    //
+    // Unless this rule is a pure alias, which that pass does not
+    // substitute into at all: `top = child` keeps its reference, so the
+    // chain allocates `top`'s container and assigns `child`'s value
+    // whole. Refusing that was a refusal of a shape that works — and
+    // the annotated-alias-of-an-annotated-rule is the most natural way
+    // to write a one-member wrapper.
+    //
+    // The annotated half of this — a leading member whose own rule
+    // builds a value — is caught by the scan above, which asks the same
+    // question of every production rather than only of this one. Only
+    // the shape check is left here.
     const first = alt[0]
-    if (null != first && 'ref' === first.kind) {
-      const fold = resolveLeadingFold(first.name, byName)
-      if (null != fold.annotated) {
-        throw new EmitError(
-          `${diagName()}: rule '${prod.name}' names '${first.name}' as its ` +
-          `first member, but '${fold.annotated}' is folded into this rule ` +
-          `by left-recursion elimination, which erases the value it would ` +
-          `have built — the member would be an internal node rather than ` +
-          `the object or array '${fold.annotated}' is annotated to build. ` +
-          `Put a literal before '${first.name}'.`,
-          at)
-      }
-      if (!fold.ok) {
+    if (null != first && 'ref' === first.kind && !exemptAlias(prod, cyclic)) {
+      if (!resolveLeadingFold(first.name, byName).ok) {
         throw new EmitError(
           `${diagName()}: rule '${prod.name}' names '${first.name}' as its ` +
           `first member, but '${first.name}' is folded into this rule by ` +
@@ -410,6 +445,24 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
       'ref' === el.kind && null != byName.get(el.name)?.value))
   }
   return plan
+}
+
+
+// Whether `eliminateLeftRecursion` will leave this production's leading
+// reference ALONE. Paull's pass exempts a *pure alias* — one alternative
+// that is one reference — from being substituted into, unless it or its
+// target is caught in a leading-reference cycle, where the substitution
+// is doing real work. See that pass for the full reasoning.
+//
+// Shared with `planValueAnnotations` because the annotation checks are a
+// prediction of exactly this: whether a leading reference survives. Two
+// copies of the condition would be two predictions, and the one here
+// would be the wrong one.
+function exemptAlias(p: Production, cyclic: Set<string>): boolean {
+  if (1 !== p.alts.length || 1 !== p.alts[0].length) return false
+  const el = p.alts[0][0]
+  if ('ref' !== el.kind) return false
+  return !cyclic.has(p.name) && !cyclic.has(el.name)
 }
 
 
@@ -656,12 +709,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
   // leading-reference cycle are still inlined — that is where Paull's
   // substitution is doing real work (`P = Q`, `Q = P a / b`).
   const cyclic = findLeadingRefCycleMembers(prods)
-  const isExemptAlias = (p: Production): boolean =>
-    p.alts.length === 1 &&
-    p.alts[0].length === 1 &&
-    p.alts[0][0].kind === 'ref' &&
-    !cyclic.has(p.name) &&
-    !cyclic.has((p.alts[0][0] as { name: string }).name)
+  const isExemptAlias = (p: Production): boolean => exemptAlias(p, cyclic)
 
   for (let i = 0; i < prods.length; i++) {
     // For each earlier production A_j, inline any alternative of
@@ -3689,7 +3737,10 @@ function emitProduction(
         `${diagName()}: rule '${originOf(prod)}' has a value annotation, ` +
         `but it compiles to a same-depth repeat, which has no separate ` +
         `parts to name. Annotate the rule the repeat pushes instead.`,
-        { rule: originOf(prod) })
+        // Ranged, like every other annotation refusal. The rewrite
+        // mutates this production in place and keeps its span, so the
+        // author's own line is still locatable from here.
+        { rule: originOf(prod), sp: prod.sp })
     }
     emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
     return
