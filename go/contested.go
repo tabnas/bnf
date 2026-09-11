@@ -35,6 +35,12 @@ import (
 type contestCtx struct {
 	fixedTokens map[string]*string        // token name -> literal
 	matchTokens map[string]*regexp.Regexp // token name -> matcher
+	// setRanges is the coverage of a class that became a token SET over
+	// atoms, so it appears in neither token table. Without it the
+	// contest checks read "we do not know what this covers" and go
+	// conservative for every overlapping class in the grammar — which is
+	// precisely the set of classes the guards exist for.
+	setRanges map[string][]charRange
 
 	rangeCache   map[string][]charRange
 	rangeKnown   map[string]bool
@@ -42,10 +48,12 @@ type contestCtx struct {
 }
 
 func newContestCtx(fixedTokens map[string]*string,
-	matchTokens map[string]*regexp.Regexp) *contestCtx {
+	matchTokens map[string]*regexp.Regexp,
+	setRanges map[string][]charRange) *contestCtx {
 	return &contestCtx{
 		fixedTokens:  fixedTokens,
 		matchTokens:  matchTokens,
+		setRanges:    setRanges,
 		rangeCache:   map[string][]charRange{},
 		rangeKnown:   map[string]bool{},
 		overlapCache: map[string]bool{},
@@ -64,6 +72,13 @@ func (c *contestCtx) tokenRangesOf(tok string) []charRange {
 			return nil
 		}
 		return c.rangeCache[tok]
+	}
+
+	if spanned, ok := c.setRanges[tok]; ok && spanned != nil {
+		r := normalizeRanges(spanned)
+		c.rangeCache[tok] = r
+		c.rangeKnown[tok] = true
+		return r
 	}
 
 	var r []charRange
@@ -617,4 +632,132 @@ func specificityPermute(entries []dispatchEntry, cc *contestCtx,
 	for k, slot := range idxs {
 		entries[slot] = picked[k]
 	}
+}
+
+// classAnalysis records what every character class in the grammar
+// covers, which of them contest a position with another, and the shared
+// partition the contested ones are laid over.
+//
+// A class whose coverage overlaps no other class keeps exactly what it
+// had before this existed: one match token, named after its pattern.
+// That is the common case — of the 75 .abnf files in the conformance
+// corpus, 44 have no overlapping classes at all — and keeping it
+// byte-identical is what stops token tables and the generated rule names
+// derived from them moving for grammars that never had the problem.
+//
+// A class whose pattern is not a plain character coverage
+// (patternCharRanges returns nil) cannot be partitioned, so it never
+// counts as contested and is left alone.
+type classAnalysis struct {
+	coverage  map[string][]charRange
+	contested map[string]bool
+	atoms     []charRange
+	// atomTokens maps an atom span to the token minted for it, filled in
+	// as classes are allocated so an atom lands at the position of the
+	// first class that needs it.
+	atomTokens map[string]string
+}
+
+func newClassAnalysis(terminals []*Element) *classAnalysis {
+	coverage := map[string][]charRange{}
+	var order []string
+	for _, el := range terminals {
+		if el.Kind != KindRegex {
+			continue
+		}
+		key := regexKey(el)
+		if _, seen := coverage[key]; seen {
+			continue
+		}
+		r := patternCharRanges(el.Pattern)
+		// A case-insensitive matcher covers both cases of every letter it
+		// names, and the pattern text spells only one of them. Fold here
+		// and emit the atoms WITHOUT the flag, so the two descriptions of
+		// the same coverage cannot disagree.
+		if r != nil && strings.Contains(el.Flags, "i") {
+			r = foldCaseRanges(r)
+		}
+		if r == nil {
+			continue
+		}
+		coverage[key] = normalizeRanges(r)
+		order = append(order, key)
+	}
+
+	contested := map[string]bool{}
+	for _, key := range order {
+		for _, other := range order {
+			if other != key && charRangesOverlap(coverage[key], coverage[other]) {
+				contested[key] = true
+				break
+			}
+		}
+	}
+
+	var atoms []charRange
+	if len(contested) > 0 {
+		var coverages [][]charRange
+		// Walked in allocation order, not map order, so the partition is
+		// identical between runs.
+		for _, key := range order {
+			if contested[key] {
+				coverages = append(coverages, coverage[key])
+			}
+		}
+		atoms = partitionRanges(coverages)
+	}
+
+	return &classAnalysis{
+		coverage:   coverage,
+		contested:  contested,
+		atoms:      atoms,
+		atomTokens: map[string]string{},
+	}
+}
+
+// altHeadSharesToken reports whether two alternates can be handed the
+// SAME token, so that choosing between them on one token is not a
+// choice at all.
+//
+// Deliberately narrower than altHeadContested, which asks whether two
+// heads can claim the same CHARACTER — the right question for the
+// lexer, and the wrong one here. `greeting = "hello" name / "hi" name`
+// has two heads sharing an `h`, but `#HELLO` and `#HI` are distinct
+// tokens and the dispatch was never in doubt; asking the character
+// question doubled that rule's alternates for nothing.
+//
+// Two DIFFERENT class tokens can still be handed the same token,
+// because a class that spans several atoms is a set: `%x30-39` and
+// `%x31-39` share three of the four atoms they are built from. That is
+// the case this exists for, so overlap still counts when both sides are
+// classes.
+func altHeadSharesToken(alt Sequence, all []Sequence,
+	literals, regexTokens map[string]string,
+	firstSets map[string]map[string]bool, nullable map[string]bool,
+	classToks map[string]bool, cc *contestCtx) bool {
+
+	mine := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
+	if mine == nil {
+		return false
+	}
+	for _, other := range all {
+		if len(other) == 0 || seqEqual(other, alt) {
+			continue
+		}
+		theirs := firstOfAlt(other, literals, regexTokens, firstSets, nullable)
+		if theirs == nil {
+			continue
+		}
+		for t := range mine {
+			for u := range theirs {
+				if t == u {
+					return true
+				}
+				if classToks[t] && classToks[u] && cc.tokensOverlap(t, u) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
