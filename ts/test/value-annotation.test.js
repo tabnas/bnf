@@ -713,4 +713,38 @@ describe('value annotations', () => {
     assert.deepEqual(Object.keys(out), ['__proto__', 'b'])
     assert.deepEqual(out['__proto__'], { d: '1' })
   })
+
+  it('left-factors around a value rule only when factoring happens', () => {
+    // The refusal must fire where factoring is COMMITTED, not where it is
+    // speculated. `inlineHeadRef` is called for every later ref-headed
+    // alternative, and the run can still be abandoned afterwards — the
+    // heads may not match, or the prefix may be short enough that
+    // dispatch lookahead already separates the alternatives.
+    //
+    // Here the heads differ (`1*ALPHA` against `1*DIGIT`), so nothing is
+    // factored and the annotated rule survives intact.
+    const prods = [
+      { name: 'top', alts: [
+        [{ kind: 'group', alts: [[letters(), term('x')]] }],
+        [{ kind: 'group', alts: [[ref('leaf'), term('y')]] }],
+      ] },
+      { name: 'leaf', value: { kind: 'object', members: ['w'] },
+        alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '12y').kids, [{ w: '12' }])
+  })
+
+  it('refuses a probe rewrite whose disambiguator is a token', () => {
+    // `[ "a" NR ] "a"` — `NR` normalises to the built-in token `#NR`, and
+    // the probe predicate accepts a token disambiguator as readily as a
+    // literal one. Go accepted only `term`/`regex`, so this grammar was
+    // probe-rewritten here and not there: one port refused it and the
+    // other built a value from a boundary that had moved. Pinned in both.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'opt', inner: { kind: 'group',
+          alts: [[term('a'), { kind: 'token', name: '#NR' }]] } }, term('a')]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /one dispatch helper/)
+  })
 })

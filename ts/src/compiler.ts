@@ -1535,6 +1535,9 @@ function factorOnce(
     // cannot change which alternative wins any input.
     const members: number[] = [i]
     const memberViews = new Map<number, Sequence>([[i, views[i]]])
+    // Members whose view came from inlining a rule that builds a value.
+    // Collected here and refused only once factoring is committed below.
+    const annotatedInlines = new Map<number, string>()
     let headRanges: Array<[number, number]> | null | undefined
     for (let j = i + 1; j < alts.length; j++) {
       const v = views[j]
@@ -1546,7 +1549,10 @@ function factorOnce(
       const inlined = 0 < v.length ? inlineHeadRef(v, headEl, grammar) : null
       if (null != inlined) {
         members.push(j)
-        memberViews.set(j, inlined)
+        memberViews.set(j, inlined.seq)
+        if (null != inlined.annotated) {
+          annotatedInlines.set(j, inlined.annotated)
+        }
         continue
       }
       // Not a member — skippable only if provably disjoint.
@@ -1573,6 +1579,24 @@ function factorOnce(
     if (!prefixBeyondLookahead(prefix)) {
       // Dispatch lookahead already separates these — leave them be.
       continue
+    }
+    // Factoring is now committed for this run, so an annotated rule that
+    // was inlined to form it really is about to be dissolved. Refusing
+    // any earlier would have refused grammars that are never factored at
+    // all — heads that do not match, or a prefix the lookahead already
+    // separates.
+    for (const m of members) {
+      const name = annotatedInlines.get(m)
+      if (null == name) continue
+      const target = grammar.productions.find((p) => p.name === name)
+      throw new EmitError(
+        `${diagName()}: rule '${name}' builds a value, but it is the ` +
+        `shared prefix of two alternatives of '${prodName}' that have to ` +
+        `be left-factored — factoring inlines it, which would erase the ` +
+        `value it is annotated to build. Give the alternatives leading ` +
+        `tokens that tell them apart, or move the annotation to a rule ` +
+        `that is not a shared prefix.`,
+        { rule: name, sp: target?.sp })
     }
     // Structurally duplicate tails collapse — a duplicated alternative
     // can never win over its first copy under first-match-wins.
@@ -1633,7 +1657,7 @@ function inlineHeadRef(
   v: Sequence,
   headEl: Element,
   grammar: Grammar,
-): Sequence | null {
+): { seq: Sequence; annotated: string | null } | null {
   const h = v[0]
   if ('ref' !== h.kind) return null
   const target = grammar.productions.find((p) => p.name === h.name)
@@ -1641,6 +1665,8 @@ function inlineHeadRef(
   if (target.probeDispatch || target.probeHelper || target.tailRepeat) {
     return null
   }
+  const body = unwrapAlt(target.alts[0])
+  if (0 === body.length || !elemEqual(body[0], headEl)) return null
   // A rule that BUILDS A VALUE cannot be inlined: expanding it dissolves
   // the rule, so the caller can no longer invoke its builders and the
   // annotated value silently disappears. This path reaches refs the
@@ -1649,26 +1675,18 @@ function inlineHeadRef(
   // leading `ref` — while this one reads the UNWRAPPED alt and so sees
   // inside a single-alternative group.
   //
-  // Refusing rather than declining, because declining is not neutral:
-  // these alternatives are being factored precisely because their shared
-  // prefix is longer than the dispatch lookahead, so leaving them
-  // unfactored leaves a grammar that cannot dispatch and fails at PARSE
-  // time with "unexpected character" — a runtime error naming nothing
-  // the author did. The conflict is genuine (factoring must dissolve the
-  // rule; the annotation needs it kept), so it is worth saying out loud.
-  if (null != target.value) {
-    throw new EmitError(
-      `${diagName()}: rule '${target.name}' builds a value, but it is the ` +
-      `shared prefix of two alternatives that have to be left-factored — ` +
-      `factoring inlines it, which would erase the value it is annotated ` +
-      `to build. Give the alternatives leading tokens that tell them ` +
-      `apart, or move the annotation to a rule that is not a shared ` +
-      `prefix.`,
-      { rule: target.name, sp: target.sp })
+  // REPORTED, not thrown, and not declined either. Declining is not
+  // neutral: these alternatives are factored precisely when their shared
+  // prefix outruns the dispatch lookahead, so leaving them unfactored
+  // gives a grammar that cannot dispatch and fails at PARSE time. But
+  // throwing here is premature — this function is called speculatively
+  // for every later ref-headed alternative, and the caller can still
+  // abandon the run (`prefixBeyondLookahead`). The caller raises it at
+  // the point factoring is actually committed.
+  return {
+    seq: [...body, ...v.slice(1)],
+    annotated: null != target.value ? target.name : null,
   }
-  const body = unwrapAlt(target.alts[0])
-  if (0 === body.length || !elemEqual(body[0], headEl)) return null
-  return [...body, ...v.slice(1)]
 }
 
 

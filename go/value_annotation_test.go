@@ -1079,3 +1079,50 @@ func TestValueAnnotationAllowsProtoAsAMemberName(t *testing.T) {
 		t.Errorf("got %#v, want %#v", got, want)
 	}
 }
+
+// The refusal must fire where factoring is COMMITTED, not where it is
+// speculated. inlineHeadRef is called for every later ref-headed
+// alternative, and the run can still be abandoned afterwards — the heads
+// may not match, or the prefix may be short enough that dispatch
+// lookahead already separates the alternatives.
+//
+// Here the heads differ (1*ALPHA against 1*DIGIT), so nothing is
+// factored and the annotated rule survives intact.
+func TestValueAnnotationFactorsOnlyWhenFactoringHappens(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Alts: []Sequence{
+			{groupEl(Sequence{lettersEl(), termEl("x")})},
+			{groupEl(Sequence{refEl("leaf"), termEl("y")})},
+		}},
+		{Name: "leaf",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"w"}},
+			Alts:  []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "12y")
+	want := map[string]any{"rule": "top", "src": "y",
+		"kids": []any{map[string]any{"w": "12"}}}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// `[ "a" NR ] "a"` — NR normalises to the built-in token #NR, and the
+// probe predicate accepts a token disambiguator as readily as a literal
+// one. This port accepted only KindTerm/KindRegex, so the grammar was
+// probe-rewritten in TypeScript and not here: one port refused it and
+// the other built a value from a boundary that had moved.
+func TestValueAnnotationRefusesAProbeWithATokenDisambiguator(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{
+				&Element{Kind: KindOpt, Inner: groupEl(Sequence{
+					termEl("a"), {Kind: KindToken, Name: "#NR"}})},
+				termEl("a"),
+			}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "one dispatch helper") {
+		t.Errorf("expected the probe refusal, got %v", err)
+	}
+}

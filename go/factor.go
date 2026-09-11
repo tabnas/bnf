@@ -358,6 +358,9 @@ func factorOnce(prodName, prodOrigin string, alts []Sequence,
 		// alternative wins any input.
 		members := []int{i}
 		memberViews := map[int]Sequence{i: views[i]}
+		// Members whose view came from inlining a rule that builds a value.
+		// Collected here and refused only once factoring is committed below.
+		annotatedInlines := map[int]string{}
 		var headRanges []charRange
 		headRangesDone := false
 
@@ -369,9 +372,12 @@ func factorOnce(prodName, prodOrigin string, alts []Sequence,
 				continue
 			}
 			if len(v) > 0 {
-				if inlined := inlineHeadRef(v, headEl, grammar); inlined != nil {
+				if inlined, annotated := inlineHeadRef(v, headEl, grammar); inlined != nil {
 					members = append(members, j)
 					memberViews[j] = inlined
+					if annotated != "" {
+						annotatedInlines[j] = annotated
+					}
 					continue
 				}
 			}
@@ -418,6 +424,29 @@ func factorOnce(prodName, prodOrigin string, alts []Sequence,
 		if float64(lookaheadKSpan) >= seqTokenSpan(prefix, grammar, map[string]bool{}) {
 			// Dispatch lookahead already separates these — leave them be.
 			continue
+		}
+		// Factoring is now committed for this run, so an annotated rule
+		// that was inlined to form it really is about to be dissolved.
+		// Refusing any earlier would have refused grammars that are never
+		// factored at all — heads that do not match, or a prefix the
+		// lookahead already separates.
+		for _, m := range members {
+			name, ok := annotatedInlines[m]
+			if !ok {
+				continue
+			}
+			var msp *SrcSpan
+			if t := findProd(grammar, name); t != nil {
+				msp = t.Sp
+			}
+			panic(&EmitError{Rule: name, Sp: msp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' builds a value, but it is the shared "+
+					"prefix of two alternatives of '%s' that have to be "+
+					"left-factored — factoring inlines it, which would erase "+
+					"the value it is annotated to build. Give the alternatives "+
+					"leading tokens that tell them apart, or move the "+
+					"annotation to a rule that is not a shared prefix.",
+				name, prodName)})
 		}
 
 		// Structurally duplicate tails collapse — a duplicated
@@ -519,17 +548,21 @@ func factorOnce(prodName, prodOrigin string, alts []Sequence,
 // production whose body's first element equals headEl, return `v` with
 // the ref replaced by that body. One level deep, and never through the
 // synthetic production kinds. Returns nil when the shape does not apply.
-func inlineHeadRef(v Sequence, headEl *Element, grammar *Grammar) Sequence {
+func inlineHeadRef(v Sequence, headEl *Element, grammar *Grammar) (Sequence, string) {
 	h := v[0]
 	if h.Kind != KindRef {
-		return nil
+		return nil, ""
 	}
 	target := findProd(grammar, h.Name)
 	if target == nil || len(target.Alts) != 1 {
-		return nil
+		return nil, ""
 	}
 	if target.ProbeDisp != nil || target.ProbeHelper != nil || target.TailRepeat != nil {
-		return nil
+		return nil, ""
+	}
+	body := unwrapAlt(target.Alts[0])
+	if len(body) == 0 || !elemEqual(body[0], headEl) {
+		return nil, ""
 	}
 	// A rule that BUILDS A VALUE cannot be inlined: expanding it dissolves
 	// the rule, so the caller can no longer invoke its builders and the
@@ -539,24 +572,16 @@ func inlineHeadRef(v Sequence, headEl *Element, grammar *Grammar) Sequence {
 	// leading ref — while this one reads the UNWRAPPED alt and so sees
 	// inside a single-alternative group.
 	//
-	// Refusing rather than declining, because declining is not neutral:
-	// these alternatives are being factored precisely because their shared
-	// prefix is longer than the dispatch lookahead, so leaving them
-	// unfactored leaves a grammar that cannot dispatch and fails at PARSE
-	// time with "unexpected character" — a runtime error naming nothing
-	// the author did.
+	// REPORTED, not panicked, and not declined either. Declining is not
+	// neutral: these alternatives are factored precisely when their shared
+	// prefix outruns the dispatch lookahead, so leaving them unfactored
+	// gives a grammar that cannot dispatch and fails at PARSE time. But
+	// refusing here is premature — this function is called speculatively
+	// for every later ref-headed alternative, and the caller can still
+	// abandon the run. The caller raises it where factoring is committed.
+	annotated := ""
 	if target.Value != nil {
-		panic(&EmitError{Rule: target.Name, Sp: target.Sp, Message: fmt.Sprintf(
-			diagName()+": rule '%s' builds a value, but it is the shared "+
-				"prefix of two alternatives that have to be left-factored — "+
-				"factoring inlines it, which would erase the value it is "+
-				"annotated to build. Give the alternatives leading tokens that "+
-				"tell them apart, or move the annotation to a rule that is not "+
-				"a shared prefix.", target.Name)})
+		annotated = target.Name
 	}
-	body := unwrapAlt(target.Alts[0])
-	if len(body) == 0 || !elemEqual(body[0], headEl) {
-		return nil
-	}
-	return append(append(Sequence{}, body...), v[1:]...)
+	return append(append(Sequence{}, body...), v[1:]...), annotated
 }

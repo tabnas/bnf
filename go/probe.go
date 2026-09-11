@@ -28,7 +28,13 @@ func isProbeableOpt(el *Element) (Sequence, *Element, bool) {
 		return nil, nil, false
 	}
 	last := seq[len(seq)-1]
-	if last.Kind != KindTerm && last.Kind != KindRegex {
+	// KindToken as well as the two terminal spellings. TypeScript accepts
+	// all three, so a disambiguator that `normalizeBuiltinTokens` turned
+	// into `#NR` was probe-rewritten there and not here — a divergence
+	// that only became visible once the rewrite gained a refusal: the same
+	// annotated grammar was rejected by one port and accepted by the
+	// other.
+	if last.Kind != KindTerm && last.Kind != KindRegex && last.Kind != KindToken {
 		return nil, nil, false
 	}
 	xSeq := append(Sequence{}, seq[:len(seq)-1]...)
