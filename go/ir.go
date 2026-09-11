@@ -232,6 +232,37 @@ type Production struct {
 	// that forgets it silently drops the span. The passes that copy with
 	// `cp := *p` get it for free. Mirrors the TS `Production.sp`.
 	Sp *SrcSpan
+
+	// Value is what this production BUILDS, when a front-end says it
+	// builds something, rather than the AST node the tree builders
+	// produce by default.
+	//
+	// Notation-neutral by construction: it says WHAT to build, never how
+	// the notation spelled it. ABNF carries it in a trailing comment, but
+	// nothing here knows that, and a front-end for another notation can
+	// set the same field from whatever syntax it likes.
+	//
+	// CAUTION applies here exactly as it does to Sp above, and it is not
+	// hypothetical: the TypeScript side of this shipped with SIX passes
+	// silently dropping the annotation, so a rule that declared a value
+	// quietly built a tree instead. Mirrors the TS `Production.value`.
+	Value *ValueAnnotation
+}
+
+// ValueAnnotation is what a production builds when it carries one.
+//
+// Members names one member per PUSHING segment of the alternative, in
+// order — the parts the author named. The names matter because the
+// emitter cannot recover them from the chain: a production's leading
+// reference is INLINED by the left-recursion pass, so the first member
+// pushes a generated helper rather than the rule the author wrote. The
+// annotation naming its own parts is what makes this independent of that
+// rewrite. Mirrors the TS `ValueAnnotation`.
+//
+// An array has no member names: every pushing segment is an element.
+type ValueAnnotation struct {
+	Kind    string // "object" or "array"
+	Members []string
 }
 
 // originOf is the author-written production a (possibly synthesised)
@@ -239,6 +270,29 @@ type Production struct {
 // author-written one is its own origin. Always read Origin through this —
 // a bare `p.Origin` is empty for exactly the productions whose name is
 // already the answer. Mirrors the TS `originOf`.
+// buildsOwnValue reports which members NEST: a member whose own
+// production is annotated builds a value of its own, so it is assigned
+// whole rather than resolved to its source text.
+//
+// Built lazily rather than once per grammar because it is only ever
+// consulted for the members of an annotated production, which are rare;
+// a grammar with no annotations never pays for it. Mirrors the TS
+// `buildsOwnValue`.
+func buildsOwnValue(grammar *Grammar) func(string) bool {
+	var names map[string]bool
+	return func(memberName string) bool {
+		if names == nil {
+			names = map[string]bool{}
+			for _, p := range grammar.Productions {
+				if p.Value != nil {
+					names[originOf(p)] = true
+				}
+			}
+		}
+		return names[memberName]
+	}
+}
+
 func originOf(prod *Production) string {
 	if prod.Origin == "" {
 		return prod.Name

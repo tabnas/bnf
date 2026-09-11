@@ -196,7 +196,7 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 		}
 		copies[i] = &Production{
 			Name: p.Name, Alts: alts, NodeKind: p.NodeKind, Origin: p.Origin,
-			Sp: p.Sp}
+			Sp: p.Sp, Value: p.Value}
 	}
 	// Order productions so that rules referenced at a leading position are
 	// processed before the rules that reference them. Paull's substitution
@@ -447,6 +447,7 @@ func substituteLeadingRef(target, source *Production) *Production {
 		NodeKind: target.NodeKind,
 		Origin:   target.Origin,
 		Sp:       target.Sp,
+		Value:    target.Value,
 	}
 }
 
@@ -523,6 +524,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 			NodeKind: prod.NodeKind,
 			Origin:   prod.Origin,
 			Sp:       prod.Sp,
+			Value:    prod.Value,
 		}
 	}
 	if len(seeds) == 0 {
@@ -575,6 +577,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		NodeKind: prod.NodeKind,
 		Origin:   prod.Origin,
 		Sp:       prod.Sp,
+		Value:    prod.Value,
 	}
 }
 
@@ -822,7 +825,8 @@ func desugar(grammar *Grammar) *Grammar {
 	for _, p := range grammar.Productions {
 		origin = originOf(p)
 		out := &Production{
-			Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin, Sp: p.Sp}
+			Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin, Sp: p.Sp,
+			Value: p.Value}
 		alts := make([]Sequence, len(p.Alts))
 		for i, a := range p.Alts {
 			alts[i] = desugarAlt(a)

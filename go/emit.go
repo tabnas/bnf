@@ -1160,9 +1160,27 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 
 	if len(prod.Alts) == 1 {
 		// Single-alt, multi-segment: chain rules directly on the production.
-		emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag, ruleSpec,
-			refs, prodKind, prov, originOf(prod))
-		return nil
+		return emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag,
+			ruleSpec, refs, prodKind, prov, originOf(prod),
+			prod.Value, buildsOwnValue(grammar))
+	}
+
+	// A value annotation names one member per pushing segment, which only
+	// has one reading when the production HAS one alternative. Two
+	// alternatives push different things in different orders, so the same
+	// list of names would mean something different down each — and
+	// silently building a different shape depending on which alternative
+	// matched is worse than refusing.
+	if prod.Value != nil {
+		return &EmitError{
+			Message: fmt.Sprintf(
+				"bnf: rule '%s' has a value annotation and %d alternatives. A "+
+					"value annotation names the parts of ONE alternative; with more "+
+					"than one it is ambiguous which alternative's parts are named. "+
+					"Split the rule, or annotate the alternatives' own rules.",
+				originOf(prod), len(prod.Alts)),
+			Rule: originOf(prod),
+		}
 	}
 
 	// Multi-alt with at least one multi-segment alt: dispatcher.
@@ -1194,8 +1212,10 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			prov[implName] = originOf(prod)
 		}
 
-		emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs,
-			"helper", prov, originOf(prod))
+		if err := emitChain(implName, alt, literals, regexTokens, tag, ruleSpec,
+			refs, "helper", prov, originOf(prod), nil, nil); err != nil {
+			return err
+		}
 
 		dispatchKind := prodKind
 		initDispatchFields := refs.node(map[string]any{
@@ -1329,7 +1349,8 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 // give (provenance turned off).
 func emitChain(headName string, alt Sequence, literals, regexTokens map[string]string,
 	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
-	headKind string, prov map[string]string, origin string) {
+	headKind string, prov map[string]string, origin string,
+	value *ValueAnnotation, buildsOwnValue func(string) bool) error {
 
 	segs := segmentize(alt, literals, regexTokens)
 	chainName := func(i int) string {
@@ -1337,6 +1358,70 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			return headName
 		}
 		return fmt.Sprintf("%s$step%d", headName, i)
+	}
+
+	// Value building rides on the segments that PUSH: those are the parts
+	// that produce a member. A segment of bare terminals (a separator, a
+	// trailing literal) consumes input and contributes no value.
+	memberSegs := make([]bool, len(segs))
+	if value != nil {
+		for i, sg := range segs {
+			memberSegs[i] = sg.ref != ""
+		}
+	}
+	memberAt := func(i int) int {
+		if !memberSegs[i] {
+			return -1
+		}
+		n := 0
+		for j := 0; j < i; j++ {
+			if memberSegs[j] {
+				n++
+			}
+		}
+		return n
+	}
+
+	diagRule := origin
+	if diagRule == "" {
+		diagRule = headName
+	}
+
+	// One name per pushing segment, or the names line up with the wrong
+	// parts. The rewrite passes are why this is checked here and not at
+	// annotation time: inlining a leading reference can change how many
+	// segments push (a member whose rule is all terminals stops being a
+	// push at all), and left-recursion elimination restructures the
+	// alternative wholesale. Either way the author's names would land on
+	// the wrong members, and silently building a differently-shaped value
+	// is worse than refusing.
+	if value != nil && value.Kind == "object" {
+		pushes := 0
+		for _, m := range memberSegs {
+			if m {
+				pushes++
+			}
+		}
+		named := len(value.Members)
+		if named != pushes {
+			plural := "s"
+			if named == 1 {
+				plural = ""
+			}
+			return &EmitError{
+				Message: fmt.Sprintf(
+					"bnf: rule '%s' names %d member%s but builds %d. A value "+
+						"annotation names one member per part that produces a value. A "+
+						"part made only of literals produces none — and note that a "+
+						"LEADING part whose own rule is a single terminal is folded into "+
+						"this rule by left-recursion elimination, which turns it into "+
+						"literals here and so removes it as a member. Giving that rule a "+
+						"body that is not a bare terminal (a repetition, a group, or "+
+						"more than one element) keeps it nameable.",
+					diagRule, named, plural, pushes),
+				Rule: diagRule,
+			}
+		}
 	}
 
 	for i := 0; i < len(segs); i++ {
@@ -1359,16 +1444,124 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 		}
 
 		isLast := i == len(segs)-1
+		var closeMaps []map[string]any
 		if !isLast {
 			close := map[string]any{"r": chainName(i + 1), "g": tag}
 			merge(close, captureChildFields(refs, name, kind))
-			rs.Close = mapsToAlts([]map[string]any{close})
+			closeMaps = []map[string]any{close}
 		} else if seg.ref != "" {
 			close := captureChildFields(refs, name, kind)
 			close["g"] = tag
-			rs.Close = mapsToAlts([]map[string]any{close})
+			closeMaps = []map[string]any{close}
+		}
+
+		if value != nil {
+			isArray := value.Kind == "array"
+			m := memberAt(i)
+			memberName := ""
+			if 0 <= m && m < len(value.Members) {
+				memberName = value.Members[m]
+			}
+
+			// Open side: the container is allocated once, on the head,
+			// before anything goes into it; every pushing link names the
+			// member it is about to fill.
+			openActs := []string{}
+			openCfg := map[string]any{}
+			if i == 0 {
+				if isArray {
+					openActs = append(openActs, "@array$")
+				} else {
+					openActs = append(openActs, "@object$")
+				}
+			}
+			if !isArray && memberName != "" {
+				// The key is a CONSTANT: the author named this part, and no
+				// token in the input carries that text.
+				openActs = append(openActs, "@key$")
+				openCfg["key$"] = map[string]any{"lit": memberName}
+			}
+			// Unconditional, even when this link gains no action of its
+			// own: EVERY link of a value rule must lose its tree builders,
+			// not just the ones that gain value builders. An array's steps
+			// gain nothing on the open side (there are no member names to
+			// set), and leaving their @node$ in place had it accumulate the
+			// separator's text into a `src` property on the ARRAY.
+			useValueActions(headAlt, openActs, openCfg)
+
+			// Close side: a member that builds its OWN value is assigned
+			// whole, so it nests; anything else resolves to the source text
+			// its tree builders accumulated. Omitting `src` IS the nesting
+			// case — see @tabnas/parser doc/value-builtins.md, v5.
+			if 0 <= m {
+				nested := memberName != "" && buildsOwnValue != nil && buildsOwnValue(memberName)
+				act, cfgKey := "@setval$", "setval$"
+				if isArray {
+					act, cfgKey = "@push$", "push$"
+				}
+				var cfg map[string]any
+				if !nested {
+					cfg = map[string]any{cfgKey: map[string]any{"src": true}}
+				}
+				if closeMaps == nil {
+					closeMaps = []map[string]any{{"g": tag}}
+				}
+				for _, c := range closeMaps {
+					useValueActions(c, []string{act}, cfg)
+				}
+			} else {
+				// A link that pushes nothing (a bare separator or trailing
+				// literal) contributes no member — but its close still
+				// carries a tree @capture$ for a node this rule no longer
+				// has.
+				for _, c := range closeMaps {
+					useValueActions(c, nil, nil)
+				}
+			}
+		}
+
+		rs.Open = mapsToAlts([]map[string]any{headAlt})
+		if closeMaps != nil {
+			rs.Close = mapsToAlts(closeMaps)
 		}
 		ruleSpec[name] = rs
+	}
+	return nil
+}
+
+// useValueActions installs the value builders on an alt of a rule that
+// BUILDS A VALUE, dropping the tree builders it was emitted with.
+//
+// They cannot compose: both own `r.node`. Appending @object$ after
+// @node$ clobbers the AST node that was just allocated, and the
+// @capture$ on the matching close then finds no `kids` to push into and
+// dies. On a rule that builds a value the value builders win outright,
+// which is also what the author asked for — the tree node is exactly the
+// thing they said they did not want.
+//
+// The MEMBERS keep their tree builders: `src` reads the node.src those
+// accumulate, and members are separate rules, so nothing here touches
+// them. Mirrors the TS `useValueActions`.
+func useValueActions(spec map[string]any, actions []string, cfg map[string]any) {
+	if len(actions) == 1 {
+		spec["a"] = actions[0]
+	} else if len(actions) > 1 {
+		spec["a"] = actions
+	} else {
+		delete(spec, "a")
+	}
+	if k, ok := spec["k"].(map[string]any); ok {
+		// Builtins mode names its tree config; closure mode carries none.
+		delete(k, "node$")
+		delete(k, "capture$")
+		for name, v := range cfg {
+			k[name] = v
+		}
+		if len(k) == 0 {
+			delete(spec, "k")
+		}
+	} else if len(cfg) > 0 {
+		spec["k"] = cfg
 	}
 }
 
