@@ -4411,12 +4411,12 @@ function classAnalysis(terminals: Element[]): ClassAnalysis {
     if (el.kind !== 'regex') continue
     const key = regexKey(el)
     if (coverage.has(key)) continue
-    let r = patternCharRanges(el.pattern)
-    // A case-insensitive matcher covers both cases of every letter it
-    // names, and the pattern text spells only one of them. Fold here
-    // and emit the atoms WITHOUT the flag, so the two descriptions of
-    // the same coverage cannot disagree.
-    if (null != r && el.flags.includes('i')) r = foldCaseRanges(r)
+    // Only classes that provably match exactly one code point take part:
+    // partitioning replaces a class's matcher with one-character atoms,
+    // so anything that could match more would lose the rest. A class left
+    // out contributes no coverage, and so neither contests nor is
+    // contested — it keeps the single token it has always had.
+    const r = singleCodePointRanges(el.pattern, el.flags)
     if (null != r) coverage.set(key, normalizeRanges(r))
   }
 
@@ -4498,21 +4498,28 @@ function emitClassToken(
     let atom = classes.atomTokens.get(spanKey)
     if (null == atom) {
       const { pattern, astral } = classPattern(span[0], span[1])
-      atom = allocTokenName('rx_' + pattern, usedNames)
+      // `rxa_`, not `rx_`: an atom is synthetic, and a name minted from
+      // `rx_` collides with the natural name of any class spelling the
+      // same span. It did — `%x31-39`'s atom took `#RX___U0031__U0039`
+      // first, so the class itself was pushed to `#RX___U0031__U00391`
+      // and every name derived from it moved, which is the instability
+      // the one-member set above exists to prevent.
+      atom = allocTokenName('rxa_' + pattern, usedNames)
       matchTokens[atom] = eager(pattern, astral ? 'u' : '')
       classes.atomTokens.set(spanKey, atom)
     }
     members.push(atom)
   }
 
-  if (1 === members.length) {
-    // The class IS one atom: point at that token rather than minting a
-    // one-member set, so the emitted spec stays as small as the grammar
-    // allows.
-    regexTokens.set(key, members[0])
-    usedNames.delete(name)
-    return
-  }
+  // A one-member set rather than pointing `regexTokens` straight at the
+  // atom. Redirecting looked tidier and silently renamed things: marks
+  // come from `altDiscriminator`, which reads the token name out of
+  // `regexTokens`, so `[123456789]` took the canonical `[1-9]` atom's
+  // name and its `m` — and any `@rule:o:mark` user action attached to it
+  // — changed the moment some OTHER production in the grammar mentioned
+  // an overlapping `[0-9]`. The class keeps its own name here whatever
+  // the partition does underneath it.
+  //
   // Keyed WITHOUT the leading `#`. Both engines look a set name up with
   // the `#` stripped (TS `findTokenSet` falls back to it, Go
   // `hasTokenSet` trims it outright), and only the bare key is found by
@@ -4521,6 +4528,60 @@ function emitClassToken(
   // unmatchable.
   tokenSets[name.replace(/^#/, '')] = members
   setRanges.set(name, mine)
+}
+
+
+// The coverage of a class that provably matches EXACTLY ONE code point,
+// or null when the pattern could match more (or less) than that.
+//
+// Stricter than `patternCharRanges` on purpose, and the two must not be
+// confused. That one answers "what can this pattern's FIRST character
+// be?" — the right question for contest detection, which is what it was
+// written for, and it deliberately ignores everything after the first
+// class. Partitioning asks a different question: it REPLACES a class's
+// matcher with one-character atom matchers, so a pattern whose first
+// character coverage is only part of what it matches loses the rest.
+//
+// Measured, on `emitGrammarSpec` directly:
+//
+//   `a|bc` beside `[a]`      → the `a|bc` matcher vanished; `bc` rejected
+//   `[a-z]+` beside `[a-c]`  → the `+` lost; matched one char, not a run
+//   `[aA][bB]` beside `[a]`  → the `[bB]` lost
+//
+// A case-insensitive class is refused outright rather than folded:
+// `foldCaseRanges` folds ASCII A-Z/a-z and nothing else, so the atoms it
+// would produce for `[é]/i` cover `é` but not `É` — the matcher says one
+// thing and the ranges another. Refusing costs nothing real (`%x`
+// ranges are case-sensitive by construction, and a case-insensitive
+// literal is a `term`, not a `regex`), and a class left out of the
+// partition simply keeps the single token it has always had.
+function singleCodePointRanges(
+  pattern: string,
+  flags: string,
+): Array<[number, number]> | null {
+  if (flags.includes('i')) return null
+  if ('[\\s\\S]' === pattern) return patternCharRanges(pattern)
+
+  if (pattern.startsWith('[')) {
+    // The class must BE the pattern: find its closing bracket, honouring
+    // backslash escapes, and require it to be the last character. That
+    // rejects `[a-z]+`, `[aA][bB]` and `[a]|b` alike.
+    let i = 1
+    if ('^' === pattern[i]) i++
+    for (; i < pattern.length; i++) {
+      if ('\\' === pattern[i]) { i++; continue }
+      if (']' === pattern[i]) break
+    }
+    if (i !== pattern.length - 1) return null
+    return patternCharRanges(pattern)
+  }
+
+  // A bare single code point, possibly escaped: `a`, `\.`, `\u0041`,
+  // `\u{1F600}`. Anything longer is a sequence, an alternation or a
+  // quantified atom, none of which this may touch.
+  const one = /^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$/
+  if (!one.test(pattern)) return null
+  return patternCharRanges(pattern)
 }
 
 

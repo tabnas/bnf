@@ -13,6 +13,7 @@ package bnf
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -281,6 +282,74 @@ func maxRune(a, b rune) rune {
 	}
 	return b
 }
+
+// singleCodePointRanges returns the coverage of a class that provably
+// matches EXACTLY ONE code point, or nil when the pattern could match
+// more (or less) than that.
+//
+// Stricter than patternCharRanges on purpose, and the two must not be
+// confused. That one answers "what can this pattern's FIRST character
+// be?" — the right question for contest detection, which is what it was
+// written for, and it deliberately ignores everything after the first
+// class. Partitioning asks a different question: it REPLACES a class's
+// matcher with one-character atom matchers, so a pattern whose first
+// character coverage is only part of what it matches loses the rest.
+//
+// Measured, on emitGrammarSpec directly:
+//
+//	`a|bc` beside `[a]`      → the `a|bc` matcher vanished; `bc` rejected
+//	`[a-z]+` beside `[a-c]`  → the `+` lost; matched one char, not a run
+//	`[aA][bB]` beside `[a]`  → the `[bB]` lost
+//
+// A case-insensitive class is refused outright rather than folded:
+// foldCaseRanges folds ASCII A-Z/a-z and nothing else, so the atoms it
+// would produce for `[é]/i` cover `é` but not `É` — the matcher says one
+// thing and the ranges another. Refusing costs nothing real (`%x` ranges
+// are case-sensitive by construction, and a case-insensitive literal is
+// a term, not a regex), and a class left out of the partition simply
+// keeps the single token it has always had.
+func singleCodePointRanges(pattern, flags string) []charRange {
+	if strings.Contains(flags, "i") {
+		return nil
+	}
+	if pattern == `[\s\S]` {
+		return patternCharRanges(pattern)
+	}
+
+	if strings.HasPrefix(pattern, "[") {
+		// The class must BE the pattern: find its closing bracket,
+		// honouring backslash escapes, and require it to be the last
+		// character. That rejects `[a-z]+`, `[aA][bB]` and `[a]|b` alike.
+		i := 1
+		if i < len(pattern) && pattern[i] == '^' {
+			i++
+		}
+		for ; i < len(pattern); i++ {
+			if pattern[i] == '\\' {
+				i++
+				continue
+			}
+			if pattern[i] == ']' {
+				break
+			}
+		}
+		if i != len(pattern)-1 {
+			return nil
+		}
+		return patternCharRanges(pattern)
+	}
+
+	// A bare single code point, possibly escaped: `a`, `\.`, `\x{41}`,
+	// `\u0041`. Anything longer is a sequence, an alternation or a
+	// quantified atom, none of which this may touch.
+	if !singleCodePointRe.MatchString(pattern) {
+		return nil
+	}
+	return patternCharRanges(pattern)
+}
+
+var singleCodePointRe = regexp.MustCompile(
+	`^(?:\\x\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\\[\]()|*+?{}^$.])$`)
 
 // partitionRanges splits a collection of character coverages into
 // ATOMS: the coarsest set of pairwise-disjoint spans such that every

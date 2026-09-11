@@ -267,21 +267,30 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			atom, ok := classes.atomTokens[spanKey]
 			if !ok {
 				pattern := classPattern(span.lo, span.hi)
-				atom = allocTokenName("rx_"+pattern, usedNames, "")
+				// `rxa_`, not `rx_`: an atom is synthetic, and a name
+				// minted from `rx_` collides with the natural name of any
+				// class spelling the same span. It did — `%x31-39`'s atom
+				// took that name first, so the class itself was pushed to a
+				// suffixed one and every name derived from it moved, which
+				// is the instability the one-member set below exists to
+				// prevent.
+				atom = allocTokenName("rxa_"+pattern, usedNames, "")
 				emit(atom, pattern, "")
 				classes.atomTokens[spanKey] = atom
 			}
 			members = append(members, atom)
 		}
 
-		if len(members) == 1 {
-			// The class IS one atom: point at that token rather than
-			// minting a one-member set, so the emitted spec stays as
-			// small as the grammar allows.
-			regexTokens[key] = members[0]
-			delete(usedNames, name)
-			return
-		}
+		// A one-member set rather than pointing regexTokens straight at
+		// the atom. Redirecting looked tidier and silently renamed
+		// things: marks come from altDiscriminator, which reads the token
+		// name out of regexTokens, so `[123456789]` took the canonical
+		// `[1-9]` atom's name and its `m` — and any `@rule:o:mark` user
+		// action attached to it — changed the moment some OTHER
+		// production in the grammar mentioned an overlapping `[0-9]`. The
+		// class keeps its own name here whatever the partition does
+		// underneath it.
+		//
 		// Keyed WITHOUT the leading `#`. Both engines look a set name
 		// up with the `#` stripped (Go `hasTokenSet` trims it outright,
 		// TS `findTokenSet` falls back to it), and only the bare key is

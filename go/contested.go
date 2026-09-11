@@ -669,14 +669,13 @@ func newClassAnalysis(terminals []*Element) *classAnalysis {
 		if _, seen := coverage[key]; seen {
 			continue
 		}
-		r := patternCharRanges(el.Pattern)
-		// A case-insensitive matcher covers both cases of every letter it
-		// names, and the pattern text spells only one of them. Fold here
-		// and emit the atoms WITHOUT the flag, so the two descriptions of
-		// the same coverage cannot disagree.
-		if r != nil && strings.Contains(el.Flags, "i") {
-			r = foldCaseRanges(r)
-		}
+		// Only classes that provably match exactly one code point take
+		// part: partitioning replaces a class's matcher with
+		// one-character atoms, so anything that could match more would
+		// lose the rest. A class left out contributes no coverage, and so
+		// neither contests nor is contested — it keeps the single token it
+		// has always had.
+		r := singleCodePointRanges(el.Pattern, el.Flags)
 		if r == nil {
 			continue
 		}
