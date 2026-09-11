@@ -46,6 +46,7 @@ export type {
   Element,
   Sequence,
   Production,
+  ValueAnnotation,
   Grammar,
   ProbeDispatchSpec,
   AmbiguityReport,

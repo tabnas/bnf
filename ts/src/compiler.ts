@@ -233,6 +233,31 @@ type Production = {
   // carry none — `origin` is how they are located, by naming the rule
   // they descend from.
   sp?: SrcSpan
+  // A value this production should BUILD, rather than the AST node the
+  // tree builders produce by default. Set by a front-end.
+  //
+  // Notation-neutral by construction: it says WHAT to build, never how
+  // the notation spelled it. ABNF carries it in a trailing comment, but
+  // nothing here knows that, and a front-end for another notation can
+  // set the same field from whatever syntax it likes.
+  value?: ValueAnnotation
+}
+
+
+// What a production builds when it carries a value annotation.
+//
+// `members` names one member per PUSHING segment of the alternative, in
+// order — the parts the author named. The names matter because the
+// emitter cannot recover them from the chain: a production's leading
+// reference is INLINED by the left-recursion pass, so the first member
+// pushes a generated helper rather than the rule the author wrote. The
+// annotation naming its own parts is what makes this independent of
+// that rewrite.
+//
+// An array has no member names: every pushing segment is an element.
+export type ValueAnnotation = {
+  kind: 'object' | 'array'
+  members?: string[]
 }
 
 
@@ -241,6 +266,27 @@ type Production = {
 // one is its own origin. Always read `origin` through this — a bare
 // `p.origin` is undefined for exactly the productions whose name is
 // already the answer.
+function buildsOwnValue(grammar: Grammar): (memberName: string) => boolean {
+  // Which members NEST: a member whose own production is annotated
+  // builds a value of its own, so it is assigned whole rather than
+  // resolved to its source text.
+  //
+  // Built lazily per call rather than once per grammar because it is
+  // only ever consulted for the members of an annotated production,
+  // which are rare; a grammar with no annotations never pays for it.
+  let names: Set<string> | null = null
+  return (memberName: string) => {
+    if (null == names) {
+      names = new Set<string>()
+      for (const p of grammar.productions) {
+        if (null != p.value) names.add(p.origin ?? p.name)
+      }
+    }
+    return names.has(memberName)
+  }
+}
+
+
 function originOf(prod: Production): string {
   return prod.origin ?? prod.name
 }
@@ -402,6 +448,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
         nodeKind: p.nodeKind,
         origin: p.origin,
         sp: p.sp,
+        value: p.value,
       })),
     ),
   )
@@ -626,6 +673,7 @@ function substituteLeadingRef(
     nodeKind: target.nodeKind,
     origin: target.origin,
     sp: target.sp,
+    value: target.value,
   }
 }
 
@@ -706,6 +754,7 @@ function eliminateDirectLeftRec(
       nodeKind: prod.nodeKind,
       origin: prod.origin,
       sp: prod.sp,
+      value: prod.value,
     }
   }
   if (seeds.length === 0) {
@@ -751,6 +800,7 @@ function eliminateDirectLeftRec(
     nodeKind: prod.nodeKind,
     origin: prod.origin,
     sp: prod.sp,
+    value: prod.value,
   }
 }
 
@@ -1416,6 +1466,7 @@ function desugar(grammar: Grammar): Grammar {
       nodeKind: p.nodeKind,
       origin: p.origin,
       sp: p.sp,
+      value: p.value,
     }
     // Probe-dispatch and tail-repeat flags survive desugar unchanged —
     // the emitter routes around the standard alt-compilation path for
@@ -1694,6 +1745,7 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
         nodeKind: prod.nodeKind,
         origin: prod.origin,
         sp: prod.sp,
+        value: prod.value,
       })
     } else {
       rewritten.push(prod)
@@ -3599,8 +3651,24 @@ function emitProduction(
     // Single-alt, multi-segment: chain rules directly on the
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
-      ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod))
+      ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod),
+      prod.value, buildsOwnValue(grammar))
     return
+  }
+
+  // A value annotation names one member per pushing segment, which only
+  // has one reading when the production HAS one alternative. Two
+  // alternatives push different things in different orders, so the same
+  // list of names would mean something different down each — and
+  // silently building a different shape depending on which alternative
+  // matched is worse than refusing.
+  if (null != prod.value) {
+    throw new Error(
+      `bnf: rule '${originOf(prod)}' has a value annotation and ` +
+      `${prod.alts.length} alternatives. A value annotation names the ` +
+      `parts of ONE alternative; with more than one it is ambiguous ` +
+      `which alternative's parts are named. Split the rule, or annotate ` +
+      `the alternatives' own rules.`)
   }
 
   // Multi-alt with at least one multi-segment alternative: emit a
@@ -3758,6 +3826,35 @@ function emitProduction(
 }
 
 
+// Install the value builders on an alt of a rule that BUILDS A VALUE,
+// dropping the tree builders it was emitted with.
+//
+// They cannot compose: both own `r.node`. Appending `@object$` after
+// `@node$` clobbers the AST node that was just allocated, and the
+// `@capture$` on the matching close then finds no `kids` to push into
+// and dies. On a rule that builds a value the value builders win
+// outright, which is also what the author asked for — the tree node is
+// exactly the thing they said they did not want.
+//
+// The MEMBERS keep their tree builders: `src` reads the `node.src` those
+// accumulate, and members are separate rules, so nothing here touches
+// them.
+function useValueActions(
+  spec: any,
+  actions: string[],
+  cfg?: Record<string, unknown>,
+): void {
+  spec.a = 1 === actions.length ? actions[0] : actions
+  if (null != spec.k) {
+    // Builtins mode names its tree config; closure mode carries none.
+    delete spec.k.node$
+    delete spec.k.capture$
+  }
+  if (null != cfg) spec.k = { ...(spec.k ?? {}), ...cfg }
+  if (null != spec.k && 0 === Object.keys(spec.k).length) delete spec.k
+}
+
+
 // Emit a (possibly single-step) chain of rules for one alt under the
 // given head rule name. Segment 0 goes into `headName`; later
 // segments get synthetic `<headName>$stepN` continuations.
@@ -3778,10 +3875,45 @@ function emitChain(
   headKind: Production['nodeKind'] = 'helper',
   prov?: Map<string, string>,
   origin?: string,
+  value?: ValueAnnotation,
+  buildsOwnValue?: (memberName: string) => boolean,
 ) {
   const segs = segmentize(alt, literals, regexTokens)
   const chainName = (i: number) =>
     i === 0 ? headName : `${headName}$step${i}`
+
+  // Value building rides on the segments that PUSH: those are the parts
+  // that produce a member. A segment of bare terminals (a separator, a
+  // trailing literal) consumes input and contributes no value.
+  const memberSegs = value ? segs.map((s) => null != s.ref) : []
+  const memberAt = (i: number) =>
+    memberSegs[i] ? memberSegs.slice(0, i).filter(Boolean).length : -1
+
+  // One name per pushing segment, or the names line up with the wrong
+  // parts. The rewrite passes are why this is checked here and not at
+  // annotation time: inlining a leading reference can change how many
+  // segments push (a member whose rule is all terminals stops being a
+  // push at all), and left-recursion elimination restructures the
+  // alternative wholesale. Either way the author's names would land on
+  // the wrong members, and silently building a differently-shaped value
+  // is worse than refusing.
+  if (value && 'object' === value.kind) {
+    const pushes = memberSegs.filter(Boolean).length
+    const named = value.members?.length ?? 0
+    if (named !== pushes) {
+      throw new EmitError(
+        `bnf: rule '${origin ?? headName}' names ${named} member` +
+        `${1 === named ? '' : 's'} but builds ${pushes}. A value ` +
+        `annotation names one member per part that produces a value. A ` +
+        `part made only of literals produces none — and note that a ` +
+        `LEADING part whose own rule is a single terminal is folded into ` +
+        `this rule by left-recursion elimination, which turns it into ` +
+        `literals here and so removes it as a member. Giving that rule a ` +
+        `body that is not a bare terminal (a repetition, a group, or ` +
+        `more than one element) keeps it nameable.`,
+        { rule: origin ?? headName })
+    }
+  }
 
   for (let i = 0; i < segs.length; i++) {
     const name = chainName(i)
@@ -3814,6 +3946,50 @@ function emitChain(
       // Last step, but it had a push — we still need to capture the
       // final child before popping.
       rs.close = [{ ...captureChildFields(refs, name, kind), g: tag }]
+    }
+
+    if (value) {
+      const isArray = 'array' === value.kind
+      const m = memberAt(i)
+      const memberName = 0 <= m ? value.members?.[m] : undefined
+
+      // Open side: the container is allocated once, on the head, before
+      // anything goes into it; every pushing link names the member it is
+      // about to fill.
+      const openActs: string[] = []
+      const openCfg: Record<string, unknown> = {}
+      if (0 === i) openActs.push(isArray ? '@array$' : '@object$')
+      if (!isArray && null != memberName) {
+        // The key is a CONSTANT: the author named this part, and no
+        // token in the input carries that text.
+        openActs.push('@key$')
+        openCfg.key$ = { lit: memberName }
+      }
+      // Unconditional, even when this link gains no action of its own:
+      // EVERY link of a value rule must lose its tree builders, not just
+      // the ones that gain value builders. An array's steps gain nothing
+      // on the open side (there are no member names to set), and leaving
+      // their `@node$` in place had it accumulate the separator's text
+      // into a `src` property on the ARRAY.
+      useValueActions(open[0], openActs, openCfg)
+
+      // Close side: a member that builds its OWN value is assigned
+      // whole, so it nests; anything else resolves to the source text
+      // its tree builders accumulated. Omitting `src` IS the nesting
+      // case — see @tabnas/parser doc/value-builtins.md, v5.
+      if (0 <= m) {
+        const nested = null != memberName && true === buildsOwnValue?.(memberName)
+        const act = isArray ? '@push$' : '@setval$'
+        const cfg = nested ? undefined
+          : { [isArray ? 'push$' : 'setval$']: { src: true } }
+        if (null == rs.close) rs.close = [{ g: tag }]
+        for (const c of rs.close) useValueActions(c, [act], cfg)
+      } else if (null != rs.close) {
+        // A link that pushes nothing (a bare separator or trailing
+        // literal) contributes no member — but its close still carries a
+        // tree `@capture$` for a node this rule no longer has.
+        for (const c of rs.close) useValueActions(c, [])
+      }
     }
     ruleSpec[name] = rs
   }
