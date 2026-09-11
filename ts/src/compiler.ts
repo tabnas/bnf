@@ -282,13 +282,16 @@ export type ValueAnnotation = {
 // a rule name. An array names nothing at all, so a name-based rule could
 // never nest an array element; and a member is free to be named something
 // other than its rule.
-function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
+function planValueAnnotations(grammar: Grammar): ValuePlan {
   const byName = new Map(grammar.productions.map((p) => [p.name, p]))
   const plan = new Map<string, boolean[]>()
+  const collect = new Map<string, boolean[]>()
 
   // Nothing annotated means nothing to predict, and this is the common
   // case by a wide margin — every grammar in the conformance corpus.
-  if (!grammar.productions.some((p) => null != p.value)) return plan
+  if (!grammar.productions.some((p) => null != p.value)) {
+    return { plan, collect }
+  }
 
   // Which productions keep their leading reference. Computed on the
   // AUTHORED grammar for the same reason everything else here is.
@@ -493,8 +496,17 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
     // `reachesAnnotated`.
     parts.forEach((el, i) => {
       if (flags[i]) return
-      const hit = reachesAnnotated(el, byName, new Set())
+      let hit = reachesAnnotated(el, byName, new Set())
       if (null == hit) return
+      // A repetition under an array is COLLECTED, not taken as text, so
+      // the question below has to be asked again of each thing its
+      // helper pushes rather than of the run as a whole. Reaching this
+      // rule ITSELF is still refused — that nests the rule's own array
+      // inside itself, which is a shape nobody writing a list means.
+      if ('array' === v.kind && collectsValues(el) && hit !== prod.name) {
+        hit = hiddenAnnotated(el, byName)
+        if (null == hit) return
+      }
       const which = 'array' === v.kind
         ? `element ${i + 1}` : `member '${members?.[i]}'`
       // Reaching ITSELF is the recursive case, and `add = 1*DIGIT
@@ -522,8 +534,29 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
     })
 
     plan.set(prod.name, flags)
+    // Which parts are SUGAR — a group, an option or a repetition the
+    // author wrote here — and so collect into the array rather than
+    // becoming one element of it. Recorded on the AUTHORED shape, for
+    // the same reason everything else in this pass is: by emit time
+    // Paull's substitution has inlined the leading member's own body,
+    // whose helpers look exactly like sugar written at this level. They
+    // are not; that member is one element, and collecting it loses it.
+    if ('array' === v.kind) {
+      collect.set(prod.name, parts.map(collectsValues))
+    }
   }
-  return plan
+  return { plan, collect }
+}
+
+
+// What `planValueAnnotations` predicts, per annotated production: one
+// flag per part that produces a value. `plan` says whether that part
+// nests (its own rule builds a value); `collect` — arrays only — says
+// whether it is sugar, and so contributes its own parts as elements
+// instead of being one.
+interface ValuePlan {
+  plan: Map<string, boolean[]>
+  collect: Map<string, boolean[]>
 }
 
 
@@ -532,6 +565,50 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
 // value annotation may not name a member this, or the two become
 // indistinguishable — see the refusal in `planValueAnnotations`.
 const SRC_FIELD = 'src'
+
+
+// The first value-building rule that a COLLECTING part would still take
+// as text.
+//
+// Collecting changes what the refusal has to ask. A repetition no longer
+// resolves to its run's text — it pushes what is inside it — so an
+// annotated rule its helper pushes DIRECTLY nests as an element and
+// nothing goes missing. One reached through an UNANNOTATED wrapper is a
+// different matter: that wrapper is an ordinary rule, pushed as its own
+// text, and the text is still missing the annotated rule's match. So the
+// walk descends through collecting sugar and then asks the ordinary
+// question of each reference it arrives at.
+//
+// `top = *mid   ; @array` with `mid = "[" inner "]"` and an annotated
+// `inner` is the case: it built `["[]","[]"]` — two elements, both
+// missing the value — when the refusal was skipped for the whole
+// repetition rather than for what the repetition pushes.
+function hiddenAnnotated(
+  el: Element,
+  byName: Map<string, Production>,
+): string | null {
+  switch (el.kind) {
+    case 'ref': {
+      const target = byName.get(el.name)
+      // Annotated: the helper pushes it whole, so it nests.
+      if (null == target || null != target.value) return null
+      return reachesAnnotated(el, byName, new Set())
+    }
+    case 'opt': case 'star': case 'plus': case 'rep':
+      return hiddenAnnotated(el.inner, byName)
+    case 'group': {
+      for (const alt of el.alts) {
+        for (const inner of alt) {
+          const hit = hiddenAnnotated(inner, byName)
+          if (null != hit) return hit
+        }
+      }
+      return null
+    }
+    default:
+      return null
+  }
+}
 
 
 // The first rule that BUILDS A VALUE reachable from this element, or
@@ -611,6 +688,107 @@ function exemptAlias(p: Production, cyclic: Set<string>): boolean {
 function pushesValue(el: Element): boolean {
   const k = el.kind
   return 'term' !== k && 'regex' !== k && 'token' !== k && 'prose' !== k
+}
+
+
+// Whether this part COLLECTS into an enclosing `; @array` — contributes
+// the parts inside it as elements, in order — rather than being one
+// element itself.
+//
+// A repetition does: it is the only way to write a list, and taking the
+// whole run as one element is what made `; @array` unable to build one.
+// A bare GROUP does not, and the difference is not arbitrary. A group is
+// how an author writes ONE element out of several pieces: `( "[" p "]" )`
+// means the element `[7]`, and a group holding only terminals is an
+// element with no reference in it at all — collecting either yields
+// fewer elements than the author wrote, silently. A group reached
+// THROUGH a repetition does collect, because there it is the repeated
+// item rather than an element: `*( "," item )` is a list of `item`, not
+// a list of runs.
+function collectsValues(el: Element): boolean {
+  const k = el.kind
+  return 'star' === k || 'plus' === k || 'opt' === k || 'rep' === k
+}
+
+
+// Which generated helpers stand inside an `; @array`, and so must FILL
+// that array rather than build a node of their own.
+//
+// The engine seeds a pushed child's node from its parent (`makeRule`), so
+// a helper that simply does not allocate writes its elements straight
+// into the array the annotated rule opened. That is what keeps
+// collecting a repetition an emitter change: there is only ever the one
+// array, so no builtin has to learn to splice one into another.
+//
+// Walks from each annotated array production through helper references
+// only. A user rule ENDS the walk — it builds its own value, or its own
+// tree resolved to text, and either way it is one element. Helper names
+// are minted one per element position by `desugar`, which runs after
+// every pass that duplicates alternatives, so a name reached here is
+// reached from nowhere else.
+function planArrayHelpers(
+  grammar: Grammar,
+  collect: Map<string, boolean[]>,
+): Set<string> {
+  const byName = new Map(grammar.productions.map((p) => [p.name, p]))
+  const helpers = new Set<string>()
+
+  const walk = (name: string) => {
+    const prod = byName.get(name)
+    if (null == prod || 'helper' !== prod.nodeKind || helpers.has(name)) return
+    helpers.add(name)
+    for (const alt of prod.alts) {
+      for (const el of alt) if ('ref' === el.kind) walk(el.name)
+    }
+  }
+
+  // Whether anything inside this helper would become an ELEMENT — a
+  // reference to a rule of the author's, rather than more helpers and
+  // terminals.
+  //
+  // A repetition of pure terminals has nothing to collect, and
+  // collecting it drops the run rather than taking it as text: `*( "," )`
+  // built `[]` where it used to build `[",,"]`. `*item` with `item = "x"`
+  // is the same shape and is the reason this is asked HERE rather than on
+  // the authored grammar — `item` is still a reference when the
+  // annotation is planned, and only becomes a token later, in
+  // `liftLiteralTokens`.
+  //
+  // It is the rule already applied to a bare group, for the same reason:
+  // a part with no reference inside it is one element, not none.
+  const yieldsElements = (name: string, seen: Set<string>): boolean => {
+    const prod = byName.get(name)
+    if (null == prod || seen.has(name)) return false
+    seen.add(name)
+    for (const alt of prod.alts) {
+      for (const el of alt) {
+        if ('ref' !== el.kind) continue
+        const target = byName.get(el.name)
+        if (null == target || 'helper' !== target.nodeKind) return true
+        if (yieldsElements(el.name, seen)) return true
+      }
+    }
+    return false
+  }
+
+  for (const prod of grammar.productions) {
+    if ('array' !== prod.value?.kind) continue
+    const sugar = collect.get(originOf(prod))
+    if (null == sugar) continue
+    for (const alt of prod.alts) {
+      // Desugaring leaves every pushing part a reference, so the k-th
+      // reference here is the k-th part the annotation was planned
+      // against — the same correspondence the member count is checked
+      // on at emit.
+      let k = 0
+      for (const el of alt) {
+        if ('ref' !== el.kind) continue
+        if (sugar[k] && yieldsElements(el.name, new Set())) walk(el.name)
+        k++
+      }
+    }
+  }
+  return helpers
 }
 
 
@@ -2836,7 +3014,8 @@ function emitGrammarSpec(
 
   // Before ANY rewrite: annotations describe the grammar the AUTHOR
   // wrote, and the passes below are what make that shape unrecoverable.
-  const valuePlan = planValueAnnotations(grammar)
+  const { plan: valuePlan, collect: valueCollect } =
+    planValueAnnotations(grammar)
 
   // Drop informational prose definitions (`NR = <number>`) first, so the
   // names they document fall through to the built-in tokens — and so a
@@ -2875,6 +3054,12 @@ function emitGrammarSpec(
   grammar = leftFactor(grammar)
   grammar = rewriteTailRepeats(grammar, start)
   grammar = desugar(grammar)
+
+  // Both are named AFTER desugar, because both are keyed by the rule
+  // names the emitter will actually see.
+  const arrayHelpers = planArrayHelpers(grammar, valueCollect)
+  const valueRules = new Set(
+    grammar.productions.filter((p) => null != p.value).map((p) => p.name))
 
   // Allocate a fixed token for each unique literal, and a match
   // token for each unique regex terminal. Literals are keyed by
@@ -3077,7 +3262,7 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap, valuePlan, prov,
+      tokensOverlap, valuePlan, arrayHelpers, valueRules, prov,
     )
   }
 
@@ -3534,8 +3719,18 @@ function emitProduction(
   tokenRangesOf: (tok: string) => Array<[number, number]> | null,
   tokensOverlap: (a: string, b: string) => boolean,
   valuePlan: Map<string, boolean[]>,
+  // The helpers of an annotated array, and the rules that build a value.
+  // Together they say, for any link that pushes: does the pushed rule
+  // fill this array itself (no push of our own), nest whole (`@push$`),
+  // or resolve to its matched text (`@push$ {src}`)?
+  arrayHelpers: Set<string>,
+  valueRules: Set<string>,
   prov?: Map<string, string>,
 ) {
+  // This rule stands inside an `; @array`: it inherits that array from
+  // its parent and pushes into it, instead of building a node.
+  const arrayElem = arrayHelpers.has(prod.name)
+
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
   }
@@ -3938,7 +4133,17 @@ function emitProduction(
 
   const allSimple = prod.alts.every(isSingleSegment)
 
-  if (allSimple && null == prod.value) {
+  // A collecting helper with several alternatives shares ONE close alt
+  // here, and the alternatives need not agree: `( a / *b )` pushes an
+  // element down one and a helper that fills the array down the other,
+  // and a single close cannot be both. The dispatcher path gives each
+  // alternative its own rule, and so its own close. Repetition helpers
+  // are exempt because their exit guards (FOLLOW, FOLLOW2) live on this
+  // path — and they cannot disagree anyway: an option has one pushing
+  // alternative, and a star is multi-segment and never reaches here.
+  const splitAlts = arrayElem && 1 < prod.alts.length && !prod.repeatHelper
+
+  if (allSimple && null == prod.value && !splitAlts) {
     // Every alternative collapses to one tabnas alt — emit them
     // directly into the production's open state. This is a head
     // rule, so each alt initialises its own node array. Empty alts
@@ -4089,6 +4294,19 @@ function emitProduction(
       if (marks) close.m = '_'
       rs.close = [close]
     }
+    if (arrayElem) {
+      for (const e of entries) useValueActions(e.o, [])
+      // At most one distinct pushed rule is an ELEMENT here: the only
+      // multi-alt shapes left on this path are an option (one pushing
+      // alternative) and a group whose alternatives were checked to
+      // agree by `splitAlts`.
+      const elem = ordered
+        .map((alt) => segmentize(alt, literals, regexTokens)[0]?.ref)
+        .find((r) => null != r && !arrayHelpers.has(r))
+      for (const c of (rs.close ?? [])) {
+        pushElement(c, elem, valueRules)
+      }
+    }
     ruleSpec[prod.name] = rs
     return
   }
@@ -4098,7 +4316,8 @@ function emitProduction(
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
       ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod),
-      prod.value, valuePlan.get(originOf(prod)), prod.sp)
+      prod.value, valuePlan.get(originOf(prod)), prod.sp,
+      arrayHelpers, valueRules, arrayElem)
     return
   }
 
@@ -4150,7 +4369,8 @@ function emitProduction(
     if (null != prov) prov.set(implName, originOf(prod))
 
     emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs,
-      'helper', prov, originOf(prod))
+      'helper', prov, originOf(prod), undefined, undefined, undefined,
+      arrayHelpers, valueRules, arrayElem)
 
     // Fan out this alt into one dispatch entry per concrete token
     // sequence it can start with. Up to LOOKAHEAD_K tokens per
@@ -4263,6 +4483,12 @@ function emitProduction(
     g: tag,
   }
   if (dispatchMarks) dispClose.m = '_'
+  // The impl rule this dispatches to inherits the array and fills it
+  // directly, so the dispatcher allocates nothing and captures nothing.
+  if (arrayElem) {
+    for (const e of dispatchEntries) useValueActions(e.o, [])
+    useValueActions(dispClose, [])
+  }
   applyDebtGuard(dispatchEntries)
   specificityPermute(dispatchEntries)
   ruleSpec[prod.name] = {
@@ -4308,6 +4534,25 @@ function useValueActions(
 }
 
 
+// Put the array builder on the close of a link INSIDE an `; @array`.
+//
+// `elem` is the rule that link pushes, when pushing it contributes an
+// element. There are three cases and this decides between them: no
+// element (a separator, or a push of another collecting helper, which
+// fills the same array itself) drops the tree builders and adds nothing;
+// a rule that builds a value of its own nests whole; anything else
+// resolves to the text its tree builders accumulated.
+function pushElement(
+  spec: any,
+  elem: string | null | undefined,
+  valueRules: Set<string>,
+): void {
+  if (null == elem) useValueActions(spec, [])
+  else useValueActions(spec, ['@push$'],
+    valueRules.has(elem) ? undefined : { push$: { src: true } })
+}
+
+
 // Emit a (possibly single-step) chain of rules for one alt under the
 // given head rule name. Segment 0 goes into `headName`; later
 // segments get synthetic `<headName>$stepN` continuations.
@@ -4343,6 +4588,12 @@ function emitChain(
   // business as the planner's — and were the only annotation refusals
   // left that could not say where.
   sp?: SrcSpan,
+  arrayHelpers: Set<string> = new Set(),
+  valueRules: Set<string> = new Set(),
+  // This chain is a helper INSIDE an `; @array`: it inherits that array
+  // rather than allocating a node, and its pushing links fill it. Never
+  // set together with `value` — an annotated rule is not a helper.
+  arrayElem = false,
 ) {
   const segs = segmentize(alt, literals, regexTokens)
   const chainName = (i: number) =>
@@ -4452,6 +4703,13 @@ function emitChain(
       rs.close = [{ ...captureChildFields(refs, name, kind), g: tag }]
     }
 
+    if (arrayElem) {
+      useValueActions(open[0], [])
+      const elem = null != seg.ref && !arrayHelpers.has(seg.ref)
+        ? seg.ref : null
+      for (const c of (rs.close ?? [])) pushElement(c, elem, valueRules)
+    }
+
     if (value) {
       const isArray = 'array' === value.kind
       const m = memberAt(i)
@@ -4488,7 +4746,12 @@ function emitChain(
       // flattened to its source text instead of pushed whole. The name is
       // still consulted for an object, because a leading member's rule is
       // inlined away and only the annotation still knows what it was.
-      if (0 <= m) {
+      // A part that is SUGAR under an array is not one element: the
+      // helper it became inherits this array and pushes the parts inside
+      // it, in order. Pushing here as well would append the array to
+      // itself, so this link only sheds its tree builders.
+      const fills = isArray && null != seg.ref && arrayHelpers.has(seg.ref)
+      if (0 <= m && !fills) {
         const isNested = true === nested?.[m]
         const act = isArray ? '@push$' : '@setval$'
         const cfg = isNested ? undefined

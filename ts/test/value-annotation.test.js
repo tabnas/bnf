@@ -498,11 +498,13 @@ describe('value annotations', () => {
         alts: [[ref('d')]] },
       { name: 'd', alts: [[digits()]] },
     ]
+    // A REPETITION is not in here: it collects into the array, so the
+    // value it reaches is pushed as an element and no text is wanted
+    // from it. The test below asserts that.
     const cases = {
       'a group': [{ kind: 'group', alts: [[ref('inner')]] }],
       'a group with text': [{ kind: 'group',
         alts: [[term('['), ref('inner'), term(']')]] }],
-      'a repetition': [{ kind: 'star', inner: ref('inner') }],
     }
     for (const [label, [el]] of Object.entries(cases)) {
       const prods = [
@@ -513,6 +515,65 @@ describe('value annotations', () => {
       assert.throws(() => emit(prods, 'top'),
         /builds a value of its own/, label)
     }
+  })
+
+  it('collects a repetition of an annotated rule as elements', () => {
+    // The counterpart of the refusal above. A repetition does not take
+    // its run as text — it fills the array — so each iteration nests as
+    // its own element and there is nothing to lose.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[term('<'), { kind: 'star', inner: ref('inner') }, term('>')]] },
+      { name: 'inner', value: { kind: 'object', members: ['d'] },
+        alts: [[ref('d')]] },
+      // ONE digit, not `1*DIGIT`: a greedy member would swallow the
+      // whole run into a single iteration and prove nothing about
+      // collecting it.
+      { name: 'd', alts: [[{ kind: 'regex', pattern: '[0-9]', flags: '' }]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '<12>'),
+      [{ d: '1' }, { d: '2' }])
+  })
+
+  it('keeps a repetition of pure terminals as its matched text', () => {
+    // There is nothing to collect: a literal produces no value. Taking
+    // the run as text is what the author wrote; collecting it would hand
+    // back an EMPTY array and drop the run, which is the one outcome
+    // worse than the blob this work replaces.
+    //
+    // The second case is the same shape arriving late: `item` is still a
+    // reference when the annotation is planned and only becomes a token
+    // in `liftLiteralTokens`, so this cannot be decided on the authored
+    // grammar.
+    const lit = (t) => ({ kind: 'term', literal: t })
+    const bare = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'star', inner: { kind: 'group', alts: [[lit(',')]] } }]] },
+    ]
+    assert.deepEqual(build(bare, 'top', ',,'), [',,'])
+
+    const lifted = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'star', inner: ref('item') }]] },
+      { name: 'item', alts: [[lit('x')]] },
+    ]
+    assert.deepEqual(build(lifted, 'top', 'xxx'), ['xxx'])
+  })
+
+  it('refuses a value a repetition reaches through a plain wrapper', () => {
+    // Collecting does not excuse the refusal above, it narrows it. What
+    // the helper pushes here is `mid` — an ordinary rule, resolved to
+    // its own text — and that text is still missing `inner`'s match. It
+    // built `["[]","[]"]`: two elements, both empty of the value.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'star', inner: ref('mid') }]] },
+      { name: 'mid', alts: [[term('['), ref('inner'), term(']')]] },
+      { name: 'inner', value: { kind: 'object', members: ['d'] },
+        alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /builds a value of its own/)
   })
 
   it('refuses it through a plain intermediate rule too', () => {

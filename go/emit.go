@@ -192,6 +192,16 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	grammar = rewriteTailRepeats(grammar, start)
 	grammar = desugar(grammar)
 
+	// Both are named AFTER desugar, because both are keyed by the rule
+	// names the emitter will actually see.
+	arrayHelpers := planArrayHelpers(grammar, valuePlan.collect)
+	valueRules := map[string]bool{}
+	for _, p := range grammar.Productions {
+		if p.Value != nil {
+			valueRules[p.Name] = true
+		}
+	}
+
 	// Token allocation.
 	literals := map[string]string{}    // literal-key -> token name
 	regexTokens := map[string]string{} // regex key -> token name
@@ -427,7 +437,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		}
 		if err := emitProduction(prod, grammar, literals, regexTokens, knownRules,
 			tag, ruleSpec, firstSets, nullable, refs,
-			followSets, followPairs, cc, valuePlan, prov); err != nil {
+			followSets, followPairs, cc, valuePlan.plan, arrayHelpers,
+			valueRules, prov); err != nil {
 			return nil, err
 		}
 	}
@@ -930,12 +941,127 @@ func emitTailRepeat(prod *Production, literals, regexTokens map[string]string,
 	}
 }
 
+// planArrayHelpers names the generated helpers that stand inside an
+// `; @array`, and so must FILL that array rather than build a node of
+// their own.
+//
+// The engine seeds a pushed child's node from its parent (MakeRule), so a
+// helper that simply does not allocate writes its elements straight into
+// the array the annotated rule opened. That is what keeps collecting a
+// repetition an emitter change: there is only ever the one array, so no
+// builtin has to learn to splice one into another.
+//
+// Walks from each annotated array production through helper references
+// only. A user rule ENDS the walk — it builds its own value, or its own
+// tree resolved to text, and either way it is one element. Mirrors the TS
+// `planArrayHelpers`.
+func planArrayHelpers(grammar *Grammar, collect map[string][]bool) map[string]bool {
+	byName := map[string]*Production{}
+	for _, p := range grammar.Productions {
+		byName[p.Name] = p
+	}
+	helpers := map[string]bool{}
+
+	// Whether anything inside this helper would become an ELEMENT — a
+	// reference to a rule of the author's, rather than more helpers and
+	// terminals.
+	//
+	// A repetition of pure terminals has nothing to collect, and
+	// collecting it drops the run rather than taking it as text:
+	// `*( "," )` built `[]` where it used to build `[",,"]`. `*item` with
+	// `item = "x"` is the same shape and is why this is asked HERE rather
+	// than on the authored grammar — `item` is still a reference when the
+	// annotation is planned, and only becomes a token later, in
+	// liftLiteralTokens.
+	//
+	// It is the rule already applied to a bare group, for the same
+	// reason: a part with no reference inside it is one element, not none.
+	var yieldsElements func(name string, seen map[string]bool) bool
+	yieldsElements = func(name string, seen map[string]bool) bool {
+		prod := byName[name]
+		if prod == nil || seen[name] {
+			return false
+		}
+		seen[name] = true
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if el.Kind != KindRef {
+					continue
+				}
+				target := byName[el.Name]
+				if target == nil || target.NodeKind != "helper" {
+					return true
+				}
+				if yieldsElements(el.Name, seen) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var walk func(name string)
+	walk = func(name string) {
+		prod := byName[name]
+		if prod == nil || prod.NodeKind != "helper" || helpers[name] {
+			return
+		}
+		helpers[name] = true
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if el.Kind == KindRef {
+					walk(el.Name)
+				}
+			}
+		}
+	}
+
+	for _, prod := range grammar.Productions {
+		if prod.Value == nil || prod.Value.Kind != "array" {
+			continue
+		}
+		sugar, ok := collect[originOf(prod)]
+		if !ok {
+			continue
+		}
+		for _, alt := range prod.Alts {
+			// Desugaring leaves every pushing part a reference, so the
+			// k-th reference here is the k-th part the annotation was
+			// planned against — the same correspondence the member count
+			// is checked on at emit.
+			k := 0
+			for _, el := range alt {
+				if el.Kind != KindRef {
+					continue
+				}
+				if k < len(sugar) && sugar[k] &&
+					yieldsElements(el.Name, map[string]bool{}) {
+					walk(el.Name)
+				}
+				k++
+			}
+		}
+	}
+	return helpers
+}
+
 func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens map[string]string,
 	knownRules map[string]bool, tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec,
 	firstSets map[string]map[string]bool, nullable map[string]bool, refs *refRegistry,
 	followSets map[string]map[string]bool,
 	followPairs map[string]map[string]map[string]bool, cc *contestCtx,
-	valuePlan map[string][]bool, prov map[string]string) error {
+	valuePlan map[string][]bool,
+	// arrayHelpers holds the helpers of an annotated array, valueRules
+	// the rules that build a value. Together they say, for any link that
+	// pushes: does the pushed rule fill this array itself (no push of our
+	// own), nest whole (@push$), or resolve to its matched text
+	// (@push$ {src})?
+	arrayHelpers, valueRules map[string]bool,
+	prov map[string]string) error {
+
+	// This rule stands inside an `; @array`: it inherits that array from
+	// its parent and pushes into it, instead of building a node.
+	arrayElem := arrayHelpers[prod.Name]
 
 	// The token names that came from character classes, for
 	// altHeadSharesToken: only between two of these does character
@@ -1011,7 +1137,17 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 
 	prodKind := prod.kind()
 
-	if allSimple {
+	// A collecting helper with several alternatives shares ONE close alt
+	// here, and the alternatives need not agree: `( a / *b )` pushes an
+	// element down one and a helper that fills the array down the other,
+	// and a single close cannot be both. The dispatcher path gives each
+	// alternative its own rule, and so its own close. Repetition helpers
+	// are exempt because their exit guards (FOLLOW, FOLLOW2) live on this
+	// path — and they cannot disagree anyway: an option has one pushing
+	// alternative, and a star is multi-segment and never reaches here.
+	splitAlts := arrayElem && len(prod.Alts) > 1 && !prod.RepeatHelper
+
+	if allSimple && !splitAlts {
 		// Order non-empty alts first, empty alts last (stable).
 		ordered := []Sequence{}
 		for _, alt := range prod.Alts {
@@ -1181,6 +1317,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		opens := reorderKeywordShadow(prod, entries, grammar,
 			literals, regexTokens, followSets, cc)
 		rs := &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
+		closes := []map[string]any{}
 		if anyHasRef(prod.Alts) {
 			close := captureChildFields(refs, prod.Name, prodKind)
 			close["g"] = tag
@@ -1188,6 +1325,31 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				close["m"] = "_"
 			}
 			rs.Close = mapsToAlts([]map[string]any{close})
+			closes = append(closes, close)
+		}
+		if arrayElem {
+			for _, o := range opens {
+				useValueActions(o, nil, nil)
+			}
+			// At most one distinct pushed rule is an ELEMENT here: the
+			// only multi-alt shapes left on this path are an option (one
+			// pushing alternative) and a group whose alternatives were
+			// checked to agree by splitAlts.
+			elem := ""
+			for _, alt := range ordered {
+				sg := segmentize(alt, literals, regexTokens)
+				if len(sg) > 0 && sg[0].ref != "" && !arrayHelpers[sg[0].ref] {
+					elem = sg[0].ref
+					break
+				}
+			}
+			for _, c := range closes {
+				pushElement(c, elem, valueRules)
+			}
+			rs.Open = mapsToAlts(opens)
+			if len(closes) > 0 {
+				rs.Close = mapsToAlts(closes)
+			}
 		}
 		ruleSpec[prod.Name] = rs
 		return nil
@@ -1195,9 +1357,10 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 
 	if len(prod.Alts) == 1 {
 		// Single-alt, multi-segment: chain rules directly on the production.
-		return emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag,
+		return emitChainArray(prod.Name, prod.Alts[0], literals, regexTokens, tag,
 			ruleSpec, refs, prodKind, prov, originOf(prod),
-			prod.Value, valuePlan[originOf(prod)], prod.Sp)
+			prod.Value, valuePlan[originOf(prod)], prod.Sp,
+			arrayHelpers, valueRules, arrayElem)
 	}
 
 	// A value annotation names one member per pushing segment, which only
@@ -1247,8 +1410,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			prov[implName] = originOf(prod)
 		}
 
-		if err := emitChain(implName, alt, literals, regexTokens, tag, ruleSpec,
-			refs, "helper", prov, originOf(prod), nil, nil, nil); err != nil {
+		if err := emitChainArray(implName, alt, literals, regexTokens, tag, ruleSpec,
+			refs, "helper", prov, originOf(prod), nil, nil, nil,
+			arrayHelpers, valueRules, arrayElem); err != nil {
 			return err
 		}
 
@@ -1370,9 +1534,18 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		dispClose["m"] = "_"
 	}
 	specificityPermute(dispatchEntries, cc, grammar, regexTokens)
+	dispOpens := reorderKeywordShadow(prod, dispatchEntries, grammar,
+		literals, regexTokens, followSets, cc)
+	// The impl rule this dispatches to inherits the array and fills it
+	// directly, so the dispatcher allocates nothing and captures nothing.
+	if arrayElem {
+		for _, o := range dispOpens {
+			useValueActions(o, nil, nil)
+		}
+		useValueActions(dispClose, nil, nil)
+	}
 	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
-		Open: mapsToAlts(reorderKeywordShadow(prod, dispatchEntries, grammar,
-			literals, regexTokens, followSets, cc)),
+		Open:  mapsToAlts(dispOpens),
 		Close: mapsToAlts([]map[string]any{dispClose}),
 	}
 	return nil
@@ -1402,6 +1575,19 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 	// business as the planner's — and were the only annotation refusals
 	// left that could not say where.
 	value *ValueAnnotation, nested []bool, sp *SrcSpan) error {
+	return emitChainArray(headName, alt, literals, regexTokens, tag, ruleSpec,
+		refs, headKind, prov, origin, value, nested, sp, nil, nil, false)
+}
+
+// emitChainArray is emitChain plus the array-collection arguments.
+// arrayElem says this chain is a helper INSIDE an `; @array`: it inherits
+// that array rather than allocating a node, and its pushing links fill
+// it. Never set together with value — an annotated rule is not a helper.
+func emitChainArray(headName string, alt Sequence, literals, regexTokens map[string]string,
+	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
+	headKind string, prov map[string]string, origin string,
+	value *ValueAnnotation, nested []bool, sp *SrcSpan,
+	arrayHelpers, valueRules map[string]bool, arrayElem bool) error {
 
 	segs := segmentize(alt, literals, regexTokens)
 	chainName := func(i int) string {
@@ -1556,6 +1742,17 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			closeMaps = []map[string]any{close}
 		}
 
+		if arrayElem {
+			useValueActions(headAlt, nil, nil)
+			elem := ""
+			if seg.ref != "" && !arrayHelpers[seg.ref] {
+				elem = seg.ref
+			}
+			for _, c := range closeMaps {
+				pushElement(c, elem, valueRules)
+			}
+		}
+
 		if value != nil {
 			isArray := value.Kind == "array"
 			m := memberAt(i)
@@ -1601,7 +1798,13 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			// whole. The name is still consulted for an object, because a
 			// leading member's rule is inlined away and only the annotation
 			// still knows what it was.
-			if 0 <= m {
+			// A part that is a REPETITION under an array is not one
+			// element: the helper it became inherits this array and
+			// pushes the parts inside it, in order. Pushing here as well
+			// would append the array to itself, so this link only sheds
+			// its tree builders.
+			fills := isArray && seg.ref != "" && arrayHelpers[seg.ref]
+			if 0 <= m && !fills {
 				isNested := m < len(nested) && nested[m]
 				act, cfgKey := "@setval$", "setval$"
 				if isArray {
@@ -1635,6 +1838,28 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 		ruleSpec[name] = rs
 	}
 	return nil
+}
+
+// pushElement puts the array builder on the close of a link INSIDE an
+// `; @array`.
+//
+// elem is the rule that link pushes, when pushing it contributes an
+// element. There are three cases and this decides between them: no
+// element (a separator, or a push of another collecting helper, which
+// fills the same array itself) drops the tree builders and adds nothing;
+// a rule that builds a value of its own nests whole; anything else
+// resolves to the text its tree builders accumulated. Mirrors the TS
+// `pushElement`.
+func pushElement(spec map[string]any, elem string, valueRules map[string]bool) {
+	if elem == "" {
+		useValueActions(spec, nil, nil)
+		return
+	}
+	var cfg map[string]any
+	if !valueRules[elem] {
+		cfg = map[string]any{"push$": map[string]any{"src": true}}
+	}
+	useValueActions(spec, []string{"@push$"}, cfg)
 }
 
 // useValueActions installs the value builders on an alt of a rule that

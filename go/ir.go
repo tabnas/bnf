@@ -416,12 +416,15 @@ func diagName() string { return diagPrefix }
 // Nesting is decided by POSITION, not by looking a member name up as a
 // rule name. An array names nothing at all, so a name-based rule could
 // never nest an array element. Mirrors the TS `planValueAnnotations`.
-func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
+func planValueAnnotations(grammar *Grammar) (valuePlan, error) {
 	byName := map[string]*Production{}
 	for _, p := range grammar.Productions {
 		byName[p.Name] = p
 	}
-	plan := map[string][]bool{}
+	plan := valuePlan{
+		plan:    map[string][]bool{},
+		collect: map[string][]bool{},
+	}
 
 	// Nothing annotated means nothing to predict, and this is the common
 	// case by a wide margin — every grammar in the conformance corpus.
@@ -461,7 +464,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 			if hit == "" {
 				continue
 			}
-			return nil, &EmitError{Rule: prod.Name, Sp: prod.Sp, Message: fmt.Sprintf(
+			return valuePlan{}, &EmitError{Rule: prod.Name, Sp: prod.Sp, Message: fmt.Sprintf(
 				diagName()+": rule '%s' begins with '%s', and '%s' is folded "+
 					"into '%s' by left-recursion elimination — which erases the "+
 					"value '%s' is annotated to build, so nothing would produce "+
@@ -482,13 +485,13 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		// what they wrote, not about anything the compiler derived.
 		sp := prod.Sp
 		if v.Kind != "object" && v.Kind != "array" {
-			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+			return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 				diagName()+": rule '%s' has a value annotation of unknown kind "+
 					"'%s'. A rule builds an 'object' or an 'array'.",
 				prod.Name, v.Kind)}
 		}
 		if len(prod.Alts) != 1 {
-			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+			return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 				diagName()+": rule '%s' has a value annotation and %d "+
 					"alternatives. A value annotation names the parts of ONE "+
 					"alternative; with more than one it is ambiguous which "+
@@ -504,7 +507,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		seenMember := map[string]bool{}
 		for _, m := range v.Members {
 			if m == "" {
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' has a value annotation naming a "+
 						"member that is not a name (\"\"). Every member of an "+
 						"object is named by a non-empty string.", prod.Name)}
@@ -513,7 +516,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 			// both write to it, so the second silently overwrites the first
 			// and that part's match is simply absent from the result.
 			if seenMember[m] {
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' names the member '%s' twice. Each "+
 						"member is a separate key, so the second part would "+
 						"overwrite the first. Give them different names.",
@@ -529,7 +532,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 			// "kids" as member names are captured correctly and stay
 			// allowed.
 			if m == srcField {
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' names a member '%s'. That name is "+
 						"how a value is told apart from a parse-tree node, so a "+
 						"value carrying it is mistaken for a node and dropped "+
@@ -546,7 +549,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		// its value. Annotating one is a mistake with no reading, and it
 		// was silently discarded.
 		if len(alt) == 1 && alt[0].Kind == KindProse {
-			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+			return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 				diagName()+": rule '%s' has a value annotation, but its body "+
 					"is prose ('<%s>'), which describes a built-in token rather "+
 					"than defining a rule — the rule is dropped, so nothing "+
@@ -577,7 +580,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 				if len(v.Members) == 1 {
 					plural = ""
 				}
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' builds an array and names %d "+
 						"member%s. An array's parts are positional and are not "+
 						"named; annotate it as an object to name them.",
@@ -593,7 +596,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 				if len(parts) == 1 {
 					verb = " that produces"
 				}
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' names %d member%s but has %d part%s "+
 						"a value. A value annotation names one member per part "+
 						"that produces a value; a literal produces no value "+
@@ -619,7 +622,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		// the shape check is left here.
 		if len(alt) > 0 && alt[0].Kind == KindRef && !exemptAlias(prod, cyclic) {
 			if ok, _ := resolveLeadingFold(alt[0].Name, byName); !ok {
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' names '%s' as its first member, but "+
 						"'%s' is folded into this rule by left-recursion "+
 						"elimination and its body is not a single part, so the "+
@@ -652,6 +655,18 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 			if hit == "" {
 				continue
 			}
+			// A repetition under an array is COLLECTED, not taken as
+			// text, so the question below has to be asked again of each
+			// thing its helper pushes rather than of the run as a whole.
+			// Reaching this rule ITSELF is still refused — that nests the
+			// rule's own array inside itself, which is a shape nobody
+			// writing a list means.
+			if v.Kind == "array" && collectsValues(el) && hit != prod.Name {
+				hit = hiddenAnnotated(el, byName)
+				if hit == "" {
+					continue
+				}
+			}
 			which := fmt.Sprintf("element %d", i+1)
 			if v.Kind != "array" {
 				which = fmt.Sprintf("member '%s'", v.Members[i])
@@ -661,7 +676,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 			// wording, since "make that part 'add' itself" is nonsense
 			// advice for a rule that already is.
 			if hit == prod.Name {
-				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' takes %s as source text, but that "+
 						"part reaches '%s' itself, which builds a value — a rule "+
 						"that builds a value contributes no text to the part "+
@@ -670,7 +685,7 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 						"pushes instead.",
 					prod.Name, which, prod.Name)}
 			}
-			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+			return valuePlan{}, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 				diagName()+": rule '%s' takes %s as source text, but '%s' is "+
 					"reached from it and builds a value of its own — a rule "+
 					"that builds a value contributes no text to the part above "+
@@ -680,9 +695,34 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 				prod.Name, which, hit, hit, hit, hit)}
 		}
 
-		plan[prod.Name] = flags
+		plan.plan[prod.Name] = flags
+		// Which parts are a REPETITION the author wrote here, and so
+		// collect into the array rather than becoming one element of it.
+		// Recorded on the AUTHORED shape, for the same reason everything
+		// else in this pass is: by emit time Paull's substitution has
+		// inlined the leading member's own body, whose helpers look
+		// exactly like a repetition written at this level. They are not;
+		// that member is one element, and collecting it loses it.
+		if v.Kind == "array" {
+			sugar := make([]bool, len(parts))
+			for i, el := range parts {
+				sugar[i] = collectsValues(el)
+			}
+			plan.collect[prod.Name] = sugar
+		}
 	}
 	return plan, nil
+}
+
+// valuePlan is what planValueAnnotations predicts, per annotated
+// production: one flag per part that produces a value. `plan` says
+// whether that part nests (its own rule builds a value); `collect` —
+// arrays only — says whether it is a repetition, and so contributes its
+// own parts as elements instead of being one. Mirrors the TS
+// `ValuePlan`.
+type valuePlan struct {
+	plan    map[string][]bool
+	collect map[string][]bool
 }
 
 // srcField is the field a parse-tree node carries its matched text in,
@@ -781,6 +821,68 @@ func pushesValue(el *Element) bool {
 		return false
 	}
 	return true
+}
+
+// hiddenAnnotated returns the first value-building rule that a
+// COLLECTING part would still take as text.
+//
+// Collecting changes what the refusal has to ask. A repetition no longer
+// resolves to its run's text — it pushes what is inside it — so an
+// annotated rule its helper pushes DIRECTLY nests as an element and
+// nothing goes missing. One reached through an UNANNOTATED wrapper is a
+// different matter: that wrapper is an ordinary rule, pushed as its own
+// text, and the text is still missing the annotated rule's match. So the
+// walk descends through collecting sugar and then asks the ordinary
+// question of each reference it arrives at.
+//
+// `top = *mid   ; @array` with `mid = "[" inner "]"` and an annotated
+// `inner` is the case: it built `["[]","[]"]` — two elements, both
+// missing the value — when the refusal was skipped for the whole
+// repetition rather than for what the repetition pushes. Mirrors the TS
+// `hiddenAnnotated`.
+func hiddenAnnotated(el *Element, byName map[string]*Production) string {
+	switch el.Kind {
+	case KindRef:
+		target := byName[el.Name]
+		// Annotated: the helper pushes it whole, so it nests.
+		if target == nil || target.Value != nil {
+			return ""
+		}
+		return reachesAnnotated(el, byName, map[string]bool{})
+	case KindOpt, KindStar, KindPlus, KindRep:
+		return hiddenAnnotated(el.Inner, byName)
+	case KindGroup:
+		for _, alt := range el.Alts {
+			for _, inner := range alt {
+				if hit := hiddenAnnotated(inner, byName); hit != "" {
+					return hit
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// collectsValues reports whether a part COLLECTS into an enclosing
+// `; @array` — contributes the parts inside it as elements, in order —
+// rather than being one element itself.
+//
+// A repetition does: it is the only way to write a list, and taking the
+// whole run as one element is what made `; @array` unable to build one.
+// A bare GROUP does not, and the difference is not arbitrary. A group is
+// how an author writes ONE element out of several pieces: `( "[" p "]" )`
+// means the element `[7]`, and a group holding only terminals is an
+// element with no reference in it at all — collecting either yields fewer
+// elements than the author wrote, silently. A group reached THROUGH a
+// repetition does collect, because there it is the repeated item rather
+// than an element: `*( "," item )` is a list of `item`, not a list of
+// runs. Mirrors the TS `collectsValues`.
+func collectsValues(el *Element) bool {
+	switch el.Kind {
+	case KindStar, KindPlus, KindOpt, KindRep:
+		return true
+	}
+	return false
 }
 
 // resolveLeadingFold follows a leading reference the way left-recursion

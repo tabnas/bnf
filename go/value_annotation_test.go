@@ -812,10 +812,12 @@ func TestValueAnnotationRefusesASrcMemberReachingAValue(t *testing.T) {
 			Alts:  []Sequence{{refEl("d")}}},
 		{Name: "d", Alts: []Sequence{{digitsEl()}}},
 	}
+	// A REPETITION is not in here: it collects into the array, so the
+	// value it reaches is pushed as an element and no text is wanted from
+	// it. The test below asserts that.
 	cases := map[string]*Element{
 		"a group":           groupEl(Sequence{refEl("inner")}),
 		"a group with text": groupEl(Sequence{termEl("["), refEl("inner"), termEl("]")}),
-		"a repetition":      {Kind: KindStar, Inner: refEl("inner")},
 	}
 	for label, el := range cases {
 		prods := append([]*Production{
@@ -828,6 +830,79 @@ func TestValueAnnotationRefusesASrcMemberReachingAValue(t *testing.T) {
 			!strings.Contains(err.Error(), "builds a value of its own") {
 			t.Errorf("%s: expected a source-text refusal, got %v", label, err)
 		}
+	}
+}
+
+// The counterpart of the refusal above. A repetition does not take its
+// run as text — it fills the array — so each iteration nests as its own
+// element and there is nothing to lose.
+func TestValueAnnotationCollectsARepetitionOfAnAnnotatedRule(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{termEl("<"),
+				{Kind: KindStar, Inner: refEl("inner")}, termEl(">")}}},
+		{Name: "inner",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		// ONE digit, not `1*DIGIT`: a greedy member would swallow the
+		// whole run into a single iteration and prove nothing about
+		// collecting it.
+		{Name: "d", Alts: []Sequence{{{Kind: KindRegex, Pattern: "[0-9]"}}}},
+	}
+	got, _ := json.Marshal(buildValue(t, prods, "top", "<12>"))
+	if string(got) != `[{"d":"1"},{"d":"2"}]` {
+		t.Errorf("got %s, want [{d:1},{d:2}]", got)
+	}
+}
+
+// A repetition of pure terminals has nothing to collect, so it stays its
+// matched text. Collecting it hands back an EMPTY array and drops the
+// run, which is the one outcome worse than the blob this work replaces.
+//
+// The second case is the same shape arriving late: `item` is still a
+// reference when the annotation is planned and only becomes a token in
+// liftLiteralTokens, so this cannot be decided on the authored grammar.
+// Twin of the TypeScript case.
+func TestValueAnnotationKeepsATerminalRepetitionAsText(t *testing.T) {
+	bare := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{{Kind: KindStar,
+				Inner: groupEl(Sequence{termEl(",")})}}}},
+	}
+	got, _ := json.Marshal(buildValue(t, bare, "top", ",,"))
+	if string(got) != `[",,"]` {
+		t.Errorf("bare literal repetition: got %s, want [\",,\"]", got)
+	}
+
+	lifted := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{{Kind: KindStar, Inner: refEl("item")}}}},
+		{Name: "item", Alts: []Sequence{{termEl("x")}}},
+	}
+	got, _ = json.Marshal(buildValue(t, lifted, "top", "xxx"))
+	if string(got) != `["xxx"]` {
+		t.Errorf("lifted literal repetition: got %s, want [\"xxx\"]", got)
+	}
+}
+
+// Collecting does not excuse the refusal above, it narrows it. What the
+// helper pushes here is `mid` — an ordinary rule, resolved to its own
+// text — and that text is still missing `inner`'s match. It built
+// `["[]","[]"]`: two elements, both empty of the value.
+func TestValueAnnotationRefusesAValueBehindAWrapperInARepetition(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{{Kind: KindStar, Inner: refEl("mid")}}}},
+		{Name: "mid", Alts: []Sequence{{termEl("["), refEl("inner"), termEl("]")}}},
+		{Name: "inner",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		{Name: "d", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "builds a value of its own") {
+		t.Errorf("expected a source-text refusal, got %v", err)
 	}
 }
 
