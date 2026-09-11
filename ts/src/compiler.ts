@@ -1641,6 +1641,31 @@ function inlineHeadRef(
   if (target.probeDispatch || target.probeHelper || target.tailRepeat) {
     return null
   }
+  // A rule that BUILDS A VALUE cannot be inlined: expanding it dissolves
+  // the rule, so the caller can no longer invoke its builders and the
+  // annotated value silently disappears. This path reaches refs the
+  // leading-reference scan in `planValueAnnotations` does not, because
+  // that scan models Paull's substitution — which inlines only a literal
+  // leading `ref` — while this one reads the UNWRAPPED alt and so sees
+  // inside a single-alternative group.
+  //
+  // Refusing rather than declining, because declining is not neutral:
+  // these alternatives are being factored precisely because their shared
+  // prefix is longer than the dispatch lookahead, so leaving them
+  // unfactored leaves a grammar that cannot dispatch and fails at PARSE
+  // time with "unexpected character" — a runtime error naming nothing
+  // the author did. The conflict is genuine (factoring must dissolve the
+  // rule; the annotation needs it kept), so it is worth saying out loud.
+  if (null != target.value) {
+    throw new EmitError(
+      `${diagName()}: rule '${target.name}' builds a value, but it is the ` +
+      `shared prefix of two alternatives that have to be left-factored — ` +
+      `factoring inlines it, which would erase the value it is annotated ` +
+      `to build. Give the alternatives leading tokens that tell them ` +
+      `apart, or move the annotation to a rule that is not a shared ` +
+      `prefix.`,
+      { rule: target.name, sp: target.sp })
+  }
   const body = unwrapAlt(target.alts[0])
   if (0 === body.length || !elemEqual(body[0], headEl)) return null
   return [...body, ...v.slice(1)]
@@ -2096,6 +2121,24 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
           resolved: true,
         })
 
+        // The dispatcher swallows the optional AND everything after it,
+        // so one reference now covers two regions the author drew a
+        // boundary between. A member count still matches — one pushing
+        // part before, one after — which is exactly why this cannot be
+        // caught downstream: the count is preserved while the BOUNDARY
+        // moves. `top = ["a" "!"] "a"` as an array built a self-
+        // referential `[ [Circular] ]`, and there is no shape of member
+        // list that would have been right.
+        if (null != prod.value) {
+          throw new EmitError(
+            `${diagName()}: rule '${originOf(prod)}' has a value ` +
+            `annotation, but its optional prefix shares vocabulary with ` +
+            `what follows it, so the two are compiled into one dispatch ` +
+            `helper — a member cannot cover the optional alone any more. ` +
+            `Give the optional its own rule and annotate that, or make ` +
+            `the prefix and the tail start with different tokens.`,
+            { rule: originOf(prod), sp: prod.sp })
+        }
         resultAlt.push({ kind: 'ref', name: dispatchName })
         // Everything that followed the opt is now inside the dispatcher
         // (withBranch / noBranch), so skip the rest of the alt.
@@ -4037,7 +4080,7 @@ function emitProduction(
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
       ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod),
-      prod.value, valuePlan.get(originOf(prod)))
+      prod.value, valuePlan.get(originOf(prod)), prod.sp)
     return
   }
 
@@ -4276,6 +4319,12 @@ function emitChain(
   // two concurrent conversions could overwrite each other's flags
   // mid-emit.
   nested?: boolean[],
+  // The annotated production's span, for the two refusals below. They
+  // are raised AFTER the rewrites, on a reachable path (a member whose
+  // rule was lifted to a token), so they are as much the author's
+  // business as the planner's — and were the only annotation refusals
+  // left that could not say where.
+  sp?: SrcSpan,
 ) {
   const segs = segmentize(alt, literals, regexTokens)
   const chainName = (i: number) =>
@@ -4298,7 +4347,7 @@ function emitChain(
       `${diagName()}: rule '${origin ?? headName}' has a value annotation ` +
       `of unknown kind '${value.kind}'. A rule builds an 'object' or an ` +
       `'array'.`,
-      { rule: origin ?? headName })
+      { rule: origin ?? headName, sp })
   }
 
   // One name per pushing segment, or the names line up with the wrong
@@ -4324,7 +4373,7 @@ function emitChain(
         `lexer token. Giving that rule a body that is not a bare terminal ` +
         `(a repetition, a group, or more than one element) keeps it ` +
         `nameable.`,
-        { rule: origin ?? headName })
+        { rule: origin ?? headName, sp })
     }
   }
 
@@ -4348,7 +4397,7 @@ function emitChain(
         `single literal is the usual cause: it becomes a lexer token here ` +
         `and stops being a part at all. Give that rule a body that is not ` +
         `a bare terminal.`,
-        { rule: origin ?? headName })
+        { rule: origin ?? headName, sp })
     }
   }
 

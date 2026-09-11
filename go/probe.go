@@ -8,7 +8,10 @@ package bnf
 // leading vocabulary overlaps X's, we rewrite the rule to a
 // probe + phase-retry dispatcher (function-free in builtins mode).
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 // isProbeableOpt: element is `[ X D ]` where X is one or more elements
 // and D is a terminal literal or a regex terminal. Returns (xSeq, D).
@@ -216,6 +219,24 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 					Reason: "optional prefix shares vocabulary with tail", Resolved: true,
 				})
 
+				// The dispatcher swallows the optional AND everything after
+				// it, so one reference now covers two regions the author
+				// drew a boundary between. A member count still matches —
+				// one pushing part before, one after — which is exactly why
+				// this cannot be caught downstream: the count is preserved
+				// while the BOUNDARY moves. `top = ["a" "!"] "a"` as an
+				// array built a self-referential [ [Circular] ], and there
+				// is no shape of member list that would have been right.
+				if prod.Value != nil {
+					panic(&EmitError{Rule: originOf(prod), Sp: prod.Sp, Message: fmt.Sprintf(
+						diagName()+": rule '%s' has a value annotation, but its "+
+							"optional prefix shares vocabulary with what follows "+
+							"it, so the two are compiled into one dispatch helper "+
+							"— a member cannot cover the optional alone any more. "+
+							"Give the optional its own rule and annotate that, or "+
+							"make the prefix and the tail start with different "+
+							"tokens.", originOf(prod))})
+				}
 				resultAlt = append(resultAlt, &Element{Kind: KindRef, Name: dispatchName})
 				i = len(alt)
 				touched = true

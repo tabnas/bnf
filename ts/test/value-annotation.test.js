@@ -624,4 +624,93 @@ describe('value annotations', () => {
     ]
     assert.throws(() => emit(prods, 'top'), /names the member 'x' twice/)
   })
+
+  // ---- Rewrites that move a boundary without changing the count ----
+
+  it('refuses an annotation on a probe-dispatched alternative', () => {
+    // `top = [ "a" "!" ] "a"` — the optional prefix shares vocabulary
+    // with the tail, so both are compiled into ONE dispatch helper. The
+    // member count still matches (one pushing part before, one after),
+    // which is why no count check can catch it: the count is preserved
+    // while the boundary moves. It built a self-referential array —
+    // `[ [Circular] ]` — not merely the wrong text.
+    const prods = [
+      { name: 'top', value: { kind: 'array' }, sp: { s: 1, e: 9 },
+        alts: [[{ kind: 'opt', inner: { kind: 'group',
+          alts: [[term('a'), term('!')]] } }, term('a')]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), (e) => {
+      assert.match(e.message, /one dispatch helper/)
+      assert.deepEqual(e.sp, { s: 1, e: 9 })
+      return true
+    })
+  })
+
+  it('refuses to left-factor away a rule that builds a value', () => {
+    // `leftFactor` reads the UNWRAPPED alt, so it sees a reference
+    // inside a single-alternative group — which the leading-reference
+    // scan does not, because that models Paull's substitution. Factoring
+    // inlines `leaf`, dissolving the rule, and its value vanished:
+    // `{rule:'top',src:'aby',kids:[]}`.
+    //
+    // Declining to factor is not an option: these alternatives are being
+    // factored because their shared prefix outruns the dispatch
+    // lookahead, so leaving them unfactored yields a grammar that fails
+    // at PARSE time instead. Hence a refusal naming the conflict.
+    const prods = [
+      { name: 'top', alts: [
+        [{ kind: 'group', alts: [[letters(), term('x')]] }],
+        [{ kind: 'group', alts: [[ref('leaf'), term('y')]] }],
+      ] },
+      { name: 'leaf', value: { kind: 'object', members: ['w'] },
+        sp: { s: 3, e: 11 }, alts: [[letters()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), (e) => {
+      assert.match(e.message, /shared prefix of two alternatives/)
+      assert.deepEqual(e.sp, { s: 3, e: 11 })
+      return true
+    })
+  })
+
+  it('carries the span on a post-rewrite count refusal', () => {
+    // These two fire AFTER the rewrites, on a reachable path — a member
+    // whose own rule is a single literal becomes a lexer token and stops
+    // being a part — so they are as much the author's business as the
+    // planner's, and were the last annotation refusals that could not
+    // say where.
+    const sp = { s: 5, e: 25, r: 2, c: 1 }
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['n', 's'] }, sp,
+        alts: [[ref('n'), ref('s')]] },
+      { name: 'n', alts: [[digits()]] },
+      { name: 's', alts: [[term('+')]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), (e) => {
+      assert.match(e.message, /names 2 members but builds 1/)
+      assert.deepEqual(e.sp, sp)
+      return true
+    })
+  })
+
+  it('keeps `__proto__` an ordinary member name', () => {
+    // Not a refusal, and deliberately so. The engine allocates a value
+    // object with `Object.create(null)` — "no prototype, like JSON" — so
+    // there is no inherited accessor to trip: `__proto__` becomes an own
+    // enumerable property and the result's prototype stays null, for a
+    // scalar member and a nested one alike. Reserving it would refuse a
+    // name that works.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['__proto__', 'b'] },
+        alts: [[term('<'), ref('a'), term('.'), ref('b')]] },
+      { name: 'a', value: { kind: 'object', members: ['d'] }, alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+      { name: 'b', alts: [[digits()]] },
+    ]
+    const out = build(prods, 'top', '<1.2')
+    assert.equal(Object.getPrototypeOf(out), null, 'value objects have no prototype')
+    assert.ok(Object.prototype.hasOwnProperty.call(out, '__proto__'),
+      '__proto__ must be an OWN property, not a prototype swap')
+    assert.deepEqual(Object.keys(out), ['__proto__', 'b'])
+    assert.deepEqual(out['__proto__'], { d: '1' })
+  })
 })

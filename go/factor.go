@@ -1,5 +1,7 @@
 package bnf
 
+import "fmt"
+
 // factor.go — left factoring.
 //
 // tabnas alternates are first-match-wins: once an alternative's first
@@ -528,6 +530,29 @@ func inlineHeadRef(v Sequence, headEl *Element, grammar *Grammar) Sequence {
 	}
 	if target.ProbeDisp != nil || target.ProbeHelper != nil || target.TailRepeat != nil {
 		return nil
+	}
+	// A rule that BUILDS A VALUE cannot be inlined: expanding it dissolves
+	// the rule, so the caller can no longer invoke its builders and the
+	// annotated value silently disappears. This path reaches refs the
+	// leading-reference scan in planValueAnnotations does not, because that
+	// scan models Paull's substitution — which inlines only a literal
+	// leading ref — while this one reads the UNWRAPPED alt and so sees
+	// inside a single-alternative group.
+	//
+	// Refusing rather than declining, because declining is not neutral:
+	// these alternatives are being factored precisely because their shared
+	// prefix is longer than the dispatch lookahead, so leaving them
+	// unfactored leaves a grammar that cannot dispatch and fails at PARSE
+	// time with "unexpected character" — a runtime error naming nothing
+	// the author did.
+	if target.Value != nil {
+		panic(&EmitError{Rule: target.Name, Sp: target.Sp, Message: fmt.Sprintf(
+			diagName()+": rule '%s' builds a value, but it is the shared "+
+				"prefix of two alternatives that have to be left-factored — "+
+				"factoring inlines it, which would erase the value it is "+
+				"annotated to build. Give the alternatives leading tokens that "+
+				"tell them apart, or move the annotation to a rule that is not "+
+				"a shared prefix.", target.Name)})
 	}
 	body := unwrapAlt(target.Alts[0])
 	if len(body) == 0 || !elemEqual(body[0], headEl) {
