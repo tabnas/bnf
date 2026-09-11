@@ -855,6 +855,36 @@ func TestValueAnnotationCollectsARepetitionOfAnAnnotatedRule(t *testing.T) {
 	}
 }
 
+// A repetition of pure terminals has nothing to collect, so it stays its
+// matched text. Collecting it hands back an EMPTY array and drops the
+// run, which is the one outcome worse than the blob this work replaces.
+//
+// The second case is the same shape arriving late: `item` is still a
+// reference when the annotation is planned and only becomes a token in
+// liftLiteralTokens, so this cannot be decided on the authored grammar.
+// Twin of the TypeScript case.
+func TestValueAnnotationKeepsATerminalRepetitionAsText(t *testing.T) {
+	bare := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{{Kind: KindStar,
+				Inner: groupEl(Sequence{termEl(",")})}}}},
+	}
+	got, _ := json.Marshal(buildValue(t, bare, "top", ",,"))
+	if string(got) != `[",,"]` {
+		t.Errorf("bare literal repetition: got %s, want [\",,\"]", got)
+	}
+
+	lifted := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{{Kind: KindStar, Inner: refEl("item")}}}},
+		{Name: "item", Alts: []Sequence{{termEl("x")}}},
+	}
+	got, _ = json.Marshal(buildValue(t, lifted, "top", "xxx"))
+	if string(got) != `["xxx"]` {
+		t.Errorf("lifted literal repetition: got %s, want [\"xxx\"]", got)
+	}
+}
+
 // Collecting does not excuse the refusal above, it narrows it. What the
 // helper pushes here is `mid` — an ordinary rule, resolved to its own
 // text — and that text is still missing `inner`'s match. It built

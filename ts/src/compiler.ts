@@ -742,6 +742,35 @@ function planArrayHelpers(
     }
   }
 
+  // Whether anything inside this helper would become an ELEMENT — a
+  // reference to a rule of the author's, rather than more helpers and
+  // terminals.
+  //
+  // A repetition of pure terminals has nothing to collect, and
+  // collecting it drops the run rather than taking it as text: `*( "," )`
+  // built `[]` where it used to build `[",,"]`. `*item` with `item = "x"`
+  // is the same shape and is the reason this is asked HERE rather than on
+  // the authored grammar — `item` is still a reference when the
+  // annotation is planned, and only becomes a token later, in
+  // `liftLiteralTokens`.
+  //
+  // It is the rule already applied to a bare group, for the same reason:
+  // a part with no reference inside it is one element, not none.
+  const yieldsElements = (name: string, seen: Set<string>): boolean => {
+    const prod = byName.get(name)
+    if (null == prod || seen.has(name)) return false
+    seen.add(name)
+    for (const alt of prod.alts) {
+      for (const el of alt) {
+        if ('ref' !== el.kind) continue
+        const target = byName.get(el.name)
+        if (null == target || 'helper' !== target.nodeKind) return true
+        if (yieldsElements(el.name, seen)) return true
+      }
+    }
+    return false
+  }
+
   for (const prod of grammar.productions) {
     if ('array' !== prod.value?.kind) continue
     const sugar = collect.get(originOf(prod))
@@ -754,7 +783,7 @@ function planArrayHelpers(
       let k = 0
       for (const el of alt) {
         if ('ref' !== el.kind) continue
-        if (sugar[k]) walk(el.name)
+        if (sugar[k] && yieldsElements(el.name, new Set())) walk(el.name)
         k++
       }
     }

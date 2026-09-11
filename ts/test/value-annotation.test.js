@@ -535,6 +535,31 @@ describe('value annotations', () => {
       [{ d: '1' }, { d: '2' }])
   })
 
+  it('keeps a repetition of pure terminals as its matched text', () => {
+    // There is nothing to collect: a literal produces no value. Taking
+    // the run as text is what the author wrote; collecting it would hand
+    // back an EMPTY array and drop the run, which is the one outcome
+    // worse than the blob this work replaces.
+    //
+    // The second case is the same shape arriving late: `item` is still a
+    // reference when the annotation is planned and only becomes a token
+    // in `liftLiteralTokens`, so this cannot be decided on the authored
+    // grammar.
+    const lit = (t) => ({ kind: 'term', literal: t })
+    const bare = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'star', inner: { kind: 'group', alts: [[lit(',')]] } }]] },
+    ]
+    assert.deepEqual(build(bare, 'top', ',,'), [',,'])
+
+    const lifted = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'star', inner: ref('item') }]] },
+      { name: 'item', alts: [[lit('x')]] },
+    ]
+    assert.deepEqual(build(lifted, 'top', 'xxx'), ['xxx'])
+  })
+
   it('refuses a value a repetition reaches through a plain wrapper', () => {
     // Collecting does not excuse the refusal above, it narrows it. What
     // the helper pushes here is `mid` — an ordinary rule, resolved to

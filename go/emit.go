@@ -962,6 +962,44 @@ func planArrayHelpers(grammar *Grammar, collect map[string][]bool) map[string]bo
 	}
 	helpers := map[string]bool{}
 
+	// Whether anything inside this helper would become an ELEMENT — a
+	// reference to a rule of the author's, rather than more helpers and
+	// terminals.
+	//
+	// A repetition of pure terminals has nothing to collect, and
+	// collecting it drops the run rather than taking it as text:
+	// `*( "," )` built `[]` where it used to build `[",,"]`. `*item` with
+	// `item = "x"` is the same shape and is why this is asked HERE rather
+	// than on the authored grammar — `item` is still a reference when the
+	// annotation is planned, and only becomes a token later, in
+	// liftLiteralTokens.
+	//
+	// It is the rule already applied to a bare group, for the same
+	// reason: a part with no reference inside it is one element, not none.
+	var yieldsElements func(name string, seen map[string]bool) bool
+	yieldsElements = func(name string, seen map[string]bool) bool {
+		prod := byName[name]
+		if prod == nil || seen[name] {
+			return false
+		}
+		seen[name] = true
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if el.Kind != KindRef {
+					continue
+				}
+				target := byName[el.Name]
+				if target == nil || target.NodeKind != "helper" {
+					return true
+				}
+				if yieldsElements(el.Name, seen) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
 	var walk func(name string)
 	walk = func(name string) {
 		prod := byName[name]
@@ -996,7 +1034,8 @@ func planArrayHelpers(grammar *Grammar, collect map[string][]bool) map[string]bo
 				if el.Kind != KindRef {
 					continue
 				}
-				if k < len(sugar) && sugar[k] {
+				if k < len(sugar) && sugar[k] &&
+					yieldsElements(el.Name, map[string]bool{}) {
 					walk(el.Name)
 				}
 				k++
