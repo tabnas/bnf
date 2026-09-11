@@ -100,6 +100,14 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// pass had already removed them.
 	grammar = cloneGrammar(grammar)
 
+	// Before ANY rewrite: annotations describe the grammar the AUTHOR
+	// wrote, and the passes below are what make that shape unrecoverable.
+	plan, perr := planValueAnnotations(grammar)
+	if perr != nil {
+		return nil, perr
+	}
+	valuePlan = plan
+
 	// Drop informational prose definitions (`NR = <number>`) first, so the
 	// names they document fall through to the builtin tokens — and so a
 	// leading prose line is never mistaken for the start rule.
@@ -962,11 +970,22 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	}
 
 	if prod.TailRepeat != nil {
+		// A tail repeat is rewritten into a same-depth close-phase loop, so
+		// the parts the annotation named are no longer separate pushes to
+		// hang members on. Refuse rather than emit a differently-shaped
+		// value: this path used to return the AST silently.
+		if prod.Value != nil {
+			return &EmitError{Rule: originOf(prod), Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation, but it compiles "+
+					"to a same-depth repeat, which has no separate parts to "+
+					"name. Annotate the rule the repeat pushes instead.",
+				originOf(prod))}
+		}
 		emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
 		return nil
 	}
 
-	allSimple := true
+	allSimple := prod.Value == nil
 	for _, alt := range prod.Alts {
 		if !isSingleSegment(alt) {
 			allSimple = false
@@ -1174,7 +1193,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	if prod.Value != nil {
 		return &EmitError{
 			Message: fmt.Sprintf(
-				"bnf: rule '%s' has a value annotation and %d alternatives. A "+
+				diagName()+": rule '%s' has a value annotation and %d alternatives. A "+
 					"value annotation names the parts of ONE alternative; with more "+
 					"than one it is ambiguous which alternative's parts are named. "+
 					"Split the rule, or annotate the alternatives' own rules.",
@@ -1387,6 +1406,20 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 		diagRule = headName
 	}
 
+	// An unknown kind must not fall through as an object. Kind is an
+	// unrestricted string in the public IR, so a typo like "arry" would
+	// otherwise skip the member-count check below (which asks for exactly
+	// "object") and emit object actions with no keys.
+	if value != nil && value.Kind != "object" && value.Kind != "array" {
+		return &EmitError{
+			Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation of unknown kind "+
+					"'%s'. A rule builds an 'object' or an 'array'.",
+				diagRule, value.Kind),
+			Rule: diagRule,
+		}
+	}
+
 	// One name per pushing segment, or the names line up with the wrong
 	// parts. The rewrite passes are why this is checked here and not at
 	// annotation time: inlining a leading reference can change how many
@@ -1410,7 +1443,7 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			}
 			return &EmitError{
 				Message: fmt.Sprintf(
-					"bnf: rule '%s' names %d member%s but builds %d. A value "+
+					diagName()+": rule '%s' names %d member%s but builds %d. A value "+
 						"annotation names one member per part that produces a value. A "+
 						"part made only of literals produces none — and note that a "+
 						"LEADING part whose own rule is a single terminal is folded into "+
@@ -1493,8 +1526,18 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			// whole, so it nests; anything else resolves to the source text
 			// its tree builders accumulated. Omitting `src` IS the nesting
 			// case — see @tabnas/parser doc/value-builtins.md, v5.
+			// Nesting is decided from the PUSHED RULE, not the member name.
+			// An array names nothing, so keying off the name meant an array
+			// could never nest at all: an element whose own rule builds a
+			// value was flattened to its source text instead of pushed
+			// whole. The name is still consulted for an object, because a
+			// leading member's rule is inlined away and only the annotation
+			// still knows what it was.
 			if 0 <= m {
-				nested := memberName != "" && buildsOwnValue != nil && buildsOwnValue(memberName)
+				nested := false
+				if flags, ok := valuePlan[diagRule]; ok && m < len(flags) {
+					nested = flags[m]
+				}
 				act, cfgKey := "@setval$", "setval$"
 				if isArray {
 					act, cfgKey = "@push$", "push$"

@@ -212,8 +212,97 @@ func TestValueAnnotationRefusesWrongMemberCount(t *testing.T) {
 	}
 	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
 		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
-	if err == nil || !strings.Contains(err.Error(), "names 2 members but builds 1") {
+	if err == nil || !strings.Contains(err.Error(),
+		"names 2 members but has 1 part that produces a value") {
 		t.Errorf("expected a member-count refusal, got %v", err)
+	}
+}
+
+// `a = x ":"` is folded into `top` by left-recursion elimination, so the
+// member would capture `x` and silently drop the `":"` that belonged to
+// `a`. A rule whose body pushes twice would silently become two members.
+// Both are wrong VALUES, not errors, so refuse.
+func TestValueAnnotationRefusesLostMemberShape(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"a", "b"}},
+			Alts:  []Sequence{{refEl("a"), termEl(","), refEl("b")}}},
+		{Name: "a", Alts: []Sequence{{refEl("x"), termEl(":")}}},
+		{Name: "x", Alts: []Sequence{{digitsEl()}}},
+		{Name: "b", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "folded into this rule") {
+		t.Errorf("expected a lost-shape refusal, got %v", err)
+	}
+}
+
+// Kind is an unrestricted string in the public IR, so anything can reach
+// here; an unknown kind must not fall through as an object.
+func TestValueAnnotationRefusesUnknownKind(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "arry"},
+			Alts: []Sequence{{refEl("a")}}},
+		{Name: "a", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "unknown kind 'arry'") {
+		t.Errorf("expected an unknown-kind refusal, got %v", err)
+	}
+}
+
+// `top = child` takes the all-simple shortcut, which emitted tree
+// builders and returned before the annotation was ever consulted —
+// silently handing back an AST instead of the requested value.
+func TestValueAnnotationOnASingleReference(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"child"}},
+			Alts:  []Sequence{{refEl("child")}}},
+		{Name: "child", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "7")
+	if !valueEquals(got, map[string]any{"child": "7"}) {
+		t.Errorf("got %#v, want {child: 7}", got)
+	}
+}
+
+// Nesting is decided by POSITION, not by a member name — an array names
+// nothing, so a name-based rule could never nest one.
+func TestValueAnnotationNestsAnArrayElement(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{refEl("plain"), termEl(","), refEl("one")}}},
+		{Name: "plain", Alts: []Sequence{{digitsEl()}}},
+		{Name: "one",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"p", "q"}},
+			Alts:  []Sequence{{refEl("p"), termEl(":"), refEl("q")}}},
+		{Name: "p", Alts: []Sequence{{digitsEl()}}},
+		{Name: "q", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "9,1:2")
+	want := []any{"9", map[string]any{"p": "1", "q": "2"}}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// ToRecognitionSpec drops the output-building actions. The value builders
+// belong in that set for the same reason the tree builders do — a
+// recognition grammar must recognise and build nothing.
+func TestValueAnnotationStrippedFromRecognitionSpec(t *testing.T) {
+	spec := emitValue(t, tripleProds(), "top")
+	rec, err := ToRecognitionSpec(spec)
+	if err != nil {
+		t.Fatalf("recognition: %v", err)
+	}
+	b, _ := json.Marshal(rec)
+	for _, act := range []string{"@object$", "@key$", "@setval$", "@push$", "@array$"} {
+		if strings.Contains(string(b), act) {
+			t.Errorf("%s must not survive recognition mode", act)
+		}
 	}
 }
 

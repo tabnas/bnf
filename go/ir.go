@@ -3,6 +3,7 @@
 package bnf
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 )
@@ -416,6 +417,127 @@ func (e *EmitError) Unwrap() error { return e.Cause }
 var diagPrefix = "bnf"
 
 func diagName() string { return diagPrefix }
+
+// valuePlan is the value-annotation plan for one emit: per annotated
+// production, one flag per member saying whether that member's own rule
+// builds a value. Module-scoped for the same reason as diagPrefix — it is
+// computed once from the AUTHORED grammar, before any rewrite, and the
+// emitter needs it much later. The pipeline is synchronous. Mirrors the
+// TS `_valuePlan`.
+var valuePlan = map[string][]bool{}
+
+// planValueAnnotations validates every value annotation against the
+// AUTHORED grammar and works out which members nest — both BEFORE any
+// rewrite runs.
+//
+// The rewrites are exactly why this cannot wait for emit time. Paull's
+// pass INLINES a leading reference, so by then the first member's rule is
+// gone and the segments no longer correspond to the parts the author
+// named: a member whose rule carried a trailing literal loses it, and a
+// member whose rule pushed twice silently becomes two members. The shape
+// the AUTHOR wrote is the only place those are still visible.
+//
+// Nesting is decided by POSITION, not by looking a member name up as a
+// rule name. An array names nothing at all, so a name-based rule could
+// never nest an array element. Mirrors the TS `planValueAnnotations`.
+func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
+	byName := map[string]*Production{}
+	for _, p := range grammar.Productions {
+		byName[p.Name] = p
+	}
+	plan := map[string][]bool{}
+
+	for _, prod := range grammar.Productions {
+		v := prod.Value
+		if v == nil {
+			continue
+		}
+		if v.Kind != "object" && v.Kind != "array" {
+			return nil, &EmitError{Rule: prod.Name, Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation of unknown kind "+
+					"'%s'. A rule builds an 'object' or an 'array'.",
+				prod.Name, v.Kind)}
+		}
+		if len(prod.Alts) != 1 {
+			return nil, &EmitError{Rule: prod.Name, Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation and %d "+
+					"alternatives. A value annotation names the parts of ONE "+
+					"alternative; with more than one it is ambiguous which "+
+					"alternative's parts are named. Split the rule, or annotate "+
+					"the alternatives' own rules.", prod.Name, len(prod.Alts))}
+		}
+
+		alt := prod.Alts[0]
+		var refs []*Element
+		for _, el := range alt {
+			if el.Kind == KindRef {
+				refs = append(refs, el)
+			}
+		}
+
+		if v.Kind == "object" {
+			named := len(v.Members)
+			if named != len(refs) {
+				plural, verb := "s", "s that produce"
+				if named == 1 {
+					plural = ""
+				}
+				if len(refs) == 1 {
+					verb = " that produces"
+				}
+				return nil, &EmitError{Rule: prod.Name, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names %d member%s but has %d part%s "+
+						"a value. A value annotation names one member per part "+
+						"that is a rule reference; a literal produces no value "+
+						"and is not a member.",
+					prod.Name, named, plural, len(refs), verb)}
+			}
+		}
+
+		// The LEADING reference is folded into this rule by left-recursion
+		// elimination. Its rule has to reduce to exactly one part, or the
+		// boundary the author drew is lost — a trailing literal disappears
+		// from the member, and a second reference silently becomes a second
+		// member. Both are wrong VALUES rather than errors, so refuse.
+		if len(alt) > 0 && alt[0].Kind == KindRef {
+			if src, ok := byName[alt[0].Name]; ok && !foldsToOnePart(src) {
+				return nil, &EmitError{Rule: prod.Name, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names '%s' as its first member, but "+
+						"'%s' is folded into this rule by left-recursion "+
+						"elimination and its body is not a single part, so the "+
+						"member would not cover what the author wrote. Give '%s' "+
+						"a body that is one part (a reference, a repetition or a "+
+						"group), or put a literal before it.",
+					prod.Name, alt[0].Name, alt[0].Name, alt[0].Name)}
+			}
+		}
+
+		flags := make([]bool, len(refs))
+		for i, r := range refs {
+			if p, ok := byName[r.Name]; ok && p.Value != nil {
+				flags[i] = true
+			}
+		}
+		plan[prod.Name] = flags
+	}
+	return plan, nil
+}
+
+// foldsToOnePart reports whether folding this production into a caller
+// leaves exactly one part that produces a value: one alternative, one
+// element, and that element not a bare terminal. A reference, repetition
+// or group all reduce to a single push; a literal reduces to literals and
+// pushes nothing. Mirrors the TS `foldsToOnePart`.
+func foldsToOnePart(src *Production) bool {
+	if len(src.Alts) != 1 || len(src.Alts[0]) != 1 {
+		return false
+	}
+	switch src.Alts[0][0].Kind {
+	case KindTerm, KindRegex, KindToken, KindProse:
+		return false
+	}
+	return true
+}
 
 func intToStr(n int) string { return strconv.Itoa(n) }
 

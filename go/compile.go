@@ -36,9 +36,23 @@ func (e *CompileError) Error() string { return e.Message }
 // recognition mode.
 var refFields = map[string]bool{"a": true, "bo": true, "bc": true}
 
-// Tree-building builtins dropped by recognition mode.
-var treeBuiltins = map[string]bool{"@node$": true, "@capture$": true, "@bubble$": true}
-var treeConfigKeys = []string{"node$", "capture$"}
+// Output-building actions dropped by recognition mode. The VALUE builders
+// belong here for the same reason the tree builders do: a recognition-only
+// grammar must recognise and build nothing. Leaving them in made
+// ToRecognitionSpec return a spec that still constructed values.
+//
+// `@fold$`/`fold$` were missing here while TypeScript dropped them — a
+// pre-existing divergence in this same list, found while adding the value
+// builders, and repaired the same way: TypeScript defines the language.
+var treeBuiltins = map[string]bool{
+	"@node$": true, "@capture$": true, "@bubble$": true, "@fold$": true,
+	"@object$": true, "@array$": true, "@reset$": true, "@key$": true,
+	"@setval$": true, "@push$": true, "@value$": true,
+}
+var treeConfigKeys = []string{
+	"node$", "capture$", "fold$",
+	"object$", "array$", "key$", "setval$", "push$", "value$",
+}
 
 // CompileOptions controls compilation. Mirrors CompileOptions.
 type CompileOptions struct {
@@ -517,6 +531,30 @@ func cloneRecognitionVal(v any, isDropped func(string) bool) any {
 		for k, val := range x {
 			if refFields[k] {
 				if s, ok := val.(string); ok && isDropped(s) {
+					continue
+				}
+				// Array-`a` composition: filter the dropped actions out of
+				// the list rather than keeping the whole list because it is
+				// not a string. Only checking the scalar case let every
+				// composed action through — the value builders are emitted
+				// that way (`a: ["@object$","@key$"]`), so a
+				// "recognition-only" spec still built values.
+				if list, ok := val.([]any); ok {
+					kept := []any{}
+					for _, e := range list {
+						if es, isStr := e.(string); isStr && isDropped(es) {
+							continue
+						}
+						kept = append(kept, e)
+					}
+					if len(kept) == 0 {
+						continue
+					}
+					if len(kept) == 1 {
+						o[k] = kept[0]
+					} else {
+						o[k] = kept
+					}
 					continue
 				}
 			}

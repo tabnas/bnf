@@ -125,7 +125,73 @@ describe('value annotations', () => {
         alts: [[ref('a'), term('x')]] },
       { name: 'a', alts: [[digits()]] },
     ]
-    assert.throws(() => emit(prods, 'top'), /names 2 members but builds 1/)
+    assert.throws(() => emit(prods, 'top'),
+      /names 2 members but has 1 part that produces a value/)
+  })
+
+  it('refuses a member whose rule would lose its shape to inlining', () => {
+    // `a = x ":"` is folded into `top` by left-recursion elimination, so
+    // the member would capture `x` and silently drop the `":"` that
+    // belonged to `a`. A rule whose body pushes twice would silently
+    // become two members. Both are wrong VALUES, not errors, so refuse.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['a', 'b'] },
+        alts: [[ref('a'), term(','), ref('b')]] },
+      { name: 'a', alts: [[ref('x'), term(':')]] },
+      { name: 'x', alts: [[digits()]] },
+      { name: 'b', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /folded into this rule/)
+  })
+
+  it('refuses an unknown annotation kind', () => {
+    // The TS union is a compile-time promise only: a JS caller, or a
+    // grammar deserialized from JSON, reaches this with anything.
+    const prods = [
+      { name: 'top', value: { kind: 'arry' }, alts: [[ref('a')]] },
+      { name: 'a', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /unknown kind 'arry'/)
+  })
+
+  it('annotates a rule whose alternative is a single reference', () => {
+    // `top = child` takes the all-simple shortcut, which emitted tree
+    // builders and returned before the annotation was ever consulted —
+    // silently handing back an AST instead of the requested value.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['child'] },
+        alts: [[ref('child')]] },
+      { name: 'child', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '7'), { child: '7' })
+  })
+
+  it('nests an array element whose own rule is annotated', () => {
+    // Nesting is decided by POSITION, not by a member name — an array
+    // names nothing, so a name-based rule could never nest one.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[ref('plain'), term(','), ref('one')]] },
+      { name: 'plain', alts: [[digits()]] },
+      { name: 'one', value: { kind: 'object', members: ['p', 'q'] },
+        alts: [[ref('p'), term(':'), ref('q')]] },
+      { name: 'p', alts: [[digits()]] },
+      { name: 'q', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '9,1:2'),
+      ['9', { p: '1', q: '2' }])
+  })
+
+  it('keeps the value builders out of a recognition-only spec', () => {
+    // `toRecognitionSpec` drops the output-building actions. The value
+    // builders belong in that set for the same reason the tree builders
+    // do — a recognition grammar must recognise and build nothing.
+    const { toRecognitionSpec } = require('..')
+    const spec = toRecognitionSpec(emit(TRIPLE, 'top'))
+    const text = JSON.stringify(spec)
+    for (const act of ['@object$', '@key$', '@setval$', '@push$', '@array$']) {
+      assert.ok(!text.includes(act), `${act} must not survive recognition mode`)
+    }
   })
 
   it('refuses an annotation on a rule with alternatives', () => {

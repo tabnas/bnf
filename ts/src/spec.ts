@@ -36,8 +36,19 @@ const REF_FIELDS = new Set(['a', 'bo', 'bc'])
 // Tree-building `$`-builtins (emitted with `builtins: true`). Pure
 // recognition mode drops these too; their per-alt config lives under
 // `k.node$` / `k.capture$`.
-const TREE_BUILTINS = new Set(['@node$', '@capture$', '@bubble$', '@fold$'])
-const TREE_CONFIG_KEYS = ['node$', 'capture$', 'fold$']
+// Output-building actions, dropped when a spec is reduced to pure
+// recognition. The VALUE builders belong here for the same reason the
+// tree builders do: a recognition-only grammar must recognise and build
+// nothing. Leaving them in made `toRecognitionSpec` return a spec that
+// still constructed and returned values.
+const TREE_BUILTINS = new Set([
+  '@node$', '@capture$', '@bubble$', '@fold$',
+  '@object$', '@array$', '@reset$', '@key$', '@setval$', '@push$', '@value$',
+])
+const TREE_CONFIG_KEYS = [
+  'node$', 'capture$', 'fold$',
+  'object$', 'array$', 'key$', 'setval$', 'push$', 'value$',
+]
 
 
 export class CompileError extends Error {
@@ -78,7 +89,24 @@ function cloneRecognition(v: any, isDropped: (s: string) => boolean): any {
     for (const k of Object.keys(v)) {
       const x = v[k]
       if ('function' === typeof x) continue
-      if (REF_FIELDS.has(k) && 'string' === typeof x && isDropped(x)) continue
+      if (REF_FIELDS.has(k)) {
+        if ('string' === typeof x) {
+          if (isDropped(x)) continue
+        }
+        else if (Array.isArray(x)) {
+          // Array-`a` composition: filter the dropped actions out of the
+          // list rather than keeping the whole list because it is not a
+          // string. Only checking the scalar case let every composed
+          // action through — the value builders are emitted that way
+          // (`a: ['@object$','@key$']`), so a "recognition-only" spec
+          // still built values.
+          const kept = x.filter(
+            (e: any) => !('string' === typeof e && isDropped(e)))
+          if (0 === kept.length) continue
+          o[k] = 1 === kept.length ? kept[0] : kept
+          continue
+        }
+      }
       if ('k' === k && x && 'object' === typeof x) {
         const kc = cloneRecognition(x, isDropped)
         for (const tk of TREE_CONFIG_KEYS) delete kc[tk]
