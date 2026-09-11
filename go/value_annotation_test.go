@@ -2,8 +2,11 @@ package bnf
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	tabnas "github.com/tabnas/parser/go"
@@ -323,5 +326,354 @@ func TestValueAnnotationRefusesAlternatives(t *testing.T) {
 		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
 	if err == nil || !strings.Contains(err.Error(), "alternatives") {
 		t.Errorf("expected an alternatives refusal, got %v", err)
+	}
+}
+
+// ---- The plan and the emitter must count the SAME parts -------------
+//
+// planValueAnnotations runs on the authored grammar and hands the
+// emitter one nesting flag per member; the emitter walks segments of the
+// REWRITTEN alternative. Every test below is a way those two sequences
+// came apart, and each one produced a wrong value in silence rather than
+// an error. Mirrors ts/test/value-annotation.test.js.
+
+func groupEl(alts ...Sequence) *Element {
+	return &Element{Kind: KindGroup, Alts: alts}
+}
+
+// The plan counted only `ref` elements, so a leading group was not a
+// member to it — and `inner`'s nesting flag landed on the GROUP, pushing
+// an internal tree node as element 0.
+func TestValueAnnotationNestsByPositionPastAGroup(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{groupEl(Sequence{lettersEl()}), termEl(","),
+				refEl("inner")}}},
+		{Name: "inner",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"y"}},
+			Alts:  []Sequence{{refEl("y")}}},
+		{Name: "y", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "ab,3")
+	want := []any{"ab", map[string]any{"y": "3"}}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// Same miscount on the object side, where it showed up as the emitter's
+// own count check firing with a number the author could not relate to
+// what they wrote. The refusal is now at annotation time.
+func TestValueAnnotationCountsAGroupAsAMember(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"inner"}},
+			Alts: []Sequence{{groupEl(Sequence{lettersEl()}), termEl(","),
+				refEl("inner")}}},
+		{Name: "inner", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil ||
+		!strings.Contains(err.Error(), "names 1 member but has 2 parts that produce a value") {
+		t.Errorf("expected a part-count refusal, got %v", err)
+	}
+}
+
+// liftLiteralTokens turns a single-literal production into a named lexer
+// token and deletes the rule. Doing that to an ANNOTATED rule discarded
+// its builders with no diagnostic, and removed it from its caller's
+// member list at the same time — so the caller's remaining flags shifted
+// onto the wrong parts and nested an internal node.
+func TestValueAnnotationSurvivesTheLiteralLift(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{refEl("n"), refEl("s"), refEl("m")}}},
+		{Name: "n", Alts: []Sequence{{digitsEl()}}},
+		{Name: "s", Value: &ValueAnnotation{Kind: "object"},
+			Alts: []Sequence{{termEl("+")}}},
+		{Name: "m", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "12+34")
+	want := []any{"12", map[string]any{}, "34"}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// The array side had nothing checking the plan against the segments: an
+// object at least compared its NAMES. A member whose own rule is one
+// literal becomes a lexer token, so it stops pushing — and every later
+// flag then sits one place too early.
+func TestValueAnnotationRefusesAChangedPartCount(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{refEl("n"), refEl("s"), refEl("m")}}},
+		{Name: "n", Alts: []Sequence{{digitsEl()}}},
+		{Name: "s", Alts: []Sequence{{termEl("+")}}},
+		{Name: "m", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil ||
+		!strings.Contains(err.Error(), "annotation for 3 parts but builds 2") {
+		t.Errorf("expected a plan-length refusal, got %v", err)
+	}
+}
+
+// ---- The leading fold, followed the whole way ----------------------
+
+// `a = b` is a single part, so the check passed — but the pass inlines
+// `a` into `top` and then `b` into that, so what landed was `b`'s
+// two-part body and the member silently lost its ':'.
+func TestValueAnnotationFollowsAnAliasChain(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"a", "c"}},
+			Alts:  []Sequence{{refEl("a"), termEl(","), refEl("c")}}},
+		{Name: "a", Alts: []Sequence{{refEl("b")}}},
+		{Name: "b", Alts: []Sequence{{digitsEl(), termEl(":")}}},
+		{Name: "c", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "not a single part") {
+		t.Errorf("expected a fold refusal, got %v", err)
+	}
+}
+
+// Inlining erases that rule's builders, so the member held an internal
+// tree node where the author had asked for the object `a` is annotated
+// to build.
+func TestValueAnnotationRefusesAnAnnotatedLeadingMember(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"a", "c"}},
+			Alts:  []Sequence{{refEl("a"), termEl(","), refEl("c")}}},
+		{Name: "a",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"x"}},
+			Alts:  []Sequence{{refEl("x")}}},
+		{Name: "x", Alts: []Sequence{{digitsEl()}}},
+		{Name: "c", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil ||
+		!strings.Contains(err.Error(), "erases the value it would have built") {
+		t.Errorf("expected an erased-builder refusal, got %v", err)
+	}
+}
+
+// The escape hatch the diagnostic above offers has to actually work: a
+// literal in front means the reference is no longer leading, so nothing
+// is inlined and the member nests whole.
+func TestValueAnnotationNestsAGuardedLeadingMember(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"a", "c"}},
+			Alts: []Sequence{{termEl("v"), refEl("a"), termEl(","),
+				refEl("c")}}},
+		{Name: "a",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"x"}},
+			Alts:  []Sequence{{refEl("x")}}},
+		{Name: "x", Alts: []Sequence{{digitsEl()}}},
+		{Name: "c", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "v1,2")
+	want := map[string]any{"a": map[string]any{"x": "1"}, "c": "2"}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// Chasing the chain has to have a stop. `a = b`, `b = a` is left
+// recursion reached through aliases; the fold check must refuse rather
+// than loop.
+func TestValueAnnotationTerminatesOnAnAliasCycle(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"a"}},
+			Alts:  []Sequence{{refEl("a")}}},
+		{Name: "a", Alts: []Sequence{{refEl("b")}}},
+		{Name: "b", Alts: []Sequence{{refEl("a")}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "not a single part") {
+		t.Errorf("expected a fold refusal, got %v", err)
+	}
+}
+
+// ---- `members` is data, not a type promise -------------------------
+
+// Go's Members is []string, so it cannot hold the nil the TypeScript IR
+// can — but "" reaches here from either, and the two ports DISAGREED
+// about it: TS built the key "", Go skipped the @key$ entirely and let
+// @setval$ write into whatever key the previous part had left behind.
+func TestValueAnnotationRefusesAnEmptyMemberName(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"", "b"}},
+			Alts:  []Sequence{{refEl("a"), refEl("b")}}},
+		{Name: "a", Alts: []Sequence{{lettersEl()}}},
+		{Name: "b", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "is not a name") {
+		t.Errorf("expected an empty-name refusal, got %v", err)
+	}
+}
+
+// An array's parts are positional. Ignoring the names hid the real
+// mistake, which is that the author meant `object`.
+func TestValueAnnotationRefusesANamedArray(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "array", Members: []string{"a"}},
+			Alts:  []Sequence{{refEl("a")}}},
+		{Name: "a", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil ||
+		!strings.Contains(err.Error(), "positional and are not named") {
+		t.Errorf("expected a named-array refusal, got %v", err)
+	}
+}
+
+// ---- Diagnostics ---------------------------------------------------
+
+// The plan runs before any rewrite — and in the TypeScript port it used
+// to run before the diagnostic prefix was set, so the first bad grammar
+// in a process reported `bnf:` and every later one inherited the
+// PREVIOUS conversion's tag. Pinned here too so the ports cannot drift.
+func TestValueAnnotationDiagnosticNamesTheNotation(t *testing.T) {
+	for _, tag := range []string{"gbnf", "ebnf"} {
+		prods := []*Production{
+			{Name: "top", Value: &ValueAnnotation{Kind: "nope"},
+				Alts: []Sequence{{digitsEl()}}},
+		}
+		_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+			&ConvertOptions{Tag: tag, Start: "top", Builtins: true})
+		if err == nil || !strings.HasPrefix(err.Error(), tag+": ") {
+			t.Errorf("tag %s: got %v", tag, err)
+		}
+	}
+}
+
+// Every other diagnostic in this compiler can say WHERE. These are the
+// ones an author is most likely to hit, and they were the ones with
+// nothing to underline.
+func TestValueAnnotationDiagnosticCarriesTheSpan(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "nope"},
+			Sp: &SrcSpan{S: 12, E: 20}, Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected an EmitError, got %v", err)
+	}
+	if ee.Rule != "top" {
+		t.Errorf("rule: got %q, want top", ee.Rule)
+	}
+	if ee.Sp == nil || ee.Sp.S != 12 || ee.Sp.E != 20 {
+		t.Errorf("span: got %#v, want S=12 E=20", ee.Sp)
+	}
+}
+
+// Two conversions at once must not read each other's plan. The flags
+// lived in a package-level map, so the second call's planValueAnnotations
+// replaced the first's mid-emit — and `-race` is what says so.
+func TestValueAnnotationConcurrentEmitsDoNotShareAPlan(t *testing.T) {
+	nested := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{termEl("<"), refEl("one"), termEl(">")}}},
+		{Name: "one",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"p"}},
+			Alts:  []Sequence{{refEl("p")}}},
+		{Name: "p", Alts: []Sequence{{digitsEl()}}},
+	}
+	flat := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{termEl("<"), refEl("one"), termEl(">")}}},
+		{Name: "one", Alts: []Sequence{{digitsEl()}}},
+	}
+	var wg sync.WaitGroup
+	errs := make(chan string, 200)
+	for i := 0; i < 100; i++ {
+		for _, c := range []struct {
+			prods []*Production
+			want  any
+		}{{nested, []any{map[string]any{"p": "4"}}}, {flat, []any{"4"}}} {
+			wg.Add(1)
+			go func(prods []*Production, want any) {
+				defer wg.Done()
+				spec, err := EmitGrammarSpec(&Grammar{Productions: prods},
+					&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+				if err != nil {
+					errs <- "emit: " + err.Error()
+					return
+				}
+				j := tabnas.Make()
+				if err := j.Grammar(spec); err != nil {
+					errs <- "install: " + err.Error()
+					return
+				}
+				out, err := j.Parse("<4>")
+				if err != nil {
+					errs <- "parse: " + err.Error()
+					return
+				}
+				if got := tabnas.UnwrapUndefined(out); !valueEquals(got, want) {
+					errs <- fmt.Sprintf("got %#v, want %#v", got, want)
+				}
+			}(c.prods, c.want)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+}
+
+// The user-visible half of the race above, asserted without needing the
+// detector: two conversions running at once must each report their OWN
+// notation. `diagPrefix` is package state, so the loser used to describe
+// its grammar with the winner's tag — "gbnf: rule 'top' ..." on an error
+// about a rule an ABNF author wrote.
+func TestConcurrentEmitsKeepTheirOwnDiagPrefix(t *testing.T) {
+	bad := func() []*Production {
+		return []*Production{
+			{Name: "top", Value: &ValueAnnotation{Kind: "nope"},
+				Alts: []Sequence{{digitsEl()}}},
+		}
+	}
+	var wg sync.WaitGroup
+	errs := make(chan string, 400)
+	for i := 0; i < 200; i++ {
+		for _, tag := range []string{"gbnf", "ebnf"} {
+			wg.Add(1)
+			go func(tag string) {
+				defer wg.Done()
+				_, err := EmitGrammarSpec(&Grammar{Productions: bad()},
+					&ConvertOptions{Tag: tag, Start: "top", Builtins: true})
+				if err == nil {
+					errs <- "expected a refusal for tag " + tag
+					return
+				}
+				if !strings.HasPrefix(err.Error(), tag+": ") {
+					errs <- fmt.Sprintf("tag %s got %q", tag, err.Error())
+				}
+			}(tag)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
 	}
 }

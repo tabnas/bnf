@@ -208,4 +208,206 @@ describe('value annotations', () => {
     ]
     assert.throws(() => emit(prods, 'top'), /alternatives/)
   })
+
+  // ---- The plan and the emitter must count the SAME parts ----------
+  //
+  // `planValueAnnotations` runs on the authored grammar and hands the
+  // emitter one nesting flag per member; the emitter walks segments of
+  // the REWRITTEN alternative. Every test below is a way those two
+  // sequences came apart, and each one produced a wrong value in
+  // silence rather than an error.
+
+  it('nests by position when a group precedes the reference', () => {
+    // The plan counted only `ref` elements, so a leading group was not
+    // a member to it — and `inner`'s nesting flag landed on the GROUP,
+    // pushing `{src:'ab',kids:[]}` (an internal tree node) as element 0.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[{ kind: 'group', alts: [[letters()]] }, term(','), ref('inner')]] },
+      { name: 'inner', value: { kind: 'object', members: ['y'] },
+        alts: [[ref('y')]] },
+      { name: 'y', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', 'ab,3'), ['ab', { y: '3' }])
+  })
+
+  it('counts a group as a member of an object', () => {
+    // Same miscount on the object side, where it showed up as the
+    // emitter's own count check firing with a number the author could
+    // not relate to what they wrote. The refusal is now at annotation
+    // time and says what is actually wrong.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['inner'] },
+        alts: [[{ kind: 'group', alts: [[letters()]] }, term(','), ref('inner')]] },
+      { name: 'inner', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'),
+      /names 1 member but has 2 parts that produce a value/)
+  })
+
+  it('keeps an annotated rule out of the literal-token lift', () => {
+    // `liftLiteralTokens` turns a single-literal production into a named
+    // lexer token and deletes the rule. Doing that to an ANNOTATED rule
+    // discarded its builders with no diagnostic, and removed it from its
+    // caller's member list at the same time — so the caller's remaining
+    // flags shifted onto the wrong parts and nested an internal node.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[ref('n'), ref('s'), ref('m')]] },
+      { name: 'n', alts: [[digits()]] },
+      { name: 's', value: { kind: 'object', members: [] }, alts: [[term('+')]] },
+      { name: 'm', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '12+34'), ['12', {}, '34'])
+  })
+
+  it('refuses an annotation whose part count a rewrite changed', () => {
+    // The array side had nothing checking the plan against the segments:
+    // an object at least compared its NAMES. A member whose own rule is
+    // one literal becomes a lexer token, so it stops pushing — and every
+    // later flag then sits one place too early.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[ref('n'), ref('s'), ref('m')]] },
+      { name: 'n', alts: [[digits()]] },
+      { name: 's', alts: [[term('+')]] },
+      { name: 'm', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'),
+      /annotation for 3 parts but builds 2/)
+  })
+
+  // ---- The leading fold, followed the whole way -------------------
+
+  it('follows an alias chain when checking the leading member', () => {
+    // `a = b` is a single part, so the check passed — but the pass
+    // inlines `a` into `top` and then `b` into that, so what landed was
+    // `b`'s two-part body and the member silently lost its ':'.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['a', 'c'] },
+        alts: [[ref('a'), term(','), ref('c')]] },
+      { name: 'a', alts: [[ref('b')]] },
+      { name: 'b', alts: [[digits(), term(':')]] },
+      { name: 'c', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /not a single part/)
+  })
+
+  it('refuses a leading member whose own rule builds a value', () => {
+    // Inlining erases that rule's builders, so the member held an
+    // internal tree node — `{src:'1',kids:[]}` — where the author had
+    // asked for the object `a` is annotated to build.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['a', 'c'] },
+        alts: [[ref('a'), term(','), ref('c')]] },
+      { name: 'a', value: { kind: 'object', members: ['x'] },
+        alts: [[ref('x')]] },
+      { name: 'x', alts: [[digits()]] },
+      { name: 'c', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /erases the value it would have built/)
+  })
+
+  it('nests a leading member once a literal guards it', () => {
+    // The escape hatch the diagnostic above offers has to actually
+    // work: a literal in front means the reference is no longer leading,
+    // so nothing is inlined and the member nests whole.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['a', 'c'] },
+        alts: [[term('v'), ref('a'), term(','), ref('c')]] },
+      { name: 'a', value: { kind: 'object', members: ['x'] },
+        alts: [[ref('x')]] },
+      { name: 'x', alts: [[digits()]] },
+      { name: 'c', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', 'v1,2'), { a: { x: '1' }, c: '2' })
+  })
+
+  it('terminates on an alias cycle', () => {
+    // Chasing the chain has to have a stop. `a = b`, `b = a` is left
+    // recursion reached through aliases; the fold check must refuse
+    // rather than loop.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['a'] },
+        alts: [[ref('a')]] },
+      { name: 'a', alts: [[ref('b')]] },
+      { name: 'b', alts: [[ref('a')]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /not a single part/)
+  })
+
+  // ---- `members` is data, not a type promise ----------------------
+
+  it('refuses members that are not a list', () => {
+    // `'ab'.length` is 2, so a string passed the count check and was
+    // indexed as two one-character member names.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: 'ab' },
+        alts: [[ref('a'), ref('b')]] },
+      { name: 'a', alts: [[letters()]] },
+      { name: 'b', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /members are not a list/)
+  })
+
+  it('refuses a member that is not a name', () => {
+    // A null entry suppressed its `@key$`, so `@setval$` wrote into
+    // whatever key the previous part left behind — or the literal key
+    // 'undefined' when there was none. An empty string was worse: it
+    // built the key '' in TypeScript and was skipped entirely in Go,
+    // which is the two ports disagreeing about a value.
+    for (const bad of [null, '', 7]) {
+      const prods = [
+        { name: 'top', value: { kind: 'object', members: [bad, 'b'] },
+          alts: [[ref('a'), ref('b')]] },
+        { name: 'a', alts: [[letters()]] },
+        { name: 'b', alts: [[digits()]] },
+      ]
+      assert.throws(() => emit(prods, 'top'), /is not a name/,
+        `members: [${JSON.stringify(bad)}]`)
+    }
+  })
+
+  it('refuses an array that names members', () => {
+    // An array's parts are positional. Ignoring the names hid the real
+    // mistake, which is that the author meant `object`.
+    const prods = [
+      { name: 'top', value: { kind: 'array', members: ['a'] },
+        alts: [[ref('a')]] },
+      { name: 'a', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /positional and are not named/)
+  })
+
+  // ---- Diagnostics ------------------------------------------------
+
+  it('names the notation in an annotation diagnostic', () => {
+    // The plan runs before any rewrite — and used to run before the
+    // diagnostic prefix was set, so the first bad grammar in a process
+    // reported `bnf:` and every later one inherited the PREVIOUS
+    // conversion's tag.
+    const bad = [{ name: 'top', value: { kind: 'nope' }, alts: [[digits()]] }]
+    for (const tag of ['gbnf', 'ebnf']) {
+      // On `e.message`, not the stringified error: `assert.throws` tests
+      // a RegExp against `'EmitError: ' + message`, which would match a
+      // leaked prefix anywhere in the text.
+      assert.throws(
+        () => emitGrammarSpec({ productions: bad }, { tag, start: 'top', builtins: true }),
+        (e) => e.message.startsWith(tag + ': '),
+        `tag ${tag}`)
+    }
+  })
+
+  it('carries the span of the offending rule', () => {
+    // Every other diagnostic in this compiler can say WHERE. These four
+    // are the ones an author is most likely to hit, and they were the
+    // ones with nothing to underline.
+    const sp = { s: 12, e: 20, r: 3, c: 7 }
+    const bad = [{ name: 'top', value: { kind: 'nope' }, sp, alts: [[digits()]] }]
+    assert.throws(() => emit(bad, 'top'), (e) => {
+      assert.deepEqual(e.sp, sp)
+      assert.equal(e.rule, 'top')
+      return true
+    })
+  })
 })

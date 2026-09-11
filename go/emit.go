@@ -55,6 +55,27 @@ func syncG(tag, group string) string { return tag + "," + group }
 
 // emitGrammarSpec converts an ABNF grammar AST into a tabnas GrammarSpec.
 func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.GrammarSpec, err error) {
+	// One emit at a time. `diagPrefix` below is package state, written at
+	// the start of every emit and read by forty diagnostics across seven
+	// files — so two concurrent conversions raced, and the loser reported
+	// the WINNER's notation on an error about its own grammar ("gbnf: rule
+	// 'x' ..." for a rule the ABNF author wrote). The race detector calls
+	// it on the write; the wrong prefix is what a user would see.
+	//
+	// A lock rather than a threaded parameter because the alternative is a
+	// prefix argument on twenty functions across passes this change has no
+	// other business in, and because this is a once-per-grammar-install
+	// call: serialising it costs nothing anyone can measure. Not reentrant,
+	// and it does not need to be — `emitGrammarSpec` is called only from
+	// the facade, never from inside itself.
+	//
+	// TypeScript needs none of this: its pipeline is synchronous and
+	// single-threaded, so the module-scoped `_diagName` there is safe for
+	// exactly the reason this comment says it is not safe here. Recorded in
+	// doc/differences.md.
+	emitMu.Lock()
+	defer emitMu.Unlock()
+
 	// A grammar this compiler cannot compile is INVALID USER INPUT, and the
 	// contract for that in a Go library is an error return. TS throws a
 	// catchable EmitError; the port panicked, so `A = A "y"` took the process
@@ -85,9 +106,9 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		opts = &ConvertOptions{}
 	}
 	// Diagnostics name the notation the grammar was written in, not this
-	// package. The pipeline is synchronous, so a package-level value is
-	// safe and avoids threading a prefix through every pass. Mirrors
-	// ts/src/compiler.ts.
+	// package. Package-level, under `emitMu` above, which is what makes it
+	// safe; see that comment. Set BEFORE any pass that can raise a
+	// diagnostic, planValueAnnotations included. Mirrors ts/src/compiler.ts.
 	if opts.Tag != "" {
 		diagPrefix = opts.Tag
 	} else {
@@ -102,11 +123,10 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 
 	// Before ANY rewrite: annotations describe the grammar the AUTHOR
 	// wrote, and the passes below are what make that shape unrecoverable.
-	plan, perr := planValueAnnotations(grammar)
+	valuePlan, perr := planValueAnnotations(grammar)
 	if perr != nil {
 		return nil, perr
 	}
-	valuePlan = plan
 
 	// Drop informational prose definitions (`NR = <number>`) first, so the
 	// names they document fall through to the builtin tokens — and so a
@@ -407,7 +427,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		}
 		if err := emitProduction(prod, grammar, literals, regexTokens, knownRules,
 			tag, ruleSpec, firstSets, nullable, refs,
-			followSets, followPairs, cc, prov); err != nil {
+			followSets, followPairs, cc, valuePlan, prov); err != nil {
 			return nil, err
 		}
 	}
@@ -915,7 +935,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	firstSets map[string]map[string]bool, nullable map[string]bool, refs *refRegistry,
 	followSets map[string]map[string]bool,
 	followPairs map[string]map[string]map[string]bool, cc *contestCtx,
-	prov map[string]string) error {
+	valuePlan map[string][]bool, prov map[string]string) error {
 
 	// The token names that came from character classes, for
 	// altHeadSharesToken: only between two of these does character
@@ -1181,7 +1201,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		// Single-alt, multi-segment: chain rules directly on the production.
 		return emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag,
 			ruleSpec, refs, prodKind, prov, originOf(prod),
-			prod.Value, buildsOwnValue(grammar))
+			prod.Value, valuePlan[originOf(prod)])
 	}
 
 	// A value annotation names one member per pushing segment, which only
@@ -1369,7 +1389,18 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 func emitChain(headName string, alt Sequence, literals, regexTokens map[string]string,
 	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
 	headKind string, prov map[string]string, origin string,
-	value *ValueAnnotation, buildsOwnValue func(string) bool) error {
+	// nested is one flag per pushing part of alt, from
+	// planValueAnnotations: does that part's own rule build a value, and
+	// so nest whole rather than resolve to its source text?
+	//
+	// An argument rather than package state, which is where it started:
+	// there, two concurrent EmitGrammarSpec calls overwrote each other's
+	// flags mid-emit and built each other's values. emitMu would now cover
+	// that as it covers diagPrefix, but this table is read in exactly ONE
+	// place, so passing it costs two arguments and leaves nothing shared —
+	// which is the better answer wherever it is affordable. It is not
+	// affordable for diagPrefix; see the comment on emitMu.
+	value *ValueAnnotation, nested []bool) error {
 
 	segs := segmentize(alt, literals, regexTokens)
 	chainName := func(i int) string {
@@ -1446,12 +1477,48 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 					diagName()+": rule '%s' names %d member%s but builds %d. A value "+
 						"annotation names one member per part that produces a value. A "+
 						"part made only of literals produces none — and note that a "+
-						"LEADING part whose own rule is a single terminal is folded into "+
-						"this rule by left-recursion elimination, which turns it into "+
-						"literals here and so removes it as a member. Giving that rule a "+
-						"body that is not a bare terminal (a repetition, a group, or "+
-						"more than one element) keeps it nameable.",
+						"part whose own rule is a single terminal stops being a part "+
+						"here in two ways: as a LEADING part it is folded into this "+
+						"rule by left-recursion elimination, and anywhere else it "+
+						"becomes a named lexer token. Giving that rule a body that is "+
+						"not a bare terminal (a repetition, a group, or more than one "+
+						"element) keeps it nameable.",
 					diagRule, named, plural, pushes),
+				Rule: diagRule,
+			}
+		}
+	}
+
+	// The same count, checked against the PLAN rather than the names —
+	// because an array has no names, and so had nothing checking it at
+	// all. nested is indexed by member position, so a plan that is a
+	// different length from the segments is a plan whose flags are on the
+	// wrong members: an array whose second element's rule was lifted to a
+	// terminal pushed the THIRD element's flag onto it, which nested an
+	// internal tree node into the value instead of its source text.
+	// Silent, and visible only in the output.
+	if value != nil && nested != nil {
+		pushes := 0
+		for _, m := range memberSegs {
+			if m {
+				pushes++
+			}
+		}
+		if len(nested) != pushes {
+			plural := "s"
+			if len(nested) == 1 {
+				plural = ""
+			}
+			return &EmitError{
+				Message: fmt.Sprintf(
+					diagName()+": rule '%s' has a value annotation for %d part%s "+
+						"but builds %d. A rewrite pass changed how many parts of "+
+						"this rule produce a value, so the annotation no longer "+
+						"describes it. A part whose own rule is a single literal is "+
+						"the usual cause: it becomes a lexer token here and stops "+
+						"being a part at all. Give that rule a body that is not a "+
+						"bare terminal.",
+					diagRule, len(nested), plural, pushes),
 				Rule: diagRule,
 			}
 		}
@@ -1534,16 +1601,13 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 			// leading member's rule is inlined away and only the annotation
 			// still knows what it was.
 			if 0 <= m {
-				nested := false
-				if flags, ok := valuePlan[diagRule]; ok && m < len(flags) {
-					nested = flags[m]
-				}
+				isNested := m < len(nested) && nested[m]
 				act, cfgKey := "@setval$", "setval$"
 				if isArray {
 					act, cfgKey = "@push$", "push$"
 				}
 				var cfg map[string]any
-				if !nested {
+				if !isNested {
 					cfg = map[string]any{cfgKey: map[string]any{"src": true}}
 				}
 				if closeMaps == nil {

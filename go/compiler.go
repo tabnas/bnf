@@ -1164,6 +1164,15 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 			prod.NodeKind == "core" {
 			continue
 		}
+		// An annotated production is a rule the author asked to BUILD
+		// something. Lifting it drops the rule and rewrites every reference
+		// to it into a terminal, which discards the value builders with no
+		// diagnostic — and takes the part out of its callers' member lists
+		// at the same time, so an annotated caller's remaining members shift
+		// onto the wrong parts. A rule that builds a value stays a rule.
+		if prod.Value != nil {
+			continue
+		}
 		if len(prod.Alts) != 1 || len(prod.Alts[0]) != 1 {
 			continue
 		}

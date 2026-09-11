@@ -289,7 +289,11 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
   for (const prod of grammar.productions) {
     const v = prod.value
     if (null == v) continue
-    const at = { rule: prod.name }
+    // `sp` when the front-end recorded one: a caller that wants to
+    // underline the offending rule needs the span, and every refusal
+    // below is one an AUTHOR hits — they are about what they wrote, not
+    // about anything the compiler derived.
+    const at = { rule: prod.name, sp: prod.sp }
 
     if ('object' !== v.kind && 'array' !== v.kind) {
       throw new EmitError(
@@ -307,19 +311,66 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
         at)
     }
 
-    const alt = prod.alts[0]
-    const refs = alt.filter((el) => 'ref' === el.kind) as Array<
-      Extract<Element, { kind: 'ref' }>>
+    // `members` is `string[]` in the TypeScript IR, but that is a
+    // compile-time promise only: a JavaScript front-end, or a grammar
+    // deserialized from JSON, reaches this with anything. Every one of
+    // these got THROUGH before, and each produced a wrong value rather
+    // than an error — `'ab'` has a `length` of 2, so a string counted as
+    // two members and indexed as two one-character names; a `null` entry
+    // suppressed the `@key$` for its part, so `@setval$` reused whatever
+    // key the previous part left in the slot, or wrote the literal key
+    // `'undefined'` when there was none.
+    const members = v.members
+    if (null != members && !Array.isArray(members)) {
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' has a value annotation whose ` +
+        `members are not a list. A value annotation names its members as ` +
+        `a list of strings.`,
+        at)
+    }
+    if (null != members) {
+      for (const m of members) {
+        if ('string' !== typeof m || '' === m) {
+          throw new EmitError(
+            `${diagName()}: rule '${prod.name}' has a value annotation ` +
+            `naming a member that is not a name (${JSON.stringify(m)}). ` +
+            `Every member of an object is named by a non-empty string.`,
+            at)
+        }
+      }
+    }
 
-    if ('object' === v.kind) {
-      const named = v.members?.length ?? 0
-      if (named !== refs.length) {
+    const alt = prod.alts[0]
+    // Every part that PUSHES is a member, not every part that is a
+    // reference. A group or a repetition becomes a reference to a
+    // generated helper before the emitter sees it, so it pushes exactly
+    // like a written reference does — and counting only references left
+    // the flags below indexed by a different sequence from the one the
+    // emitter walks. `(plain) inner` then applied `inner`'s flag to the
+    // GROUP, pushing an internal tree node into the value.
+    const parts = alt.filter(pushesValue)
+
+    if ('array' === v.kind) {
+      // An array's parts are positional; there is nothing for a name to
+      // attach to. Silently ignoring the names hid the real mistake,
+      // which is that the author meant `object`.
+      if (null != members && 0 < members.length) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' builds an array and names ` +
+          `${members.length} member${1 === members.length ? '' : 's'}. An ` +
+          `array's parts are positional and are not named; annotate it as ` +
+          `an object to name them.`,
+          at)
+      }
+    } else {
+      const named = members?.length ?? 0
+      if (named !== parts.length) {
         throw new EmitError(
           `${diagName()}: rule '${prod.name}' names ${named} member` +
-          `${1 === named ? '' : 's'} but has ${refs.length} part` +
-          `${1 === refs.length ? ' that produces' : 's that produce'} a ` +
+          `${1 === named ? '' : 's'} but has ${parts.length} part` +
+          `${1 === parts.length ? ' that produces' : 's that produce'} a ` +
           `value. A value ` +
-          `annotation names one member per part that is a rule reference; ` +
+          `annotation names one member per part that produces a value; ` +
           `a literal produces no value and is not a member.`,
           at)
       }
@@ -332,8 +383,18 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
     // member. Both are wrong VALUES rather than errors, so refuse here.
     const first = alt[0]
     if (null != first && 'ref' === first.kind) {
-      const src = byName.get(first.name)
-      if (null != src && !foldsToOnePart(src)) {
+      const fold = resolveLeadingFold(first.name, byName)
+      if (null != fold.annotated) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' names '${first.name}' as its ` +
+          `first member, but '${fold.annotated}' is folded into this rule ` +
+          `by left-recursion elimination, which erases the value it would ` +
+          `have built — the member would be an internal node rather than ` +
+          `the object or array '${fold.annotated}' is annotated to build. ` +
+          `Put a literal before '${first.name}'.`,
+          at)
+      }
+      if (!fold.ok) {
         throw new EmitError(
           `${diagName()}: rule '${prod.name}' names '${first.name}' as its ` +
           `first member, but '${first.name}' is folded into this rule by ` +
@@ -345,22 +406,64 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
       }
     }
 
-    plan.set(prod.name, refs.map((r) => null != byName.get(r.name)?.value))
+    plan.set(prod.name, parts.map((el) =>
+      'ref' === el.kind && null != byName.get(el.name)?.value))
   }
   return plan
 }
 
 
-// Whether folding this production into a caller leaves exactly one part
-// that produces a value. One alternative, one element, and that element
-// not a bare terminal: a reference, repetition or group all reduce to a
-// single push; a literal reduces to literals and pushes nothing.
-function foldsToOnePart(src: Production): boolean {
-  if (1 !== src.alts.length) return false
-  const alt = src.alts[0]
-  if (1 !== alt.length) return false
-  const k = alt[0].kind
+// Whether an element produces a value when it is matched. A reference, a
+// repetition and a group all become a push of one child; a terminal in
+// any of its spellings consumes input and pushes nothing. This is the
+// one definition of "is a member" — the planner counts parts with it and
+// `resolveLeadingFold` asks it about a body of one element, so the two
+// cannot drift apart.
+function pushesValue(el: Element): boolean {
+  const k = el.kind
   return 'term' !== k && 'regex' !== k && 'token' !== k && 'prose' !== k
+}
+
+
+// Follow a leading reference the way left-recursion elimination will.
+//
+// The pass inlines a leading reference into its caller — and then inlines
+// the leading reference of THAT body in turn, so an alias chain collapses
+// all the way down. Asking only about the first rule therefore answered
+// the wrong question: `top = a "," c` with `a = b` and `b = x ":"` passed,
+// because `a`'s body is a single reference, and then quietly lost the
+// `":"` from the member, because what actually landed in `top` was `b`'s
+// two-part body.
+//
+// Two answers, because they need different diagnostics. `annotated` names
+// the first rule in the chain that builds a value of its own: inlining
+// erases its builder, so the member would hold an internal node instead
+// of the value the author annotated for. `ok` is whether the chain ends
+// in a body of exactly one pushing part.
+function resolveLeadingFold(
+  name: string,
+  byName: Map<string, Production>,
+): { ok: boolean; annotated?: string } {
+  const seen = new Set<string>()
+  let prod = byName.get(name)
+  while (null != prod) {
+    // A cycle is left recursion reached through aliases. The pass that
+    // rewrites it is the one whose output this is predicting, so stop
+    // rather than guess; the member-count check downstream still holds.
+    if (seen.has(prod.name)) return { ok: false }
+    seen.add(prod.name)
+    if (null != prod.value) return { ok: false, annotated: prod.name }
+    if (1 !== prod.alts.length || 1 !== prod.alts[0].length) return { ok: false }
+    const el = prod.alts[0][0]
+    if (!pushesValue(el)) return { ok: false }
+    // A group or repetition is opaque to the fold: it becomes one helper
+    // reference, which is one part, and nothing inside it is inlined.
+    if ('ref' !== el.kind) return { ok: true }
+    prod = byName.get(el.name)
+  }
+  // An undefined rule is not this check's to refuse — the reference
+  // resolution pass reports it, with a better message.
+  return { ok: true }
 }
 
 
@@ -2216,6 +2319,13 @@ function liftLiteralTokens(
     // instead try to bind #TX to a literal, which the engine refuses.
     if (isMatcherTokenName(prod.name)) continue
     if (prod.nodeKind === 'core') continue
+    // An annotated production is a rule the author asked to BUILD
+    // something. Lifting it drops the rule and rewrites every reference
+    // to it into a terminal, which discards the value builders with no
+    // diagnostic — and takes the part out of its callers' member lists
+    // at the same time, so an annotated caller's remaining members shift
+    // onto the wrong parts. A rule that builds a value stays a rule.
+    if (null != prod.value) continue
     if (prod.alts.length !== 1 || prod.alts[0].length !== 1) continue
     const el = prod.alts[0][0]
     if (el.kind !== 'term') continue
@@ -2345,13 +2455,6 @@ function emitLiteralToken(
 // prefix through every pass.
 let _diagName = 'bnf'
 
-// The value-annotation plan for one emit: per annotated production, one
-// flag per member saying whether that member's own rule builds a value.
-// Module-scoped for the same reason as `_diagName` above — it is computed
-// once from the AUTHORED grammar, before any rewrite, and the emitter
-// needs it much later. The pipeline is synchronous.
-let _valuePlan: Map<string, boolean[]> = new Map()
-
 function diagName(): string {
   return _diagName
 }
@@ -2477,18 +2580,18 @@ function emitGrammarSpec(
   // pass had already removed them.
   grammar = cloneGrammar(grammar)
 
-  // Before ANY rewrite: annotations describe the grammar the AUTHOR
-  // wrote, and the passes below are what make that shape unrecoverable.
-  _valuePlan = planValueAnnotations(grammar)
-
   // Diagnostics name the notation the grammar was written in, not this
-  // package. Set this BEFORE `resolveProseTerminals`: that pass raises
-  // five of this file's diagnostics, so assigning afterwards left every
-  // one of them carrying the prefix from the PREVIOUS conversion in the
-  // process — or the `'bnf'` default on the first. `go/emit.go` has always
-  // set it first, and its comment claims to mirror this file; now it does.
+  // package. Set this BEFORE any pass that can raise one — which now
+  // means before `planValueAnnotations` as well as before
+  // `resolveProseTerminals`. Assigning afterwards left every diagnostic
+  // those passes raise carrying the prefix from the PREVIOUS conversion
+  // in the process, or the `'bnf'` default on the first.
   const tag = opts?.tag ?? 'bnf'
   _diagName = tag
+
+  // Before ANY rewrite: annotations describe the grammar the AUTHOR
+  // wrote, and the passes below are what make that shape unrecoverable.
+  const valuePlan = planValueAnnotations(grammar)
 
   // Drop informational prose definitions (`NR = <number>`) first, so the
   // names they document fall through to the built-in tokens — and so a
@@ -2729,7 +2832,7 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap, prov,
+      tokensOverlap, valuePlan, prov,
     )
   }
 
@@ -3185,6 +3288,7 @@ function emitProduction(
   followPairs: Map<string, Map<string, Set<string>>>,
   tokenRangesOf: (tok: string) => Array<[number, number]> | null,
   tokensOverlap: (a: string, b: string) => boolean,
+  valuePlan: Map<string, boolean[]>,
   prov?: Map<string, string>,
 ) {
   for (const alt of prod.alts) {
@@ -3753,7 +3857,7 @@ function emitProduction(
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
       ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod),
-      prod.value)
+      prod.value, valuePlan.get(originOf(prod)))
     return
   }
 
@@ -3977,6 +4081,14 @@ function emitChain(
   prov?: Map<string, string>,
   origin?: string,
   value?: ValueAnnotation,
+  // One flag per pushing part of `alt`, from `planValueAnnotations`:
+  // does that part's own rule build a value, and so nest whole rather
+  // than resolve to its source text? Passed rather than looked up from
+  // module state so that nothing about one emit can reach another —
+  // `go/emit.go` held the same table in a package-level variable, where
+  // two concurrent conversions could overwrite each other's flags
+  // mid-emit.
+  nested?: boolean[],
 ) {
   const segs = segmentize(alt, literals, regexTokens)
   const chainName = (i: number) =>
@@ -4018,12 +4130,37 @@ function emitChain(
         `${diagName()}: rule '${origin ?? headName}' names ${named} member` +
         `${1 === named ? '' : 's'} but builds ${pushes}. A value ` +
         `annotation names one member per part that produces a value. A ` +
-        `part made only of literals produces none — and note that a ` +
-        `LEADING part whose own rule is a single terminal is folded into ` +
-        `this rule by left-recursion elimination, which turns it into ` +
-        `literals here and so removes it as a member. Giving that rule a ` +
-        `body that is not a bare terminal (a repetition, a group, or ` +
-        `more than one element) keeps it nameable.`,
+        `part made only of literals produces none — and note that a part ` +
+        `whose own rule is a single terminal stops being a part here in ` +
+        `two ways: as a LEADING part it is folded into this rule by ` +
+        `left-recursion elimination, and anywhere else it becomes a named ` +
+        `lexer token. Giving that rule a body that is not a bare terminal ` +
+        `(a repetition, a group, or more than one element) keeps it ` +
+        `nameable.`,
+        { rule: origin ?? headName })
+    }
+  }
+
+  // The same count, checked against the PLAN rather than the names —
+  // because an array has no names, and so had nothing checking it at
+  // all. `nested` is indexed by member position, so a plan that is a
+  // different length from the segments is a plan whose flags are on the
+  // wrong members: an array whose second element's rule was lifted to a
+  // terminal pushed the THIRD element's flag onto it, which nested an
+  // internal tree node into the value instead of its source text. Silent,
+  // and visible only in the output.
+  if (value && null != nested) {
+    const pushes = memberSegs.filter(Boolean).length
+    if (nested.length !== pushes) {
+      throw new EmitError(
+        `${diagName()}: rule '${origin ?? headName}' has a value ` +
+        `annotation for ${nested.length} part` +
+        `${1 === nested.length ? '' : 's'} but builds ${pushes}. A rewrite ` +
+        `pass changed how many parts of this rule produce a value, so the ` +
+        `annotation no longer describes it. A part whose own rule is a ` +
+        `single literal is the usual cause: it becomes a lexer token here ` +
+        `and stops being a part at all. Give that rule a body that is not ` +
+        `a bare terminal.`,
         { rule: origin ?? headName })
     }
   }
@@ -4098,9 +4235,9 @@ function emitChain(
       // still consulted for an object, because a leading member's rule is
       // inlined away and only the annotation still knows what it was.
       if (0 <= m) {
-        const nested = true === _valuePlan.get(origin ?? headName)?.[m]
+        const isNested = true === nested?.[m]
         const act = isArray ? '@push$' : '@setval$'
-        const cfg = nested ? undefined
+        const cfg = isNested ? undefined
           : { [isArray ? 'push$' : 'setval$']: { src: true } }
         if (null == rs.close) rs.close = [{ g: tag }]
         for (const c of rs.close) useValueActions(c, [act], cfg)

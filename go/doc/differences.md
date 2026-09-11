@@ -107,3 +107,39 @@ engine as it stands, a guard emitted for that shape would be inert
 anyway, because the class matcher wins the first cut and the enclosing
 suffix can never be re-cut to its own token. Port it with the rest of
 that list.
+
+
+## Concurrency: Go serialises one emit at a time (deliberate)
+
+`EmitGrammarSpec` takes a package-level lock; the TypeScript
+`emitGrammarSpec` takes nothing. That is not a gap in the port — it is
+the same design costing different things in the two languages.
+
+Both compilers hold the notation's diagnostic prefix (`diagPrefix` /
+`_diagName`) in module state for the duration of one emit, rather than
+threading it through the twenty-odd functions that raise a diagnostic.
+In TypeScript that is free: the pipeline is synchronous and the runtime
+is single-threaded, so no second conversion can begin until the first
+returns. In Go nothing stops two goroutines calling `EmitGrammarSpec` at
+once, and when they did, the loser's diagnostics named the WINNER's
+notation — `gbnf: rule 'x' …` on an error about a rule the ABNF author
+wrote. The race detector reports it as a write-write race on
+`diagPrefix`; what a user saw was the wrong prefix.
+
+The lock is the proportionate fix rather than a threaded parameter,
+because the alternative touches every pass in the package to solve a
+problem in none of them, and because this is a once-per-grammar-install
+call — serialising it costs nothing measurable.
+
+The value-annotation plan had the same shape and is NOT under the lock:
+it is now passed down from `emitGrammarSpec` to `emitChain` as an
+argument (`nested []bool`) in both ports, because it is read in exactly
+one place and threading it there is a two-argument change.
+
+Two tests pin this. `TestValueAnnotationConcurrentEmitsDoNotShareAPlan`
+runs two differently-annotated grammars through 200 concurrent emits and
+asserts each gets its own values; it also trips the race detector under
+`go test -race`. `TestConcurrentEmitsKeepTheirOwnDiagPrefix` asserts the
+user-visible symptom instead — each conversion's diagnostic names its own
+notation — so it fails on a plain `go test` too, without depending on
+whether CI passes `-race`.
