@@ -12,6 +12,8 @@ package bnf
 // normalizeRanges, charRangesOverlap), which is canonical.
 
 import (
+	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -279,4 +281,156 @@ func maxRune(a, b rune) rune {
 		return a
 	}
 	return b
+}
+
+// singleCodePointRanges returns the coverage of a class that provably
+// matches EXACTLY ONE code point, or nil when the pattern could match
+// more (or less) than that.
+//
+// Stricter than patternCharRanges on purpose, and the two must not be
+// confused. That one answers "what can this pattern's FIRST character
+// be?" — the right question for contest detection, which is what it was
+// written for, and it deliberately ignores everything after the first
+// class. Partitioning asks a different question: it REPLACES a class's
+// matcher with one-character atom matchers, so a pattern whose first
+// character coverage is only part of what it matches loses the rest.
+//
+// Measured, on emitGrammarSpec directly:
+//
+//	`a|bc` beside `[a]`      → the `a|bc` matcher vanished; `bc` rejected
+//	`[a-z]+` beside `[a-c]`  → the `+` lost; matched one char, not a run
+//	`[aA][bB]` beside `[a]`  → the `[bB]` lost
+//
+// A case-insensitive class is refused outright rather than folded:
+// foldCaseRanges folds ASCII A-Z/a-z and nothing else, so the atoms it
+// would produce for `[é]/i` cover `é` but not `É` — the matcher says one
+// thing and the ranges another. Refusing costs nothing real (`%x` ranges
+// are case-sensitive by construction, and a case-insensitive literal is
+// a term, not a regex), and a class left out of the partition simply
+// keeps the single token it has always had.
+func singleCodePointRanges(pattern, flags string) []charRange {
+	if strings.Contains(flags, "i") {
+		return nil
+	}
+	if pattern == `[\s\S]` {
+		return patternCharRanges(pattern)
+	}
+
+	if strings.HasPrefix(pattern, "[") {
+		// The class must BE the pattern: find its closing bracket,
+		// honouring backslash escapes, and require it to be the last
+		// character. That rejects `[a-z]+`, `[aA][bB]` and `[a]|b` alike.
+		i := 1
+		if i < len(pattern) && pattern[i] == '^' {
+			i++
+		}
+		for ; i < len(pattern); i++ {
+			if pattern[i] == '\\' {
+				i++
+				continue
+			}
+			if pattern[i] == ']' {
+				break
+			}
+		}
+		if i != len(pattern)-1 {
+			return nil
+		}
+		return patternCharRanges(pattern)
+	}
+
+	// A bare single code point, possibly escaped: `a`, `\.`, `\x{41}`,
+	// `\u0041`. Anything longer is a sequence, an alternation or a
+	// quantified atom, none of which this may touch.
+	if !singleCodePointRe.MatchString(pattern) {
+		return nil
+	}
+	return patternCharRanges(pattern)
+}
+
+var singleCodePointRe = regexp.MustCompile(
+	`^(?:\\x\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\\[\]()|*+?{}^$.])$`)
+
+// partitionRanges splits a collection of character coverages into
+// ATOMS: the coarsest set of pairwise-disjoint spans such that every
+// input coverage is an exact union of them.
+//
+// This is what makes overlapping character classes work at all. The
+// lexer produces ONE token per position, and it picks it by running the
+// matchers the rule expects in allocation order, first match wins. So
+// when two class tokens both cover a character, whichever was allocated
+// first always wins and every alternative keyed on the other one is
+// unreachable — `dec-octet = DIGIT / %x31-39 DIGIT` accepted `0` and `9`
+// and rejected every two-digit octet, because `%x31-39` never fired.
+// Which alternative dies depends only on the order the classes happen to
+// be allocated in, which in turn depends on the order the productions
+// are visited: RFC 3986 worked by luck, and swapping its two dec-octet
+// alternatives broke it.
+//
+// Disjoint atoms remove the choice. No character matches two atoms, so
+// there is nothing for allocation order to decide, and a class that
+// spans several atoms is expressed as a token SET over them — which the
+// engine already resolves to a tin list when it norms an alternate.
+//
+// Endpoint sweep: every coverage boundary starts a new atom. Returns
+// sorted, disjoint spans covering exactly the union of the inputs.
+func partitionRanges(coverages [][]charRange) []charRange {
+	// Cut points: the low bound of every span, and one past every high
+	// bound. Between consecutive cut points, membership cannot change.
+	seen := map[rune]bool{}
+	var points []rune
+	add := func(p rune) {
+		if !seen[p] {
+			seen[p] = true
+			points = append(points, p)
+		}
+	}
+	for _, ranges := range coverages {
+		for _, r := range ranges {
+			add(r.lo)
+			add(r.hi + 1)
+		}
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i] < points[j] })
+
+	var out []charRange
+	for i := 0; i+1 < len(points); i++ {
+		lo, hi := points[i], points[i+1]-1
+		if hi < lo {
+			continue
+		}
+		// Keep only spans some coverage actually contains — the gaps
+		// between classes are not atoms.
+		for _, ranges := range coverages {
+			covered := false
+			for _, r := range ranges {
+				if r.lo <= lo && hi <= r.hi {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				out = append(out, charRange{lo, hi})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// classPattern is a regex character class matching exactly one span.
+// Used for the atom matchers, whose spans come from classes the grammar
+// already wrote, so the only escaping that matters is making the bounds
+// unambiguous. Go's regexp is always Unicode-aware, so there is no
+// astral special case as there is in the TypeScript port.
+func classPattern(lo, hi rune) string {
+	// `\x{%04x}`, matching the escape the ABNF front-end already emits
+	// for a `%x` range on this side, so an atom's token name reads like
+	// every other class token in a Go-emitted spec. (The TypeScript port
+	// spells the same span `\u0030`; the two runtimes have always named
+	// class tokens differently, because their regex dialects differ.)
+	esc := func(cp rune) string {
+		return fmt.Sprintf(`\x{%04x}`, cp)
+	}
+	return "[" + esc(lo) + "-" + esc(hi) + "]"
 }

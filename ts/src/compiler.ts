@@ -2396,6 +2396,10 @@ function emitGrammarSpec(
   // Token tables are keyed by grammar-supplied names too.
   const fixedTokens: Record<string, string> = Object.create(null)
   const matchTokens: Record<string, RegExp> = Object.create(null)
+  // Named token groups (engine `options.tokenSet`), one per class that
+  // spans more than one atom, and the character coverage of each.
+  const tokenSets: Record<string, string[]> = Object.create(null)
+  const setRanges = new Map<string, Array<[number, number]>>()
 
   // Gather every terminal first. Probe-helper productions store their
   // vocab as AbnfElements rather than in `alts`, so walk those too. The
@@ -2418,6 +2422,12 @@ function emitGrammarSpec(
     if (prod.tailRepeat) terminals.push(...prod.tailRepeat.sep)
   }
 
+  // Which character classes contest a position with another, and the
+  // shared partition they are laid over. Computed before anything is
+  // allocated, because whether a class becomes one token or a set over
+  // atoms depends on what the OTHER classes in the grammar cover.
+  const classes = classAnalysis(terminals)
+
   // Terminals carrying a lifted production name are allocated first, so
   // the name wins even when the same literal also appears inline in an
   // earlier rule (`PL = "+"` must yield `#PL`, not `#T`, regardless of
@@ -2434,25 +2444,18 @@ function emitGrammarSpec(
     } else if (el.kind === 'regex') {
       const key = regexKey(el)
       if (!regexTokens.has(key)) {
-        const name = allocTokenName('rx_' + el.pattern, usedNames)
-        regexTokens.set(key, name)
-        // A character class fires at ANY lookahead position, not only at
-        // the slots the current rule's collated token column names. The
-        // column is path-blind: a `*digit` helper whose two-token prefix is
-        // `#DIGIT #DIGIT` lists only #DIGIT at slot 1, so the letter that
-        // ends the run (`12a`, `01a`) lexed as a fatal #BD there instead of
-        // as the letter class the shorter alternate needs — the engine has
-        // no way to fall through to that alternate once the lexer has
-        // refused the character. Eager is the same opt-out a case-
-        // insensitive literal already takes (emitLiteralToken), and the Go
-        // emitter has marked every range regex eager all along; this is
-        // what makes the two runtimes accept the same strings. The parser
-        // still rejects a token it does not expect at the current slot.
-        const re = new RegExp(
-          '^' + anchorable(el.pattern), el.flags,
-        ) as RegExp & { eager$?: boolean }
-        re.eager$ = true
-        matchTokens[name] = re
+        // Allocated HERE, in terminal order, rather than in a pass of
+        // their own. Allocation order is tin order, and tin order is
+        // what the lexer walks when it picks between the matchers a slot
+        // expects — so moving class allocation out of this interleaved
+        // loop silently re-ranks every class against every
+        // case-insensitive literal. It did: hoisting it put `#E` (from
+        // `HEXDIG = … / "E" / …`) ahead of ALPHA's `[a-z]`, and
+        // `http://example.com` stopped parsing because the `e` lexed as
+        // the literal.
+        emitClassToken(
+          el, key, classes, regexTokens, tokenSets, setRanges, matchTokens,
+          usedNames)
       }
     }
   }
@@ -2472,6 +2475,17 @@ function emitGrammarSpec(
   const rangeCache = new Map<string, Array<[number, number]> | null>()
   const tokenRangesOf = (tok: string): Array<[number, number]> | null => {
     if (rangeCache.has(tok)) return rangeCache.get(tok) as any
+    // A class that spans several atoms is a token SET, so it appears in
+    // neither token table; its coverage was recorded when the set was
+    // minted. Without this the contest checks below see `null` — "we do
+    // not know what this covers" — and go conservative for every
+    // overlapping class in the grammar, which is precisely the set of
+    // classes the guards exist for.
+    const spanned = setRanges.get(tok)
+    if (null != spanned) {
+      rangeCache.set(tok, normalizeRanges(spanned))
+      return rangeCache.get(tok) as any
+    }
     let r: Array<[number, number]> | null = null
     const lit = fixedTokens[tok]
     if ('string' === typeof lit && 0 < lit.length) {
@@ -2626,6 +2640,13 @@ function emitGrammarSpec(
   }
   if (Object.keys(matchTokens).length > 0) {
     options.match = { token: matchTokens }
+  }
+  // One group per character class that spans several atoms of the
+  // partition. The engine resolves a set name to its tin list while
+  // norming an alternate, so an `s` position naming the set matches any
+  // atom in it.
+  if (Object.keys(tokenSets).length > 0) {
+    options.tokenSet = tokenSets
   }
 
   const spec: GrammarSpec = {
@@ -3342,6 +3363,41 @@ function emitProduction(
     return false
   }
 
+  // Can two alternates be handed the SAME token, so that choosing
+  // between them on one token is not a choice at all?
+  //
+  // Deliberately narrower than `altHeadContested`, which asks whether
+  // two heads can claim the same CHARACTER — the right question for the
+  // lexer, and the wrong one here. `greeting = "hello" name / "hi" name`
+  // has two heads sharing an `h`, but `#HELLO` and `#HI` are distinct
+  // tokens and the dispatch was never in doubt; asking the character
+  // question doubled that rule's alternates for nothing.
+  //
+  // Two DIFFERENT class tokens can still be handed the same token,
+  // because a class that spans several atoms is a set: `%x30-39` and
+  // `%x31-39` share three of the four atoms they are built from. That is
+  // the case this exists for, so overlap still counts when both sides
+  // are classes.
+  const classHeadToks = new Set(regexTokens.values())
+  const altHeadSharesToken = (alt: Sequence, all: Sequence[]): boolean => {
+    const mine = firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
+    if (null == mine) return false
+    for (const other of all) {
+      if (other === alt || 0 === other.length) continue
+      const theirs = firstOfAlt(
+        other, literals, regexTokens, firstSets, nullable)
+      if (null == theirs) continue
+      for (const t of mine) {
+        for (const u of theirs) {
+          if (t === u) return true
+          if (classHeadToks.has(t) && classHeadToks.has(u) &&
+            tokensOverlap(t, u)) return true
+        }
+      }
+    }
+    return false
+  }
+
   // Suffix-debt guard for a contested left-recursion tail loop: a branch
   // that would eat a token an enclosing frame still owes may only run
   // while the debt is zero. Applies to the continue alternatives (`alt`
@@ -3487,6 +3543,36 @@ function emitProduction(
         entries.unshift(
           ...pairExitGuards(o).map((g: any) => ({ o: g, alt: null })))
       }
+
+      // `terms… ref` against a sibling that stops on the same head.
+      //
+      // The alternate as written consumes its own terminals and pushes
+      // the reference, so it is chosen on its FIRST token alone — and a
+      // sibling that wants to stop there can never be reached, because
+      // nothing backtracks once the push has happened. RFC 3986's
+      // `dec-octet = DIGIT / %x31-39 DIGIT / …` is the case: `1.2.3.4`
+      // entered the two-digit alternate on the `1` and then demanded a
+      // second digit of the `.`.
+      //
+      // The reference is non-nullable here, so the alternate genuinely
+      // requires one of its FIRST tokens next. Naming that token in `s`
+      // and pushing it straight back (`b: 1`) states the requirement
+      // without consuming it, and leaves the shorter sibling reachable.
+      // These entries REPLACE the one-token form rather than joining it:
+      // keeping both would restore exactly the premature commit, since
+      // the bare alternate matches everything the peeked ones do.
+      const refPeek = (!needsPeek || null == seg.ref ||
+        0 === seg.terms.length || nullable.has(seg.ref) ||
+        !altHeadSharesToken(alt, ordered))
+        ? null
+        : [...(firstSets.get(seg.ref) ?? [])]
+      if (null != refPeek && 0 < refPeek.length && refPeek.length <= 64) {
+        for (const tok of refPeek) {
+          entries.push({ o: { ...o, s: [...seg.terms, tok].join(' '), b: 1 }, alt })
+        }
+        continue
+      }
+
       entries.push({ o, alt: 0 < alt.length ? alt : null })
     }
 
@@ -4291,6 +4377,276 @@ function foldCaseRanges(
     if (lLo <= lHi) out.push([lLo - DELTA, lHi - DELTA])
   }
   return out
+}
+
+
+// What every character class in the grammar covers, which of them
+// contest a position with another, and the shared partition the
+// contested ones are laid over.
+//
+// A class whose coverage overlaps no other class keeps exactly what it
+// had before this existed: one match token, named after its pattern.
+// That is the common case — of the 75 .abnf files in the conformance
+// corpus, 44 have no overlapping classes at all — and keeping it
+// byte-identical is what stops token tables and the generated rule
+// names derived from them moving for grammars that never had the
+// problem.
+//
+// A class whose pattern is not a plain character coverage
+// (`patternCharRanges` returns null) cannot be partitioned, so it never
+// counts as contested and is left alone.
+type ClassAnalysis = {
+  coverage: Map<string, Array<[number, number]>>
+  contested: Set<string>
+  atoms: Array<[number, number]>
+  // Atom span -> the token minted for it, filled in as classes are
+  // allocated so an atom lands at the position of the first class that
+  // needs it.
+  atomTokens: Map<string, string>
+}
+
+function classAnalysis(terminals: Element[]): ClassAnalysis {
+  const coverage = new Map<string, Array<[number, number]>>()
+  for (const el of terminals) {
+    if (el.kind !== 'regex') continue
+    const key = regexKey(el)
+    if (coverage.has(key)) continue
+    // Only classes that provably match exactly one code point take part:
+    // partitioning replaces a class's matcher with one-character atoms,
+    // so anything that could match more would lose the rest. A class left
+    // out contributes no coverage, and so neither contests nor is
+    // contested — it keeps the single token it has always had.
+    const r = singleCodePointRanges(el.pattern, el.flags)
+    if (null != r) coverage.set(key, normalizeRanges(r))
+  }
+
+  const contested = new Set<string>()
+  for (const [key, mine] of coverage) {
+    for (const [other, theirs] of coverage) {
+      if (other !== key && charRangesOverlap(mine, theirs)) {
+        contested.add(key)
+        break
+      }
+    }
+  }
+
+  const atoms = 0 === contested.size
+    ? []
+    : partitionRanges(
+      [...contested].map((k) => coverage.get(k) as Array<[number, number]>))
+
+  return { coverage, contested, atoms, atomTokens: new Map() }
+}
+
+
+// Allocate the lexer token(s) for one character class, at the point the
+// class is first encountered.
+//
+// Uncontested: one match token, exactly as before this existed.
+//
+// Contested: the class is laid over the shared partition. Each atom it
+// covers gets its own match token (minted here if this is the first
+// class to need it), and the class becomes a token SET over them, under
+// the name it would have had anyway. Downstream, `regexTokens` still
+// maps a class to a single name — the engine resolves a set name to its
+// tin list when it norms an alternate (`rules.ts`: `r.ji.tokenSet(n) ??
+// r.ji.token(n)`) — so nothing that consumes `regexTokens` has to know
+// the difference, and names derived from it (`_gen1_plus_ALPHA`) do not
+// move.
+function emitClassToken(
+  el: Element & { kind: 'regex' },
+  key: string,
+  classes: ClassAnalysis,
+  regexTokens: Map<string, string>,
+  tokenSets: Record<string, string[]>,
+  setRanges: Map<string, Array<[number, number]>>,
+  matchTokens: Record<string, RegExp>,
+  usedNames: Set<string>,
+): void {
+  // A class fires at ANY lookahead position, not only at the slots the
+  // current rule's collated token column names. The column is
+  // path-blind: a `*digit` helper whose two-token prefix is `#DIGIT
+  // #DIGIT` lists only #DIGIT at slot 1, so the letter that ends the run
+  // (`12a`, `01a`) lexed as a fatal #BD there instead of as the letter
+  // class the shorter alternate needs — the engine has no way to fall
+  // through to that alternate once the lexer has refused the character.
+  // Eager is the same opt-out a case-insensitive literal already takes
+  // (emitLiteralToken), and the Go emitter has marked every range regex
+  // eager all along; this is what makes the two runtimes accept the same
+  // strings. The parser still rejects a token it does not expect at the
+  // current slot.
+  const eager = (pattern: string, flags: string): RegExp => {
+    const re = new RegExp(
+      '^' + anchorable(pattern), flags) as RegExp & { eager$?: boolean }
+    re.eager$ = true
+    return re
+  }
+
+  const name = allocTokenName('rx_' + el.pattern, usedNames)
+  regexTokens.set(key, name)
+
+  if (!classes.contested.has(key)) {
+    matchTokens[name] = eager(el.pattern, el.flags)
+    return
+  }
+
+  const mine = classes.coverage.get(key) as Array<[number, number]>
+  const members: string[] = []
+  for (const span of classes.atoms) {
+    if (!mine.some(([a, b]) => a <= span[0] && span[1] <= b)) continue
+    const spanKey = span[0] + '-' + span[1]
+    let atom = classes.atomTokens.get(spanKey)
+    if (null == atom) {
+      const { pattern, astral } = classPattern(span[0], span[1])
+      // `rxa_`, not `rx_`: an atom is synthetic, and a name minted from
+      // `rx_` collides with the natural name of any class spelling the
+      // same span. It did — `%x31-39`'s atom took `#RX___U0031__U0039`
+      // first, so the class itself was pushed to `#RX___U0031__U00391`
+      // and every name derived from it moved, which is the instability
+      // the one-member set above exists to prevent.
+      atom = allocTokenName('rxa_' + pattern, usedNames)
+      matchTokens[atom] = eager(pattern, astral ? 'u' : '')
+      classes.atomTokens.set(spanKey, atom)
+    }
+    members.push(atom)
+  }
+
+  // A one-member set rather than pointing `regexTokens` straight at the
+  // atom. Redirecting looked tidier and silently renamed things: marks
+  // come from `altDiscriminator`, which reads the token name out of
+  // `regexTokens`, so `[123456789]` took the canonical `[1-9]` atom's
+  // name and its `m` — and any `@rule:o:mark` user action attached to it
+  // — changed the moment some OTHER production in the grammar mentioned
+  // an overlapping `[0-9]`. The class keeps its own name here whatever
+  // the partition does underneath it.
+  //
+  // Keyed WITHOUT the leading `#`. Both engines look a set name up with
+  // the `#` stripped (TS `findTokenSet` falls back to it, Go
+  // `hasTokenSet` trims it outright), and only the bare key is found by
+  // both — a `#`-keyed set is invisible to the Go engine, which resolved
+  // the name to nothing and left every alternate keyed on the class
+  // unmatchable.
+  tokenSets[name.replace(/^#/, '')] = members
+  setRanges.set(name, mine)
+}
+
+
+// The coverage of a class that provably matches EXACTLY ONE code point,
+// or null when the pattern could match more (or less) than that.
+//
+// Stricter than `patternCharRanges` on purpose, and the two must not be
+// confused. That one answers "what can this pattern's FIRST character
+// be?" — the right question for contest detection, which is what it was
+// written for, and it deliberately ignores everything after the first
+// class. Partitioning asks a different question: it REPLACES a class's
+// matcher with one-character atom matchers, so a pattern whose first
+// character coverage is only part of what it matches loses the rest.
+//
+// Measured, on `emitGrammarSpec` directly:
+//
+//   `a|bc` beside `[a]`      → the `a|bc` matcher vanished; `bc` rejected
+//   `[a-z]+` beside `[a-c]`  → the `+` lost; matched one char, not a run
+//   `[aA][bB]` beside `[a]`  → the `[bB]` lost
+//
+// A case-insensitive class is refused outright rather than folded:
+// `foldCaseRanges` folds ASCII A-Z/a-z and nothing else, so the atoms it
+// would produce for `[é]/i` cover `é` but not `É` — the matcher says one
+// thing and the ranges another. Refusing costs nothing real (`%x`
+// ranges are case-sensitive by construction, and a case-insensitive
+// literal is a `term`, not a `regex`), and a class left out of the
+// partition simply keeps the single token it has always had.
+function singleCodePointRanges(
+  pattern: string,
+  flags: string,
+): Array<[number, number]> | null {
+  if (flags.includes('i')) return null
+  if ('[\\s\\S]' === pattern) return patternCharRanges(pattern)
+
+  if (pattern.startsWith('[')) {
+    // The class must BE the pattern: find its closing bracket, honouring
+    // backslash escapes, and require it to be the last character. That
+    // rejects `[a-z]+`, `[aA][bB]` and `[a]|b` alike.
+    let i = 1
+    if ('^' === pattern[i]) i++
+    for (; i < pattern.length; i++) {
+      if ('\\' === pattern[i]) { i++; continue }
+      if (']' === pattern[i]) break
+    }
+    if (i !== pattern.length - 1) return null
+    return patternCharRanges(pattern)
+  }
+
+  // A bare single code point, possibly escaped: `a`, `\.`, `\u0041`,
+  // `\u{1F600}`. Anything longer is a sequence, an alternation or a
+  // quantified atom, none of which this may touch.
+  const one = /^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$/
+  if (!one.test(pattern)) return null
+  return patternCharRanges(pattern)
+}
+
+
+// Split a collection of character coverages into ATOMS: the coarsest
+// set of pairwise-disjoint spans such that every input coverage is an
+// exact union of them.
+//
+// This is what makes overlapping character classes work at all. The
+// lexer produces ONE token per position, and it picks it by running the
+// matchers the rule expects in tin order, first match wins. So when two
+// class tokens both cover a character, whichever was allocated first
+// always wins and every alternative keyed on the other one is
+// unreachable — `dec-octet = DIGIT / %x31-39 DIGIT` accepted `0` and `9`
+// and rejected every two-digit octet, because `%x31-39` never fired.
+// Which alternative dies depends only on the order the classes happen to
+// be allocated in, which in turn depends on the order the productions
+// are visited: RFC 3986 worked by luck, and swapping its two dec-octet
+// alternatives broke it.
+//
+// Disjoint atoms remove the choice. No character matches two atoms, so
+// there is nothing for allocation order to decide, and a class that
+// spans several atoms is expressed as a token SET over them (see
+// `emitClassTokens`) — which the engine already resolves to a tin list
+// when it norms an alternate.
+//
+// Endpoint sweep: every coverage boundary starts a new atom. Returns
+// sorted, disjoint spans covering exactly the union of the inputs.
+function partitionRanges(
+  coverages: Array<Array<[number, number]>>,
+): Array<[number, number]> {
+  // Cut points: the low bound of every span, and one past every high
+  // bound. Between consecutive cut points, membership cannot change.
+  const cuts = new Set<number>()
+  for (const ranges of coverages) {
+    for (const [lo, hi] of ranges) {
+      cuts.add(lo)
+      cuts.add(hi + 1)
+    }
+  }
+  const points = [...cuts].sort((a, b) => a - b)
+  const out: Array<[number, number]> = []
+  for (let i = 0; i < points.length - 1; i++) {
+    const lo = points[i]
+    const hi = points[i + 1] - 1
+    if (hi < lo) continue
+    // Keep only spans some coverage actually contains — the gaps
+    // between classes are not atoms.
+    if (coverages.some((rs) => rs.some(([a, b]) => a <= lo && hi <= b))) {
+      out.push([lo, hi])
+    }
+  }
+  return out
+}
+
+
+// A regex character class matching exactly one span. Used for the atom
+// matchers, whose spans come from classes the grammar already wrote, so
+// the only escaping that matters is making the bounds unambiguous.
+function classPattern(lo: number, hi: number): { pattern: string; astral: boolean } {
+  const astral = 0xffff < lo || 0xffff < hi
+  const esc = (cp: number): string =>
+    astral
+      ? '\\u{' + cp.toString(16).toUpperCase() + '}'
+      : '\\u' + cp.toString(16).toUpperCase().padStart(4, '0')
+  return { pattern: '[' + esc(lo) + '-' + esc(hi) + ']', astral }
 }
 
 

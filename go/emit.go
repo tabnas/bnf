@@ -207,6 +207,16 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			matchOrder = append(matchOrder, name)
 		}
 	}
+	// Which character classes contest a position with another, and the
+	// shared partition they are laid over. Filled in below, once every
+	// terminal is in view: whether a class becomes one token or a set
+	// over atoms depends on what the OTHER classes cover.
+	var classes *classAnalysis
+	// Named token groups, one per class that spans more than one atom,
+	// and the character coverage of each.
+	tokenSets := map[string][]string{}
+	setRanges := map[string][]charRange{}
+
 	allocRegex := func(el *Element) {
 		key := regexKey(el)
 		if _, ok := regexTokens[key]; ok {
@@ -214,14 +224,81 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		}
 		name := allocTokenName("rx_"+el.Pattern, usedNames, "")
 		regexTokens[key] = name
-		matchTokens[name] = goRegex(el.Pattern, el.Flags)
+
 		// The Go engine gates non-eager match tokens by alt position 0
 		// only (the TS engine uses a per-position tcol that covers every
 		// alt slot). Marking range regexes eager makes them fire at any
 		// lookahead position — equivalent coverage; the parser still
 		// rejects a token it doesn't expect at the current slot.
-		matchEager[name] = true
-		matchOrder = append(matchOrder, name)
+		emit := func(n, pattern, flags string) {
+			matchTokens[n] = goRegex(pattern, flags)
+			matchEager[n] = true
+			matchOrder = append(matchOrder, n)
+		}
+
+		if classes == nil || !classes.contested[key] {
+			emit(name, el.Pattern, el.Flags)
+			return
+		}
+
+		// Contested: lay the class over the shared partition. Each atom
+		// it covers gets its own match token (minted here if this is the
+		// first class to need it, so atoms land in the same allocation
+		// order the classes would have had), and the class becomes a
+		// token SET over them, under the name it would have had anyway.
+		// Downstream, regexTokens still maps a class to a single name —
+		// the engine resolves a set name to its tin list when it norms
+		// an alternate — so nothing that reads regexTokens has to know
+		// the difference, and names derived from it do not move.
+		mine := classes.coverage[key]
+		var members []string
+		for _, span := range classes.atoms {
+			covered := false
+			for _, r := range mine {
+				if r.lo <= span.lo && span.hi <= r.hi {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				continue
+			}
+			spanKey := fmt.Sprintf("%d-%d", span.lo, span.hi)
+			atom, ok := classes.atomTokens[spanKey]
+			if !ok {
+				pattern := classPattern(span.lo, span.hi)
+				// `rxa_`, not `rx_`: an atom is synthetic, and a name
+				// minted from `rx_` collides with the natural name of any
+				// class spelling the same span. It did — `%x31-39`'s atom
+				// took that name first, so the class itself was pushed to a
+				// suffixed one and every name derived from it moved, which
+				// is the instability the one-member set below exists to
+				// prevent.
+				atom = allocTokenName("rxa_"+pattern, usedNames, "")
+				emit(atom, pattern, "")
+				classes.atomTokens[spanKey] = atom
+			}
+			members = append(members, atom)
+		}
+
+		// A one-member set rather than pointing regexTokens straight at
+		// the atom. Redirecting looked tidier and silently renamed
+		// things: marks come from altDiscriminator, which reads the token
+		// name out of regexTokens, so `[123456789]` took the canonical
+		// `[1-9]` atom's name and its `m` — and any `@rule:o:mark` user
+		// action attached to it — changed the moment some OTHER
+		// production in the grammar mentioned an overlapping `[0-9]`. The
+		// class keeps its own name here whatever the partition does
+		// underneath it.
+		//
+		// Keyed WITHOUT the leading `#`. Both engines look a set name
+		// up with the `#` stripped (Go `hasTokenSet` trims it outright,
+		// TS `findTokenSet` falls back to it), and only the bare key is
+		// found by both — a `#`-keyed set is invisible to this engine,
+		// which resolved the name to nothing and left every alternate
+		// keyed on the class unmatchable.
+		tokenSets[strings.TrimPrefix(name, "#")] = members
+		setRanges[name] = mine
 	}
 
 	// Gather every terminal first. Probe-helper productions store their vocab
@@ -254,6 +331,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// name wins even when the same literal also appears inline in an earlier
 	// rule (`PL = "+"` must yield `#PL`, not `#T`, regardless of where the
 	// bare `"+"` shows up).
+	classes = newClassAnalysis(terminals)
+
 	named := []*Element{}
 	for _, el := range terminals {
 		if el.Kind == KindTerm && el.TokenName != "" {
@@ -277,7 +356,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// elimination, now that FIRST sets can say whether the competition is
 	// real. Runs on the desugared grammar because the loop is a helper
 	// production by this point.
-	cc := newContestCtx(fixedTokens, matchTokens)
+	cc := newContestCtx(fixedTokens, matchTokens, setRanges)
 	resolveSuffixDebts(grammar, literals, regexTokens, firstSets, nullable, cc)
 	// FOLLOW puts the tokens that may come after a repetition back into
 	// its terminating alternative's token column; FOLLOW₂ decides a
@@ -367,6 +446,13 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		opt.Match = &tabnas.MatchOptions{
 			Token: matchTokens, TokenEager: matchEager, TokenOrder: matchOrder,
 		}
+	}
+	// One group per character class that spans several atoms of the
+	// partition. The engine resolves a set name to its tin list while
+	// norming an alternate, so an `s` position naming the set matches any
+	// atom in it.
+	if len(tokenSets) > 0 {
+		opt.TokenSet = tokenSets
 	}
 
 	spec = &tabnas.GrammarSpec{
@@ -823,6 +909,14 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	followPairs map[string]map[string]map[string]bool, cc *contestCtx,
 	prov map[string]string) error {
 
+	// The token names that came from character classes, for
+	// altHeadSharesToken: only between two of these does character
+	// overlap mean they can be handed the same token.
+	classHeadToks := map[string]bool{}
+	for _, t := range regexTokens {
+		classHeadToks[t] = true
+	}
+
 	for _, alt := range prod.Alts {
 		if err := validateRefs(alt, knownRules, prod.Name); err != nil {
 			return err
@@ -1005,6 +1099,40 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 					front = append(front, dispatchEntry{o: g})
 				}
 				entries = append(front, entries...)
+			}
+
+			// `terms… ref` against a sibling that stops on the same head.
+			//
+			// The alternate as written consumes its own terminals and
+			// pushes the reference, so it is chosen on its FIRST token
+			// alone — and a sibling that wants to stop there can never be
+			// reached, because nothing backtracks once the push has
+			// happened. RFC 3986's `dec-octet = DIGIT / %x31-39 DIGIT /
+			// …` is the case: `1.2.3.4` entered the two-digit alternate
+			// on the `1` and then demanded a second digit of the `.`.
+			//
+			// The reference is non-nullable here, so the alternate
+			// genuinely requires one of its FIRST tokens next. Naming
+			// that token in `s` and pushing it straight back (`b: 1`)
+			// states the requirement without consuming it, and leaves the
+			// shorter sibling reachable. These entries REPLACE the
+			// one-token form rather than joining it: keeping both would
+			// restore exactly the premature commit, since the bare
+			// alternate matches everything the peeked ones do.
+			if needsPeek && seg.ref != "" && len(seg.terms) > 0 &&
+				!nullable[seg.ref] &&
+				altHeadSharesToken(alt, ordered, literals, regexTokens,
+					firstSets, nullable, classHeadToks, cc) {
+				peek := sortedKeys(firstSets[seg.ref])
+				if len(peek) > 0 && len(peek) <= 64 {
+					for _, tok := range peek {
+						g := copyMap(o)
+						g["s"] = strings.Join(append(append([]string{}, seg.terms...), tok), " ")
+						g["b"] = 1
+						entries = append(entries, dispatchEntry{o: g, alt: alt})
+					}
+					continue
+				}
 			}
 
 			var srcAlt Sequence
