@@ -1197,7 +1197,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		// Single-alt, multi-segment: chain rules directly on the production.
 		return emitChain(prod.Name, prod.Alts[0], literals, regexTokens, tag,
 			ruleSpec, refs, prodKind, prov, originOf(prod),
-			prod.Value, valuePlan[originOf(prod)])
+			prod.Value, valuePlan[originOf(prod)], prod.Sp)
 	}
 
 	// A value annotation names one member per pushing segment, which only
@@ -1248,7 +1248,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		}
 
 		if err := emitChain(implName, alt, literals, regexTokens, tag, ruleSpec,
-			refs, "helper", prov, originOf(prod), nil, nil); err != nil {
+			refs, "helper", prov, originOf(prod), nil, nil, nil); err != nil {
 			return err
 		}
 
@@ -1396,7 +1396,12 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 	// place, so passing it costs two arguments and leaves nothing shared —
 	// which is the better answer wherever it is affordable. It is not
 	// affordable for diagPrefix; see the comment on emitMu.
-	value *ValueAnnotation, nested []bool) error {
+	// sp is the annotated production's span, for the refusals below. They
+	// are raised AFTER the rewrites, on a reachable path (a member whose
+	// rule was lifted to a token), so they are as much the author's
+	// business as the planner's — and were the only annotation refusals
+	// left that could not say where.
+	value *ValueAnnotation, nested []bool, sp *SrcSpan) error {
 
 	segs := segmentize(alt, literals, regexTokens)
 	chainName := func(i int) string {
@@ -1443,7 +1448,7 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 				diagName()+": rule '%s' has a value annotation of unknown kind "+
 					"'%s'. A rule builds an 'object' or an 'array'.",
 				diagRule, value.Kind),
-			Rule: diagRule,
+			Rule: diagRule, Sp: sp,
 		}
 	}
 
@@ -1480,7 +1485,7 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 						"not a bare terminal (a repetition, a group, or more than one "+
 						"element) keeps it nameable.",
 					diagRule, named, plural, pushes),
-				Rule: diagRule,
+				Rule: diagRule, Sp: sp,
 			}
 		}
 	}
@@ -1515,7 +1520,7 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 						"being a part at all. Give that rule a body that is not a "+
 						"bare terminal.",
 					diagRule, len(nested), plural, pushes),
-				Rule: diagRule,
+				Rule: diagRule, Sp: sp,
 			}
 		}
 	}

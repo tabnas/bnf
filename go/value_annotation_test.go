@@ -966,3 +966,163 @@ func TestValueAnnotationRefusesARepeatedMemberName(t *testing.T) {
 		t.Errorf("expected a duplicate-member refusal, got %v", err)
 	}
 }
+
+// `top = [ "a" "!" ] "a"` — the optional prefix shares vocabulary with
+// the tail, so both are compiled into ONE dispatch helper. The member
+// count still matches (one pushing part before, one after), which is why
+// no count check can catch it: the count is preserved while the boundary
+// moves. It built a self-referential array, not merely the wrong text.
+func TestValueAnnotationRefusesAProbeDispatchedAlternative(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Sp: &SrcSpan{S: 1, E: 9},
+			Alts: []Sequence{{
+				&Element{Kind: KindOpt, Inner: groupEl(Sequence{termEl("a"), termEl("!")})},
+				termEl("a"),
+			}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected an EmitError, got %v", err)
+	}
+	if !strings.Contains(ee.Message, "one dispatch helper") {
+		t.Fatalf("expected the probe refusal, got %q", ee.Message)
+	}
+	if ee.Sp == nil || ee.Sp.S != 1 || ee.Sp.E != 9 {
+		t.Errorf("span: got %#v, want S=1 E=9", ee.Sp)
+	}
+}
+
+// leftFactor reads the UNWRAPPED alt, so it sees a reference inside a
+// single-alternative group — which the leading-reference scan does not,
+// because that models Paull's substitution. Factoring inlines `leaf`,
+// dissolving the rule, and its value vanished.
+//
+// Declining to factor is not an option: these alternatives are being
+// factored because their shared prefix outruns the dispatch lookahead,
+// so leaving them unfactored yields a grammar that fails at PARSE time
+// instead. Hence a refusal naming the conflict.
+func TestValueAnnotationRefusesFactoringAwayAValueRule(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Alts: []Sequence{
+			{groupEl(Sequence{lettersEl(), termEl("x")})},
+			{groupEl(Sequence{refEl("leaf"), termEl("y")})},
+		}},
+		{Name: "leaf",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"w"}},
+			Sp:    &SrcSpan{S: 3, E: 11},
+			Alts:  []Sequence{{lettersEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected an EmitError, got %v", err)
+	}
+	if !strings.Contains(ee.Message, "shared prefix of two alternatives") {
+		t.Fatalf("expected the left-factoring refusal, got %q", ee.Message)
+	}
+	if ee.Sp == nil || ee.Sp.S != 3 || ee.Sp.E != 11 {
+		t.Errorf("span: got %#v, want S=3 E=11", ee.Sp)
+	}
+}
+
+// The emit-time count refusals fire AFTER the rewrites, on a reachable
+// path — a member whose own rule is a single literal becomes a lexer
+// token and stops being a part — so they are as much the author's
+// business as the planner's, and were the last annotation refusals that
+// could not say where.
+func TestValueAnnotationPostRewriteCountRefusalCarriesTheSpan(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"n", "s"}},
+			Sp:    &SrcSpan{S: 5, E: 25},
+			Alts:  []Sequence{{refEl("n"), refEl("s")}}},
+		{Name: "n", Alts: []Sequence{{digitsEl()}}},
+		{Name: "s", Alts: []Sequence{{termEl("+")}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	var ee *EmitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("expected an EmitError, got %v", err)
+	}
+	if !strings.Contains(ee.Message, "names 2 members but builds 1") {
+		t.Fatalf("expected the count refusal, got %q", ee.Message)
+	}
+	if ee.Sp == nil || ee.Sp.S != 5 || ee.Sp.E != 25 {
+		t.Errorf("span: got %#v, want S=5 E=25", ee.Sp)
+	}
+}
+
+// `__proto__` stays an ordinary member name, deliberately. Go builds a
+// plain map, so it is an ordinary entry; TypeScript allocates its value
+// objects with Object.create(null) — "no prototype, like JSON" — so it
+// is an own property there too. The two agree, and reserving it would
+// refuse a name that works.
+func TestValueAnnotationAllowsProtoAsAMemberName(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"__proto__", "b"}},
+			Alts:  []Sequence{{termEl("<"), refEl("a"), termEl("."), refEl("b")}}},
+		{Name: "a",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		{Name: "d", Alts: []Sequence{{digitsEl()}}},
+		{Name: "b", Alts: []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "<1.2")
+	want := map[string]any{"__proto__": map[string]any{"d": "1"}, "b": "2"}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// The refusal must fire where factoring is COMMITTED, not where it is
+// speculated. inlineHeadRef is called for every later ref-headed
+// alternative, and the run can still be abandoned afterwards — the heads
+// may not match, or the prefix may be short enough that dispatch
+// lookahead already separates the alternatives.
+//
+// Here the heads differ (1*ALPHA against 1*DIGIT), so nothing is
+// factored and the annotated rule survives intact.
+func TestValueAnnotationFactorsOnlyWhenFactoringHappens(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Alts: []Sequence{
+			{groupEl(Sequence{lettersEl(), termEl("x")})},
+			{groupEl(Sequence{refEl("leaf"), termEl("y")})},
+		}},
+		{Name: "leaf",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"w"}},
+			Alts:  []Sequence{{digitsEl()}}},
+	}
+	got := buildValue(t, prods, "top", "12y")
+	want := map[string]any{"rule": "top", "src": "y",
+		"kids": []any{map[string]any{"w": "12"}}}
+	if !valueEquals(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// `[ "a" NR ] "a"` — NR normalises to the built-in token #NR, and the
+// probe predicate accepts a token disambiguator as readily as a literal
+// one. This port accepted only KindTerm/KindRegex, so the grammar was
+// probe-rewritten in TypeScript and not here: one port refused it and
+// the other built a value from a boundary that had moved.
+func TestValueAnnotationRefusesAProbeWithATokenDisambiguator(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{
+				&Element{Kind: KindOpt, Inner: groupEl(Sequence{
+					termEl("a"), {Kind: KindToken, Name: "#NR"}})},
+				termEl("a"),
+			}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "one dispatch helper") {
+		t.Errorf("expected the probe refusal, got %v", err)
+	}
+}
