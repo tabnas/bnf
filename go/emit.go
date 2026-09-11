@@ -991,19 +991,12 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 
 	if prod.TailRepeat != nil {
 		// A tail repeat is rewritten into a same-depth close-phase loop, so
-		// the parts the annotation named are no longer separate pushes to
-		// hang members on. Refuse rather than emit a differently-shaped
-		// value: this path used to return the AST silently.
-		if prod.Value != nil {
-			// Ranged, like every other annotation refusal. The rewrite
-			// mutates this production in place and keeps its span, so the
-			// author's own line is still locatable from here.
-			return &EmitError{Rule: originOf(prod), Sp: prod.Sp, Message: fmt.Sprintf(
-				diagName()+": rule '%s' has a value annotation, but it compiles "+
-					"to a same-depth repeat, which has no separate parts to "+
-					"name. Annotate the rule the repeat pushes instead.",
-				originOf(prod))}
-		}
+		// the parts an annotation named are no longer separate pushes to
+		// hang members on. There WAS a refusal here for that; it is gone
+		// because planValueAnnotations now reaches it first and cannot be
+		// got past — the repeated part references this rule, which builds a
+		// value, so the part cannot be taken as source text. Keeping a
+		// second copy would have been a branch no input can enter.
 		emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
 		return nil
 	}

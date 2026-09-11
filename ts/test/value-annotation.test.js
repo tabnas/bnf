@@ -447,11 +447,12 @@ describe('value annotations', () => {
     assert.deepEqual(build(prods, 'top', '7'), { child: { d: '7' } })
   })
 
-  it('refuses an annotation on a same-depth repeat, with its span', () => {
-    // `add = [0-9]+ [ "+" add ]` compiles to a close-phase loop, so the
-    // parts the annotation named are no longer separate pushes. The
-    // prefix and separator have to be BARE terminals for the rewrite to
-    // fire — `1*DIGIT` is a repetition and is not one.
+  it('refuses an annotation on a self-recursive part, with its span', () => {
+    // `add = [0-9]+ [ "+" add ]` is the tail-repeat shape, which
+    // compiles to a close-phase loop with no separate parts to name.
+    // The refusal now comes from the planner rather than the emitter:
+    // the repeated part references `add`, which builds a value, so it
+    // cannot be taken as source text. Same grammar, earlier and ranged.
     const rx = { kind: 'regex', pattern: '[0-9]+', flags: '' }
     const sp = { s: 5, e: 25 }
     const prods = [
@@ -461,7 +462,7 @@ describe('value annotations', () => {
           alts: [[term('+'), ref('add')]] } }]] },
     ]
     assert.throws(() => emit(prods, 'top'), (e) => {
-      assert.match(e.message, /same-depth repeat/)
+      assert.match(e.message, /reaches 'add' itself/)
       assert.deepEqual(e.sp, sp, 'ranged like every other annotation refusal')
       return true
     })
@@ -479,5 +480,99 @@ describe('value annotations', () => {
     const slot = '@top:o:' + mark
     attachActionSlots(spec, [slot])
     assert.deepEqual(spec.rule.top.open[0].a, ['@object$', '@key$', slot])
+  })
+
+  // ---- Source text has to BE the text ----------------------------
+
+  it('refuses a src member that reaches a value-building rule', () => {
+    // A rule that builds a value contributes no TEXT to the node above
+    // it — its object is a child, not a span. So a member resolved to
+    // source text came out missing that rule's match, or empty:
+    //
+    //   top = "<" (inner) ">"   @array, inner annotated  ->  [""]
+    //   top = "<" ("[" inner "]") ">"                    ->  ["[]"]
+    //
+    // Nothing between the two notices, which is why this is a refusal.
+    const INNER = [
+      { name: 'inner', value: { kind: 'object', members: ['d'] },
+        alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+    ]
+    const cases = {
+      'a group': [{ kind: 'group', alts: [[ref('inner')]] }],
+      'a group with text': [{ kind: 'group',
+        alts: [[term('['), ref('inner'), term(']')]] }],
+      'a repetition': [{ kind: 'star', inner: ref('inner') }],
+    }
+    for (const [label, [el]] of Object.entries(cases)) {
+      const prods = [
+        { name: 'top', value: { kind: 'array' },
+          alts: [[term('<'), el, term('>')]] },
+        ...INNER,
+      ]
+      assert.throws(() => emit(prods, 'top'),
+        /builds a value of its own/, label)
+    }
+  })
+
+  it('refuses it through a plain intermediate rule too', () => {
+    // Not a sugar problem. `mid` is an ordinary rule, and the text is
+    // lost just the same — which is why the check follows references
+    // rather than only looking inside groups.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[term('<'), ref('mid'), term('>')]] },
+      { name: 'mid', alts: [[term('['), ref('inner'), term(']')]] },
+      { name: 'inner', value: { kind: 'object', members: ['d'] },
+        alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /builds a value of its own/)
+  })
+
+  it('still takes an ordinary part as source text', () => {
+    // The control the refusal above must not swallow: the same shapes
+    // with nothing annotated underneath still resolve to their text.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[term('<'), { kind: 'group',
+          alts: [[term('['), ref('p'), term(']')]] }, term('>')]] },
+      { name: 'p', alts: [[digits()]] },
+    ]
+    assert.deepEqual(build(prods, 'top', '<[7]>'), ['[7]'])
+  })
+
+  it('refuses an annotation on a prose production', () => {
+    // `resolveProseTerminals` drops `NR = <number>` outright and lets
+    // references fall through to the built-in token, so the rule is gone
+    // before anything could build its value. The annotation was
+    // discarded without a word.
+    const prods = [
+      { name: 'top', alts: [[ref('a'), ref('NR')]] },
+      { name: 'a', alts: [[digits()]] },
+      { name: 'NR', value: { kind: 'object', members: [] },
+        alts: [[{ kind: 'prose', text: 'number' }]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /body is prose/)
+  })
+
+  it('emits no `a` at all for a link with no actions', () => {
+    // Not `a: []`. An empty list changes nothing at parse time, but
+    // `appendAction` EXTENDS what is there — so attaching a slot to such
+    // a link gave `['slot']` here and the scalar `'slot'` in Go, a spec
+    // the two ports do not agree on byte for byte. Every non-head link
+    // of an array chain takes this path.
+    const prods = [
+      { name: 'top', value: { kind: 'array' },
+        alts: [[ref('a'), term(','), ref('b')]] },
+      { name: 'a', alts: [[digits()]] },
+      { name: 'b', alts: [[digits()]] },
+    ]
+    const spec = emit(prods, 'top')
+    const step = spec.rule['top$step1']
+    assert.ok(null != step, 'the chain should have a step rule')
+    for (const alt of step.open) {
+      assert.ok(!('a' in alt), `expected no 'a' key, got ${JSON.stringify(alt.a)}`)
+    }
   })
 })

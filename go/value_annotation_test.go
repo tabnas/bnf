@@ -720,9 +720,12 @@ func TestValueAnnotationNestsThroughAnAnnotatedAlias(t *testing.T) {
 	}
 }
 
-// The tail-repeat refusal is ranged like the rest: the rewrite mutates
-// the production in place and keeps its span.
-func TestValueAnnotationTailRepeatRefusalCarriesTheSpan(t *testing.T) {
+// `add = [0-9]+ [ "+" add ]` is the tail-repeat shape, which compiles to
+// a close-phase loop with no separate parts to name. The refusal now
+// comes from the planner rather than the emitter: the repeated part
+// references `add`, which builds a value, so it cannot be taken as
+// source text. Same grammar, earlier and ranged.
+func TestValueAnnotationSelfRecursivePartRefusalCarriesTheSpan(t *testing.T) {
 	prods := []*Production{
 		{Name: "top", Alts: []Sequence{{refEl("add")}}},
 		{Name: "add",
@@ -740,8 +743,8 @@ func TestValueAnnotationTailRepeatRefusalCarriesTheSpan(t *testing.T) {
 	if !errors.As(err, &ee) {
 		t.Fatalf("expected an EmitError, got %v", err)
 	}
-	if !strings.Contains(ee.Message, "same-depth repeat") {
-		t.Fatalf("expected the tail-repeat refusal, got %q", ee.Message)
+	if !strings.Contains(ee.Message, "reaches 'add' itself") {
+		t.Fatalf("expected the self-recursion refusal, got %q", ee.Message)
 	}
 	if ee.Sp == nil || ee.Sp.S != 5 || ee.Sp.E != 25 {
 		t.Errorf("span: got %#v, want S=5 E=25", ee.Sp)
@@ -791,5 +794,121 @@ func TestAppendActionFlattensAStringSlice(t *testing.T) {
 	got, _ := json.Marshal(appendAction([]string{"x", "y"}, "z"))
 	if string(got) != `["x","y","z"]` {
 		t.Errorf("got %s, want [x y z]", got)
+	}
+}
+
+// A rule that builds a value contributes no TEXT to the node above it —
+// its object is a child, not a span. So a member resolved to source text
+// came out missing that rule's match, or empty:
+//
+//	top = "<" (inner) ">"   @array, inner annotated  ->  [""]
+//	top = "<" ("[" inner "]") ">"                    ->  ["[]"]
+//
+// Nothing between the two notices, which is why this is a refusal.
+func TestValueAnnotationRefusesASrcMemberReachingAValue(t *testing.T) {
+	inner := []*Production{
+		{Name: "inner",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		{Name: "d", Alts: []Sequence{{digitsEl()}}},
+	}
+	cases := map[string]*Element{
+		"a group":           groupEl(Sequence{refEl("inner")}),
+		"a group with text": groupEl(Sequence{termEl("["), refEl("inner"), termEl("]")}),
+		"a repetition":      {Kind: KindStar, Inner: refEl("inner")},
+	}
+	for label, el := range cases {
+		prods := append([]*Production{
+			{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+				Alts: []Sequence{{termEl("<"), el, termEl(">")}}},
+		}, inner...)
+		_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+			&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+		if err == nil ||
+			!strings.Contains(err.Error(), "builds a value of its own") {
+			t.Errorf("%s: expected a source-text refusal, got %v", label, err)
+		}
+	}
+}
+
+// Not a sugar problem. `mid` is an ordinary rule, and the text is lost
+// just the same — which is why the check follows references rather than
+// only looking inside groups.
+func TestValueAnnotationRefusesThroughAPlainIntermediateRule(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{termEl("<"), refEl("mid"), termEl(">")}}},
+		{Name: "mid", Alts: []Sequence{{termEl("["), refEl("inner"), termEl("]")}}},
+		{Name: "inner",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"d"}},
+			Alts:  []Sequence{{refEl("d")}}},
+		{Name: "d", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "builds a value of its own") {
+		t.Errorf("expected a source-text refusal, got %v", err)
+	}
+}
+
+// The control the refusal above must not swallow: the same shapes with
+// nothing annotated underneath still resolve to their text.
+func TestValueAnnotationStillTakesAnOrdinaryPartAsText(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{termEl("<"),
+				groupEl(Sequence{termEl("["), refEl("p"), termEl("]")}),
+				termEl(">")}}},
+		{Name: "p", Alts: []Sequence{{digitsEl()}}},
+	}
+	if got := buildValue(t, prods, "top", "<[7]>"); !valueEquals(got, []any{"[7]"}) {
+		t.Errorf("got %#v, want [[7]]", got)
+	}
+}
+
+// resolveProseTerminals drops `NR = <number>` outright and lets
+// references fall through to the built-in token, so the rule is gone
+// before anything could build its value. The annotation was discarded
+// without a word.
+func TestValueAnnotationRefusesAProseProduction(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Alts: []Sequence{{refEl("a"), refEl("NR")}}},
+		{Name: "a", Alts: []Sequence{{digitsEl()}}},
+		{Name: "NR", Value: &ValueAnnotation{Kind: "object"},
+			Alts: []Sequence{{{Kind: KindProse, Text: "number"}}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "body is prose") {
+		t.Errorf("expected a prose refusal, got %v", err)
+	}
+}
+
+// Not `a: []`. An empty list changes nothing at parse time, but
+// appendAction EXTENDS what is there — so attaching a slot to such a
+// link gave the one-element list in TypeScript and a scalar string here,
+// a spec the two ports do not agree on byte for byte. Every non-head
+// link of an array chain takes this path; TypeScript was changed to
+// match Go, since dropping the key is the cleaner of the two.
+func TestValueAnnotationEmitsNoActionKeyForAnEmptyLink(t *testing.T) {
+	prods := []*Production{
+		{Name: "top", Value: &ValueAnnotation{Kind: "array"},
+			Alts: []Sequence{{refEl("a"), termEl(","), refEl("b")}}},
+		{Name: "a", Alts: []Sequence{{digitsEl()}}},
+		{Name: "b", Alts: []Sequence{{digitsEl()}}},
+	}
+	spec := emitValue(t, prods, "top")
+	step := spec.Rule["top$step1"]
+	if step == nil {
+		t.Fatal("the chain should have a step rule")
+	}
+	open, ok := step.Open.([]*tabnas.GrammarAltSpec)
+	if !ok {
+		t.Fatalf("step open is %T", step.Open)
+	}
+	for _, alt := range open {
+		if alt.A != nil {
+			t.Errorf("expected no action, got %#v", alt.A)
+		}
 	}
 }

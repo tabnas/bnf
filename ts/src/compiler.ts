@@ -375,6 +375,21 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
     }
 
     const alt = prod.alts[0]
+
+    // `resolveProseTerminals` drops an informational prose definition
+    // (`NR = <number>`) outright, so references to it become the
+    // built-in token and this rule is gone before anything could build
+    // its value. Annotating one is a mistake with no reading, and it was
+    // silently discarded.
+    if (1 === alt.length && 'prose' === alt[0].kind) {
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' has a value annotation, but its ` +
+        `body is prose ('<${alt[0].text}>'), which describes a built-in ` +
+        `token rather than defining a rule — the rule is dropped, so ` +
+        `nothing would build the value. Remove the annotation.`,
+        at)
+    }
+
     // Every part that PUSHES is a member, not every part that is a
     // reference. A group or a repetition becomes a reference to a
     // generated helper before the emitter sees it, so it pushes exactly
@@ -441,10 +456,96 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
       }
     }
 
-    plan.set(prod.name, parts.map((el) =>
-      'ref' === el.kind && null != byName.get(el.name)?.value))
+    const flags = parts.map((el) =>
+      'ref' === el.kind && null != byName.get(el.name)?.value)
+
+    // A member that is not itself annotated resolves to the source text
+    // its tree builders accumulated — which a rule that builds a value
+    // does not contribute to. Refuse rather than hand back the hole: see
+    // `reachesAnnotated`.
+    parts.forEach((el, i) => {
+      if (flags[i]) return
+      const hit = reachesAnnotated(el, byName, new Set())
+      if (null == hit) return
+      const which = 'array' === v.kind
+        ? `element ${i + 1}` : `member '${members?.[i]}'`
+      // Reaching ITSELF is the recursive case, and `add = 1*DIGIT
+      // [ "+" add ]` is how it is usually written — worth its own
+      // wording, since "make that part 'add' itself" is nonsense advice
+      // for a rule that already is.
+      if (hit === prod.name) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' takes ${which} as source ` +
+          `text, but that part reaches '${prod.name}' itself, which builds ` +
+          `a value — a rule that builds a value contributes no text to the ` +
+          `part above it, so a recursive rule cannot take its own ` +
+          `repetition as text. Annotate the rule the recursion pushes ` +
+          `instead.`,
+          at)
+      }
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' takes ${which} as source text, ` +
+        `but '${hit}' is reached from it and builds a value of its own — ` +
+        `a rule that builds a value contributes no text to the part above ` +
+        `it, so the member would be missing '${hit}'s match, or empty. ` +
+        `Make that part '${hit}' itself so it nests, or remove the ` +
+        `annotation on '${hit}'.`,
+        at)
+    })
+
+    plan.set(prod.name, flags)
   }
   return plan
+}
+
+
+// The first rule that BUILDS A VALUE reachable from this element, or
+// null. Walks sugar and follows rule references transitively, stopping
+// at the first hit.
+//
+// This is asked about a member that is NOT itself annotated, whose value
+// is therefore the source text its tree builders accumulated. A rule
+// that builds a value does not contribute text to the node above it —
+// its object is a child, not a span — so an ancestor's `src` comes out
+// missing that rule's match. In a tree that is lossy; in a MEMBER it is
+// the whole value, so `top = "<" (inner) ">"` as an array built `[""]`
+// where the annotated `inner` matched, and `"[" inner "]"` built `"[]"`.
+// Nothing is between the two to notice, which is why this is refused
+// rather than corrected.
+function reachesAnnotated(
+  el: Element,
+  byName: Map<string, Production>,
+  seen: Set<string>,
+): string | null {
+  switch (el.kind) {
+    case 'ref': {
+      const target = byName.get(el.name)
+      if (null == target) return null
+      if (null != target.value) return target.name
+      if (seen.has(target.name)) return null
+      seen.add(target.name)
+      for (const alt of target.alts) {
+        for (const inner of alt) {
+          const hit = reachesAnnotated(inner, byName, seen)
+          if (null != hit) return hit
+        }
+      }
+      return null
+    }
+    case 'opt': case 'star': case 'plus': case 'rep':
+      return reachesAnnotated(el.inner, byName, seen)
+    case 'group': {
+      for (const alt of el.alts) {
+        for (const inner of alt) {
+          const hit = reachesAnnotated(inner, byName, seen)
+          if (null != hit) return hit
+        }
+      }
+      return null
+    }
+    default:
+      return null
+  }
 }
 
 
@@ -3729,19 +3830,12 @@ function emitProduction(
 
   if (prod.tailRepeat) {
     // A tail repeat is rewritten into a same-depth close-phase loop, so
-    // the parts the annotation named are no longer separate pushes to
-    // hang members on. Refuse rather than emit a differently-shaped
-    // value: this path used to return the AST silently.
-    if (null != prod.value) {
-      throw new EmitError(
-        `${diagName()}: rule '${originOf(prod)}' has a value annotation, ` +
-        `but it compiles to a same-depth repeat, which has no separate ` +
-        `parts to name. Annotate the rule the repeat pushes instead.`,
-        // Ranged, like every other annotation refusal. The rewrite
-        // mutates this production in place and keeps its span, so the
-        // author's own line is still locatable from here.
-        { rule: originOf(prod), sp: prod.sp })
-    }
+    // the parts an annotation named are no longer separate pushes to
+    // hang members on. There WAS a refusal here for that; it is gone
+    // because `planValueAnnotations` now reaches it first and cannot be
+    // got past — the repeated part references this rule, which builds a
+    // value, so the part cannot be taken as source text. Keeping a
+    // second copy would have been a branch no input can enter.
     emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
     return
   }
@@ -4100,7 +4194,14 @@ function useValueActions(
   actions: string[],
   cfg?: Record<string, unknown>,
 ): void {
-  spec.a = 1 === actions.length ? actions[0] : actions
+  // No actions at all means NO `a`, not an empty list. An empty list is
+  // an empty list of things to run, so it changes nothing at parse time
+  // — but `appendAction` extends what is there, so attaching a slot to
+  // such a link gave `['slot']` here and the scalar `'slot'` in Go,
+  // which is a spec the two ports do not agree on byte for byte. Every
+  // non-head link of an array chain takes this path.
+  if (0 === actions.length) delete spec.a
+  else spec.a = 1 === actions.length ? actions[0] : actions
   if (null != spec.k) {
     // Builtins mode names its tree config; closure mode carries none.
     delete spec.k.node$

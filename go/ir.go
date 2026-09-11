@@ -511,6 +511,21 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		}
 
 		alt := prod.Alts[0]
+
+		// resolveProseTerminals drops an informational prose definition
+		// (`NR = <number>`) outright, so references to it become the
+		// built-in token and this rule is gone before anything could build
+		// its value. Annotating one is a mistake with no reading, and it
+		// was silently discarded.
+		if len(alt) == 1 && alt[0].Kind == KindProse {
+			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation, but its body "+
+					"is prose ('<%s>'), which describes a built-in token rather "+
+					"than defining a rule — the rule is dropped, so nothing "+
+					"would build the value. Remove the annotation.",
+				prod.Name, alt[0].Text)}
+		}
+
 		// Every part that PUSHES is a member, not every part that is a
 		// reference. A group or a repetition becomes a reference to a
 		// generated helper before the emitter sees it, so it pushes exactly
@@ -596,9 +611,105 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 				flags[i] = true
 			}
 		}
+
+		// A member that is not itself annotated resolves to the source text
+		// its tree builders accumulated — which a rule that builds a value
+		// does not contribute to. Refuse rather than hand back the hole:
+		// see reachesAnnotated.
+		for i, el := range parts {
+			if flags[i] {
+				continue
+			}
+			hit := reachesAnnotated(el, byName, map[string]bool{})
+			if hit == "" {
+				continue
+			}
+			which := fmt.Sprintf("element %d", i+1)
+			if v.Kind != "array" {
+				which = fmt.Sprintf("member '%s'", v.Members[i])
+			}
+			// Reaching ITSELF is the recursive case, and `add = 1*DIGIT
+			// [ "+" add ]` is how it is usually written — worth its own
+			// wording, since "make that part 'add' itself" is nonsense
+			// advice for a rule that already is.
+			if hit == prod.Name {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' takes %s as source text, but that "+
+						"part reaches '%s' itself, which builds a value — a rule "+
+						"that builds a value contributes no text to the part "+
+						"above it, so a recursive rule cannot take its own "+
+						"repetition as text. Annotate the rule the recursion "+
+						"pushes instead.",
+					prod.Name, which, prod.Name)}
+			}
+			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' takes %s as source text, but '%s' is "+
+					"reached from it and builds a value of its own — a rule "+
+					"that builds a value contributes no text to the part above "+
+					"it, so the member would be missing '%s's match, or empty. "+
+					"Make that part '%s' itself so it nests, or remove the "+
+					"annotation on '%s'.",
+				prod.Name, which, hit, hit, hit, hit)}
+		}
+
 		plan[prod.Name] = flags
 	}
 	return plan, nil
+}
+
+// reachesAnnotated returns the first rule that BUILDS A VALUE reachable
+// from this element, or "". Walks sugar and follows rule references
+// transitively, stopping at the first hit.
+//
+// This is asked about a member that is NOT itself annotated, whose value
+// is therefore the source text its tree builders accumulated. A rule
+// that builds a value does not contribute text to the node above it —
+// its object is a child, not a span — so an ancestor's src comes out
+// missing that rule's match. In a tree that is lossy; in a MEMBER it is
+// the whole value, so `top = "<" (inner) ">"` as an array built [""]
+// where the annotated inner matched, and `"[" inner "]"` built "[]".
+// Nothing is between the two to notice, which is why this is refused
+// rather than corrected. Mirrors the TS `reachesAnnotated`.
+func reachesAnnotated(
+	el *Element, byName map[string]*Production, seen map[string]bool,
+) string {
+	switch el.Kind {
+	case KindRef:
+		target, ok := byName[el.Name]
+		if !ok {
+			return ""
+		}
+		if target.Value != nil {
+			return target.Name
+		}
+		if seen[target.Name] {
+			return ""
+		}
+		seen[target.Name] = true
+		for _, alt := range target.Alts {
+			for _, inner := range alt {
+				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
+					return hit
+				}
+			}
+		}
+		return ""
+	case KindOpt, KindStar, KindPlus, KindRep:
+		if el.Inner == nil {
+			return ""
+		}
+		return reachesAnnotated(el.Inner, byName, seen)
+	case KindGroup:
+		for _, alt := range el.Alts {
+			for _, inner := range alt {
+				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
+					return hit
+				}
+			}
+		}
+		return ""
+	}
+	return ""
 }
 
 // exemptAlias reports whether eliminateLeftRecursion will leave this
