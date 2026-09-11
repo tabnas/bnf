@@ -233,6 +233,31 @@ type Production = {
   // carry none — `origin` is how they are located, by naming the rule
   // they descend from.
   sp?: SrcSpan
+  // A value this production should BUILD, rather than the AST node the
+  // tree builders produce by default. Set by a front-end.
+  //
+  // Notation-neutral by construction: it says WHAT to build, never how
+  // the notation spelled it. ABNF carries it in a trailing comment, but
+  // nothing here knows that, and a front-end for another notation can
+  // set the same field from whatever syntax it likes.
+  value?: ValueAnnotation
+}
+
+
+// What a production builds when it carries a value annotation.
+//
+// `members` names one member per PUSHING segment of the alternative, in
+// order — the parts the author named. The names matter because the
+// emitter cannot recover them from the chain: a production's leading
+// reference is INLINED by the left-recursion pass, so the first member
+// pushes a generated helper rather than the rule the author wrote. The
+// annotation naming its own parts is what makes this independent of
+// that rewrite.
+//
+// An array has no member names: every pushing segment is an element.
+export type ValueAnnotation = {
+  kind: 'object' | 'array'
+  members?: string[]
 }
 
 
@@ -241,6 +266,398 @@ type Production = {
 // one is its own origin. Always read `origin` through this — a bare
 // `p.origin` is undefined for exactly the productions whose name is
 // already the answer.
+// Validate every value annotation against the AUTHORED grammar, and work
+// out which members nest — both BEFORE any rewrite runs. Returns, per
+// annotated production, one flag per member: does that member's own rule
+// build a value of its own?
+//
+// The rewrites are exactly why this cannot wait for emit time. Paull's
+// pass INLINES a leading reference, so by then the first member's rule is
+// gone and the segments no longer correspond to the parts the author
+// named: a member whose rule carried a trailing literal loses it, and a
+// member whose rule pushed twice silently becomes two members. The shape
+// the AUTHOR wrote is the only place those are still visible.
+//
+// Nesting is decided by POSITION here, not by looking a member name up as
+// a rule name. An array names nothing at all, so a name-based rule could
+// never nest an array element; and a member is free to be named something
+// other than its rule.
+function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
+  const byName = new Map(grammar.productions.map((p) => [p.name, p]))
+  const plan = new Map<string, boolean[]>()
+
+  // Nothing annotated means nothing to predict, and this is the common
+  // case by a wide margin — every grammar in the conformance corpus.
+  if (!grammar.productions.some((p) => null != p.value)) return plan
+
+  // Which productions keep their leading reference. Computed on the
+  // AUTHORED grammar for the same reason everything else here is.
+  const cyclic = findLeadingRefCycleMembers(grammar.productions)
+
+  // Inlining an annotated rule erases the builders it was going to run,
+  // and that happens wherever the rule is a LEADING reference — not only
+  // where the caller is itself annotated. `top = leaf ","` with an
+  // annotated `leaf` silently handed back an ordinary AST, because
+  // nothing looked at `top` at all: it names no members, so the loop
+  // below skipped it.
+  //
+  // Every alternative, not just the first: Paull's pass substitutes into
+  // any alternative whose leading element is a reference.
+  for (const prod of grammar.productions) {
+    if (exemptAlias(prod, cyclic)) continue
+    for (const alt of prod.alts) {
+      const first = alt[0]
+      if (null == first || 'ref' !== first.kind) continue
+      const hit = resolveLeadingFold(first.name, byName).annotated
+      if (null == hit) continue
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' begins with '${first.name}', ` +
+        `and '${hit}' is folded into '${prod.name}' by left-recursion ` +
+        `elimination — which erases the value '${hit}' is annotated to ` +
+        `build, so nothing would produce it. Put a literal before ` +
+        `'${first.name}', or remove the annotation on '${hit}'.`,
+        { rule: prod.name, sp: prod.sp })
+    }
+  }
+
+  for (const prod of grammar.productions) {
+    const v = prod.value
+    if (null == v) continue
+    // `sp` when the front-end recorded one: a caller that wants to
+    // underline the offending rule needs the span, and every refusal
+    // below is one an AUTHOR hits — they are about what they wrote, not
+    // about anything the compiler derived.
+    const at = { rule: prod.name, sp: prod.sp }
+
+    if ('object' !== v.kind && 'array' !== v.kind) {
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' has a value annotation of ` +
+        `unknown kind '${v.kind}'. A rule builds an 'object' or an 'array'.`,
+        at)
+    }
+    if (1 !== prod.alts.length) {
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' has a value annotation and ` +
+        `${prod.alts.length} alternatives. A value annotation names the ` +
+        `parts of ONE alternative; with more than one it is ambiguous ` +
+        `which alternative's parts are named. Split the rule, or annotate ` +
+        `the alternatives' own rules.`,
+        at)
+    }
+
+    // `members` is `string[]` in the TypeScript IR, but that is a
+    // compile-time promise only: a JavaScript front-end, or a grammar
+    // deserialized from JSON, reaches this with anything. Every one of
+    // these got THROUGH before, and each produced a wrong value rather
+    // than an error — `'ab'` has a `length` of 2, so a string counted as
+    // two members and indexed as two one-character names; a `null` entry
+    // suppressed the `@key$` for its part, so `@setval$` reused whatever
+    // key the previous part left in the slot, or wrote the literal key
+    // `'undefined'` when there was none.
+    const members = v.members
+    if (null != members && !Array.isArray(members)) {
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' has a value annotation whose ` +
+        `members are not a list. A value annotation names its members as ` +
+        `a list of strings.`,
+        at)
+    }
+    if (null != members) {
+      const seen = new Set<string>()
+      for (const m of members) {
+        if ('string' !== typeof m || '' === m) {
+          throw new EmitError(
+            `${diagName()}: rule '${prod.name}' has a value annotation ` +
+            `naming a member that is not a name (${JSON.stringify(m)}). ` +
+            `Every member of an object is named by a non-empty string.`,
+            at)
+        }
+        // Each member is a separate KEY. Two parts named the same thing
+        // both write to it, so the second silently overwrites the first
+        // and that part's match is simply absent from the result.
+        if (seen.has(m)) {
+          throw new EmitError(
+            `${diagName()}: rule '${prod.name}' names the member '${m}' ` +
+            `twice. Each member is a separate key, so the second part ` +
+            `would overwrite the first. Give them different names.`,
+            at)
+        }
+        seen.add(m)
+        // `src` is how a parse-tree node is told apart from a value: the
+        // close-phase capture asks whether the returned child has one.
+        // So a value that HAS a `src` member is taken for a node — its
+        // text is folded into the parent's `src` and the object itself is
+        // never added as a kid, which loses it outright wherever a tree
+        // rule captures it. Measured, not assumed: `rule` and `kids` as
+        // member names are captured correctly and stay allowed.
+        if (SRC_FIELD === m) {
+          throw new EmitError(
+            `${diagName()}: rule '${prod.name}' names a member '${SRC_FIELD}'. ` +
+            `That name is how a value is told apart from a parse-tree node, ` +
+            `so a value carrying it is mistaken for a node and dropped ` +
+            `wherever an ordinary rule captures this one. Name the member ` +
+            `something else.`,
+            at)
+        }
+      }
+    }
+
+    const alt = prod.alts[0]
+
+    // `resolveProseTerminals` drops an informational prose definition
+    // (`NR = <number>`) outright, so references to it become the
+    // built-in token and this rule is gone before anything could build
+    // its value. Annotating one is a mistake with no reading, and it was
+    // silently discarded.
+    if (1 === alt.length && 'prose' === alt[0].kind) {
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' has a value annotation, but its ` +
+        `body is prose ('<${alt[0].text}>'), which describes a built-in ` +
+        `token rather than defining a rule — the rule is dropped, so ` +
+        `nothing would build the value. Remove the annotation.`,
+        at)
+    }
+
+    // Every part that PUSHES is a member, not every part that is a
+    // reference. A group or a repetition becomes a reference to a
+    // generated helper before the emitter sees it, so it pushes exactly
+    // like a written reference does — and counting only references left
+    // the flags below indexed by a different sequence from the one the
+    // emitter walks. `(plain) inner` then applied `inner`'s flag to the
+    // GROUP, pushing an internal tree node into the value.
+    const parts = alt.filter(pushesValue)
+
+    if ('array' === v.kind) {
+      // An array's parts are positional; there is nothing for a name to
+      // attach to. Silently ignoring the names hid the real mistake,
+      // which is that the author meant `object`.
+      if (null != members && 0 < members.length) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' builds an array and names ` +
+          `${members.length} member${1 === members.length ? '' : 's'}. An ` +
+          `array's parts are positional and are not named; annotate it as ` +
+          `an object to name them.`,
+          at)
+      }
+    } else {
+      const named = members?.length ?? 0
+      if (named !== parts.length) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' names ${named} member` +
+          `${1 === named ? '' : 's'} but has ${parts.length} part` +
+          `${1 === parts.length ? ' that produces' : 's that produce'} a ` +
+          `value. A value ` +
+          `annotation names one member per part that produces a value; ` +
+          `a literal produces no value and is not a member.`,
+          at)
+      }
+    }
+
+    // The LEADING reference is folded into this rule by left-recursion
+    // elimination. Its rule has to reduce to exactly one part, or the
+    // boundary the author drew is lost — a trailing literal disappears
+    // from the member, and a second reference silently becomes a second
+    // member. Both are wrong VALUES rather than errors, so refuse here.
+    //
+    // Unless this rule is a pure alias, which that pass does not
+    // substitute into at all: `top = child` keeps its reference, so the
+    // chain allocates `top`'s container and assigns `child`'s value
+    // whole. Refusing that was a refusal of a shape that works — and
+    // the annotated-alias-of-an-annotated-rule is the most natural way
+    // to write a one-member wrapper.
+    //
+    // The annotated half of this — a leading member whose own rule
+    // builds a value — is caught by the scan above, which asks the same
+    // question of every production rather than only of this one. Only
+    // the shape check is left here.
+    const first = alt[0]
+    if (null != first && 'ref' === first.kind && !exemptAlias(prod, cyclic)) {
+      if (!resolveLeadingFold(first.name, byName).ok) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' names '${first.name}' as its ` +
+          `first member, but '${first.name}' is folded into this rule by ` +
+          `left-recursion elimination and its body is not a single part, ` +
+          `so the member would not cover what the author wrote. Give ` +
+          `'${first.name}' a body that is one part (a reference, a ` +
+          `repetition or a group), or put a literal before it.`,
+          at)
+      }
+    }
+
+    const flags = parts.map((el) =>
+      'ref' === el.kind && null != byName.get(el.name)?.value)
+
+    // A member that is not itself annotated resolves to the source text
+    // its tree builders accumulated — which a rule that builds a value
+    // does not contribute to. Refuse rather than hand back the hole: see
+    // `reachesAnnotated`.
+    parts.forEach((el, i) => {
+      if (flags[i]) return
+      const hit = reachesAnnotated(el, byName, new Set())
+      if (null == hit) return
+      const which = 'array' === v.kind
+        ? `element ${i + 1}` : `member '${members?.[i]}'`
+      // Reaching ITSELF is the recursive case, and `add = 1*DIGIT
+      // [ "+" add ]` is how it is usually written — worth its own
+      // wording, since "make that part 'add' itself" is nonsense advice
+      // for a rule that already is.
+      if (hit === prod.name) {
+        throw new EmitError(
+          `${diagName()}: rule '${prod.name}' takes ${which} as source ` +
+          `text, but that part reaches '${prod.name}' itself, which builds ` +
+          `a value — a rule that builds a value contributes no text to the ` +
+          `part above it, so a recursive rule cannot take its own ` +
+          `repetition as text. Annotate the rule the recursion pushes ` +
+          `instead.`,
+          at)
+      }
+      throw new EmitError(
+        `${diagName()}: rule '${prod.name}' takes ${which} as source text, ` +
+        `but '${hit}' is reached from it and builds a value of its own — ` +
+        `a rule that builds a value contributes no text to the part above ` +
+        `it, so the member would be missing '${hit}'s match, or empty. ` +
+        `Make that part '${hit}' itself so it nests, or remove the ` +
+        `annotation on '${hit}'.`,
+        at)
+    })
+
+    plan.set(prod.name, flags)
+  }
+  return plan
+}
+
+
+// The field a parse-tree node carries its matched text in, and the one
+// `captureChildFields` tests for to tell a node from anything else. A
+// value annotation may not name a member this, or the two become
+// indistinguishable — see the refusal in `planValueAnnotations`.
+const SRC_FIELD = 'src'
+
+
+// The first rule that BUILDS A VALUE reachable from this element, or
+// null. Walks sugar and follows rule references transitively, stopping
+// at the first hit.
+//
+// This is asked about a member that is NOT itself annotated, whose value
+// is therefore the source text its tree builders accumulated. A rule
+// that builds a value does not contribute text to the node above it —
+// its object is a child, not a span — so an ancestor's `src` comes out
+// missing that rule's match. In a tree that is lossy; in a MEMBER it is
+// the whole value, so `top = "<" (inner) ">"` as an array built `[""]`
+// where the annotated `inner` matched, and `"[" inner "]"` built `"[]"`.
+// Nothing is between the two to notice, which is why this is refused
+// rather than corrected.
+function reachesAnnotated(
+  el: Element,
+  byName: Map<string, Production>,
+  seen: Set<string>,
+): string | null {
+  switch (el.kind) {
+    case 'ref': {
+      const target = byName.get(el.name)
+      if (null == target) return null
+      if (null != target.value) return target.name
+      if (seen.has(target.name)) return null
+      seen.add(target.name)
+      for (const alt of target.alts) {
+        for (const inner of alt) {
+          const hit = reachesAnnotated(inner, byName, seen)
+          if (null != hit) return hit
+        }
+      }
+      return null
+    }
+    case 'opt': case 'star': case 'plus': case 'rep':
+      return reachesAnnotated(el.inner, byName, seen)
+    case 'group': {
+      for (const alt of el.alts) {
+        for (const inner of alt) {
+          const hit = reachesAnnotated(inner, byName, seen)
+          if (null != hit) return hit
+        }
+      }
+      return null
+    }
+    default:
+      return null
+  }
+}
+
+
+// Whether `eliminateLeftRecursion` will leave this production's leading
+// reference ALONE. Paull's pass exempts a *pure alias* — one alternative
+// that is one reference — from being substituted into, unless it or its
+// target is caught in a leading-reference cycle, where the substitution
+// is doing real work. See that pass for the full reasoning.
+//
+// Shared with `planValueAnnotations` because the annotation checks are a
+// prediction of exactly this: whether a leading reference survives. Two
+// copies of the condition would be two predictions, and the one here
+// would be the wrong one.
+function exemptAlias(p: Production, cyclic: Set<string>): boolean {
+  if (1 !== p.alts.length || 1 !== p.alts[0].length) return false
+  const el = p.alts[0][0]
+  if ('ref' !== el.kind) return false
+  return !cyclic.has(p.name) && !cyclic.has(el.name)
+}
+
+
+// Whether an element produces a value when it is matched. A reference, a
+// repetition and a group all become a push of one child; a terminal in
+// any of its spellings consumes input and pushes nothing. This is the
+// one definition of "is a member" — the planner counts parts with it and
+// `resolveLeadingFold` asks it about a body of one element, so the two
+// cannot drift apart.
+function pushesValue(el: Element): boolean {
+  const k = el.kind
+  return 'term' !== k && 'regex' !== k && 'token' !== k && 'prose' !== k
+}
+
+
+// Follow a leading reference the way left-recursion elimination will.
+//
+// The pass inlines a leading reference into its caller — and then inlines
+// the leading reference of THAT body in turn, so an alias chain collapses
+// all the way down. Asking only about the first rule therefore answered
+// the wrong question: `top = a "," c` with `a = b` and `b = x ":"` passed,
+// because `a`'s body is a single reference, and then quietly lost the
+// `":"` from the member, because what actually landed in `top` was `b`'s
+// two-part body.
+//
+// Two answers, because they need different diagnostics. `annotated` names
+// the first rule in the chain that builds a value of its own: inlining
+// erases its builder, so the member would hold an internal node instead
+// of the value the author annotated for. `ok` is whether the chain ends
+// in a body of exactly one pushing part.
+function resolveLeadingFold(
+  name: string,
+  byName: Map<string, Production>,
+): { ok: boolean; annotated?: string } {
+  const seen = new Set<string>()
+  let prod = byName.get(name)
+  while (null != prod) {
+    // A cycle is left recursion reached through aliases. The pass that
+    // rewrites it is the one whose output this is predicting, so stop
+    // rather than guess; the member-count check downstream still holds.
+    if (seen.has(prod.name)) return { ok: false }
+    seen.add(prod.name)
+    if (null != prod.value) return { ok: false, annotated: prod.name }
+    if (1 !== prod.alts.length || 1 !== prod.alts[0].length) return { ok: false }
+    const el = prod.alts[0][0]
+    if (!pushesValue(el)) return { ok: false }
+    // A group or repetition is opaque to the fold: it becomes one helper
+    // reference, which is one part, and nothing inside it is inlined.
+    if ('ref' !== el.kind) return { ok: true }
+    prod = byName.get(el.name)
+  }
+  // An undefined rule is not this check's to refuse — the reference
+  // resolution pass reports it, with a better message.
+  return { ok: true }
+}
+
+
+
+
 function originOf(prod: Production): string {
   return prod.origin ?? prod.name
 }
@@ -402,6 +819,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
         nodeKind: p.nodeKind,
         origin: p.origin,
         sp: p.sp,
+        value: p.value,
       })),
     ),
   )
@@ -427,12 +845,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
   // leading-reference cycle are still inlined — that is where Paull's
   // substitution is doing real work (`P = Q`, `Q = P a / b`).
   const cyclic = findLeadingRefCycleMembers(prods)
-  const isExemptAlias = (p: Production): boolean =>
-    p.alts.length === 1 &&
-    p.alts[0].length === 1 &&
-    p.alts[0][0].kind === 'ref' &&
-    !cyclic.has(p.name) &&
-    !cyclic.has((p.alts[0][0] as { name: string }).name)
+  const isExemptAlias = (p: Production): boolean => exemptAlias(p, cyclic)
 
   for (let i = 0; i < prods.length; i++) {
     // For each earlier production A_j, inline any alternative of
@@ -626,6 +1039,7 @@ function substituteLeadingRef(
     nodeKind: target.nodeKind,
     origin: target.origin,
     sp: target.sp,
+    value: target.value,
   }
 }
 
@@ -706,6 +1120,7 @@ function eliminateDirectLeftRec(
       nodeKind: prod.nodeKind,
       origin: prod.origin,
       sp: prod.sp,
+      value: prod.value,
     }
   }
   if (seeds.length === 0) {
@@ -751,6 +1166,7 @@ function eliminateDirectLeftRec(
     nodeKind: prod.nodeKind,
     origin: prod.origin,
     sp: prod.sp,
+    value: prod.value,
   }
 }
 
@@ -1416,6 +1832,7 @@ function desugar(grammar: Grammar): Grammar {
       nodeKind: p.nodeKind,
       origin: p.origin,
       sp: p.sp,
+      value: p.value,
     }
     // Probe-dispatch and tail-repeat flags survive desugar unchanged —
     // the emitter routes around the standard alt-compilation path for
@@ -1694,6 +2111,7 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
         nodeKind: prod.nodeKind,
         origin: prod.origin,
         sp: prod.sp,
+        value: prod.value,
       })
     } else {
       rewritten.push(prod)
@@ -2085,6 +2503,13 @@ function liftLiteralTokens(
     // instead try to bind #TX to a literal, which the engine refuses.
     if (isMatcherTokenName(prod.name)) continue
     if (prod.nodeKind === 'core') continue
+    // An annotated production is a rule the author asked to BUILD
+    // something. Lifting it drops the rule and rewrites every reference
+    // to it into a terminal, which discards the value builders with no
+    // diagnostic — and takes the part out of its callers' member lists
+    // at the same time, so an annotated caller's remaining members shift
+    // onto the wrong parts. A rule that builds a value stays a rule.
+    if (null != prod.value) continue
     if (prod.alts.length !== 1 || prod.alts[0].length !== 1) continue
     const el = prod.alts[0][0]
     if (el.kind !== 'term') continue
@@ -2340,13 +2765,17 @@ function emitGrammarSpec(
   grammar = cloneGrammar(grammar)
 
   // Diagnostics name the notation the grammar was written in, not this
-  // package. Set this BEFORE `resolveProseTerminals`: that pass raises
-  // five of this file's diagnostics, so assigning afterwards left every
-  // one of them carrying the prefix from the PREVIOUS conversion in the
-  // process — or the `'bnf'` default on the first. `go/emit.go` has always
-  // set it first, and its comment claims to mirror this file; now it does.
+  // package. Set this BEFORE any pass that can raise one — which now
+  // means before `planValueAnnotations` as well as before
+  // `resolveProseTerminals`. Assigning afterwards left every diagnostic
+  // those passes raise carrying the prefix from the PREVIOUS conversion
+  // in the process, or the `'bnf'` default on the first.
   const tag = opts?.tag ?? 'bnf'
   _diagName = tag
+
+  // Before ANY rewrite: annotations describe the grammar the AUTHOR
+  // wrote, and the passes below are what make that shape unrecoverable.
+  const valuePlan = planValueAnnotations(grammar)
 
   // Drop informational prose definitions (`NR = <number>`) first, so the
   // names they document fall through to the built-in tokens — and so a
@@ -2587,7 +3016,7 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap, prov,
+      tokensOverlap, valuePlan, prov,
     )
   }
 
@@ -3043,6 +3472,7 @@ function emitProduction(
   followPairs: Map<string, Map<string, Set<string>>>,
   tokenRangesOf: (tok: string) => Array<[number, number]> | null,
   tokensOverlap: (a: string, b: string) => boolean,
+  valuePlan: Map<string, boolean[]>,
   prov?: Map<string, string>,
 ) {
   for (const alt of prod.alts) {
@@ -3434,13 +3864,20 @@ function emitProduction(
   }
 
   if (prod.tailRepeat) {
+    // A tail repeat is rewritten into a same-depth close-phase loop, so
+    // the parts an annotation named are no longer separate pushes to
+    // hang members on. There WAS a refusal here for that; it is gone
+    // because `planValueAnnotations` now reaches it first and cannot be
+    // got past — the repeated part references this rule, which builds a
+    // value, so the part cannot be taken as source text. Keeping a
+    // second copy would have been a branch no input can enter.
     emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
     return
   }
 
   const allSimple = prod.alts.every(isSingleSegment)
 
-  if (allSimple) {
+  if (allSimple && null == prod.value) {
     // Every alternative collapses to one tabnas alt — emit them
     // directly into the production's open state. This is a head
     // rule, so each alt initialises its own node array. Empty alts
@@ -3599,8 +4036,24 @@ function emitProduction(
     // Single-alt, multi-segment: chain rules directly on the
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
-      ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod))
+      ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod),
+      prod.value, valuePlan.get(originOf(prod)))
     return
+  }
+
+  // A value annotation names one member per pushing segment, which only
+  // has one reading when the production HAS one alternative. Two
+  // alternatives push different things in different orders, so the same
+  // list of names would mean something different down each — and
+  // silently building a different shape depending on which alternative
+  // matched is worse than refusing.
+  if (null != prod.value) {
+    throw new Error(
+      `${diagName()}: rule '${originOf(prod)}' has a value annotation and ` +
+      `${prod.alts.length} alternatives. A value annotation names the ` +
+      `parts of ONE alternative; with more than one it is ambiguous ` +
+      `which alternative's parts are named. Split the rule, or annotate ` +
+      `the alternatives' own rules.`)
   }
 
   // Multi-alt with at least one multi-segment alternative: emit a
@@ -3758,6 +4211,42 @@ function emitProduction(
 }
 
 
+// Install the value builders on an alt of a rule that BUILDS A VALUE,
+// dropping the tree builders it was emitted with.
+//
+// They cannot compose: both own `r.node`. Appending `@object$` after
+// `@node$` clobbers the AST node that was just allocated, and the
+// `@capture$` on the matching close then finds no `kids` to push into
+// and dies. On a rule that builds a value the value builders win
+// outright, which is also what the author asked for — the tree node is
+// exactly the thing they said they did not want.
+//
+// The MEMBERS keep their tree builders: `src` reads the `node.src` those
+// accumulate, and members are separate rules, so nothing here touches
+// them.
+function useValueActions(
+  spec: any,
+  actions: string[],
+  cfg?: Record<string, unknown>,
+): void {
+  // No actions at all means NO `a`, not an empty list. An empty list is
+  // an empty list of things to run, so it changes nothing at parse time
+  // — but `appendAction` extends what is there, so attaching a slot to
+  // such a link gave `['slot']` here and the scalar `'slot'` in Go,
+  // which is a spec the two ports do not agree on byte for byte. Every
+  // non-head link of an array chain takes this path.
+  if (0 === actions.length) delete spec.a
+  else spec.a = 1 === actions.length ? actions[0] : actions
+  if (null != spec.k) {
+    // Builtins mode names its tree config; closure mode carries none.
+    delete spec.k.node$
+    delete spec.k.capture$
+  }
+  if (null != cfg) spec.k = { ...(spec.k ?? {}), ...cfg }
+  if (null != spec.k && 0 === Object.keys(spec.k).length) delete spec.k
+}
+
+
 // Emit a (possibly single-step) chain of rules for one alt under the
 // given head rule name. Segment 0 goes into `headName`; later
 // segments get synthetic `<headName>$stepN` continuations.
@@ -3778,10 +4267,90 @@ function emitChain(
   headKind: Production['nodeKind'] = 'helper',
   prov?: Map<string, string>,
   origin?: string,
+  value?: ValueAnnotation,
+  // One flag per pushing part of `alt`, from `planValueAnnotations`:
+  // does that part's own rule build a value, and so nest whole rather
+  // than resolve to its source text? Passed rather than looked up from
+  // module state so that nothing about one emit can reach another —
+  // `go/emit.go` held the same table in a package-level variable, where
+  // two concurrent conversions could overwrite each other's flags
+  // mid-emit.
+  nested?: boolean[],
 ) {
   const segs = segmentize(alt, literals, regexTokens)
   const chainName = (i: number) =>
     i === 0 ? headName : `${headName}$step${i}`
+
+  // Value building rides on the segments that PUSH: those are the parts
+  // that produce a member. A segment of bare terminals (a separator, a
+  // trailing literal) consumes input and contributes no value.
+  const memberSegs = value ? segs.map((s) => null != s.ref) : []
+  const memberAt = (i: number) =>
+    memberSegs[i] ? memberSegs.slice(0, i).filter(Boolean).length : -1
+
+  // An unknown kind must not fall through as an object. The TypeScript
+  // union is a compile-time promise only: a JavaScript caller, or a
+  // grammar deserialized from JSON, reaches this with anything. A typo
+  // like 'arry' would otherwise skip the member-count check below (which
+  // asks for exactly 'object') and emit object actions with no keys.
+  if (value && 'object' !== value.kind && 'array' !== value.kind) {
+    throw new EmitError(
+      `${diagName()}: rule '${origin ?? headName}' has a value annotation ` +
+      `of unknown kind '${value.kind}'. A rule builds an 'object' or an ` +
+      `'array'.`,
+      { rule: origin ?? headName })
+  }
+
+  // One name per pushing segment, or the names line up with the wrong
+  // parts. The rewrite passes are why this is checked here and not at
+  // annotation time: inlining a leading reference can change how many
+  // segments push (a member whose rule is all terminals stops being a
+  // push at all), and left-recursion elimination restructures the
+  // alternative wholesale. Either way the author's names would land on
+  // the wrong members, and silently building a differently-shaped value
+  // is worse than refusing.
+  if (value && 'object' === value.kind) {
+    const pushes = memberSegs.filter(Boolean).length
+    const named = value.members?.length ?? 0
+    if (named !== pushes) {
+      throw new EmitError(
+        `${diagName()}: rule '${origin ?? headName}' names ${named} member` +
+        `${1 === named ? '' : 's'} but builds ${pushes}. A value ` +
+        `annotation names one member per part that produces a value. A ` +
+        `part made only of literals produces none — and note that a part ` +
+        `whose own rule is a single terminal stops being a part here in ` +
+        `two ways: as a LEADING part it is folded into this rule by ` +
+        `left-recursion elimination, and anywhere else it becomes a named ` +
+        `lexer token. Giving that rule a body that is not a bare terminal ` +
+        `(a repetition, a group, or more than one element) keeps it ` +
+        `nameable.`,
+        { rule: origin ?? headName })
+    }
+  }
+
+  // The same count, checked against the PLAN rather than the names —
+  // because an array has no names, and so had nothing checking it at
+  // all. `nested` is indexed by member position, so a plan that is a
+  // different length from the segments is a plan whose flags are on the
+  // wrong members: an array whose second element's rule was lifted to a
+  // terminal pushed the THIRD element's flag onto it, which nested an
+  // internal tree node into the value instead of its source text. Silent,
+  // and visible only in the output.
+  if (value && null != nested) {
+    const pushes = memberSegs.filter(Boolean).length
+    if (nested.length !== pushes) {
+      throw new EmitError(
+        `${diagName()}: rule '${origin ?? headName}' has a value ` +
+        `annotation for ${nested.length} part` +
+        `${1 === nested.length ? '' : 's'} but builds ${pushes}. A rewrite ` +
+        `pass changed how many parts of this rule produce a value, so the ` +
+        `annotation no longer describes it. A part whose own rule is a ` +
+        `single literal is the usual cause: it becomes a lexer token here ` +
+        `and stops being a part at all. Give that rule a body that is not ` +
+        `a bare terminal.`,
+        { rule: origin ?? headName })
+    }
+  }
 
   for (let i = 0; i < segs.length; i++) {
     const name = chainName(i)
@@ -3814,6 +4383,57 @@ function emitChain(
       // Last step, but it had a push — we still need to capture the
       // final child before popping.
       rs.close = [{ ...captureChildFields(refs, name, kind), g: tag }]
+    }
+
+    if (value) {
+      const isArray = 'array' === value.kind
+      const m = memberAt(i)
+      const memberName = 0 <= m ? value.members?.[m] : undefined
+
+      // Open side: the container is allocated once, on the head, before
+      // anything goes into it; every pushing link names the member it is
+      // about to fill.
+      const openActs: string[] = []
+      const openCfg: Record<string, unknown> = {}
+      if (0 === i) openActs.push(isArray ? '@array$' : '@object$')
+      if (!isArray && null != memberName) {
+        // The key is a CONSTANT: the author named this part, and no
+        // token in the input carries that text.
+        openActs.push('@key$')
+        openCfg.key$ = { lit: memberName }
+      }
+      // Unconditional, even when this link gains no action of its own:
+      // EVERY link of a value rule must lose its tree builders, not just
+      // the ones that gain value builders. An array's steps gain nothing
+      // on the open side (there are no member names to set), and leaving
+      // their `@node$` in place had it accumulate the separator's text
+      // into a `src` property on the ARRAY.
+      useValueActions(open[0], openActs, openCfg)
+
+      // Close side: a member that builds its OWN value is assigned
+      // whole, so it nests; anything else resolves to the source text
+      // its tree builders accumulated. Omitting `src` IS the nesting
+      // case — see @tabnas/parser doc/value-builtins.md, v5.
+      //
+      // Nesting is decided from the PUSHED RULE, not the member name. An
+      // array names nothing, so keying off the name meant an array could
+      // never nest at all: an element whose own rule builds a value was
+      // flattened to its source text instead of pushed whole. The name is
+      // still consulted for an object, because a leading member's rule is
+      // inlined away and only the annotation still knows what it was.
+      if (0 <= m) {
+        const isNested = true === nested?.[m]
+        const act = isArray ? '@push$' : '@setval$'
+        const cfg = isNested ? undefined
+          : { [isArray ? 'push$' : 'setval$']: { src: true } }
+        if (null == rs.close) rs.close = [{ g: tag }]
+        for (const c of rs.close) useValueActions(c, [act], cfg)
+      } else if (null != rs.close) {
+        // A link that pushes nothing (a bare separator or trailing
+        // literal) contributes no member — but its close still carries a
+        // tree `@capture$` for a node this rule no longer has.
+        for (const c of rs.close) useValueActions(c, [])
+      }
     }
     ruleSpec[name] = rs
   }

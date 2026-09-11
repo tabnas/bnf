@@ -196,7 +196,7 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 		}
 		copies[i] = &Production{
 			Name: p.Name, Alts: alts, NodeKind: p.NodeKind, Origin: p.Origin,
-			Sp: p.Sp}
+			Sp: p.Sp, Value: p.Value}
 	}
 	// Order productions so that rules referenced at a leading position are
 	// processed before the rules that reference them. Paull's substitution
@@ -225,11 +225,7 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 	// still inlined — that is where Paull's substitution is doing real work
 	// (`P = Q`, `Q = P a / b`).
 	cyclic := findLeadingRefCycleMembers(prods)
-	isExemptAlias := func(p *Production) bool {
-		return len(p.Alts) == 1 && len(p.Alts[0]) == 1 &&
-			p.Alts[0][0].Kind == KindRef &&
-			!cyclic[p.Name] && !cyclic[p.Alts[0][0].Name]
-	}
+	isExemptAlias := func(p *Production) bool { return exemptAlias(p, cyclic) }
 
 	// Paull's invariant is that after the inner loop no alternative of A_i
 	// begins with a ref to any A_j, j < i. A single increasing pass gives that
@@ -447,6 +443,7 @@ func substituteLeadingRef(target, source *Production) *Production {
 		NodeKind: target.NodeKind,
 		Origin:   target.Origin,
 		Sp:       target.Sp,
+		Value:    target.Value,
 	}
 }
 
@@ -523,6 +520,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 			NodeKind: prod.NodeKind,
 			Origin:   prod.Origin,
 			Sp:       prod.Sp,
+			Value:    prod.Value,
 		}
 	}
 	if len(seeds) == 0 {
@@ -575,6 +573,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		NodeKind: prod.NodeKind,
 		Origin:   prod.Origin,
 		Sp:       prod.Sp,
+		Value:    prod.Value,
 	}
 }
 
@@ -822,7 +821,8 @@ func desugar(grammar *Grammar) *Grammar {
 	for _, p := range grammar.Productions {
 		origin = originOf(p)
 		out := &Production{
-			Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin, Sp: p.Sp}
+			Name: p.Name, NodeKind: p.NodeKind, Origin: p.Origin, Sp: p.Sp,
+			Value: p.Value}
 		alts := make([]Sequence, len(p.Alts))
 		for i, a := range p.Alts {
 			alts[i] = desugarAlt(a)
@@ -1158,6 +1158,15 @@ func liftLiteralTokens(grammar *Grammar, start string) []*Element {
 	for _, prod := range grammar.Productions {
 		if prod.Name == start || reservedTokenNames[prod.Name] ||
 			prod.NodeKind == "core" {
+			continue
+		}
+		// An annotated production is a rule the author asked to BUILD
+		// something. Lifting it drops the rule and rewrites every reference
+		// to it into a terminal, which discards the value builders with no
+		// diagnostic — and takes the part out of its callers' member lists
+		// at the same time, so an annotated caller's remaining members shift
+		// onto the wrong parts. A rule that builds a value stays a rule.
+		if prod.Value != nil {
 			continue
 		}
 		if len(prod.Alts) != 1 || len(prod.Alts[0]) != 1 {

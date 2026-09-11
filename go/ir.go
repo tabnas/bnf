@@ -3,8 +3,10 @@
 package bnf
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 )
 
 // ---- ABNF AST -------------------------------------------------------
@@ -232,6 +234,37 @@ type Production struct {
 	// that forgets it silently drops the span. The passes that copy with
 	// `cp := *p` get it for free. Mirrors the TS `Production.sp`.
 	Sp *SrcSpan
+
+	// Value is what this production BUILDS, when a front-end says it
+	// builds something, rather than the AST node the tree builders
+	// produce by default.
+	//
+	// Notation-neutral by construction: it says WHAT to build, never how
+	// the notation spelled it. ABNF carries it in a trailing comment, but
+	// nothing here knows that, and a front-end for another notation can
+	// set the same field from whatever syntax it likes.
+	//
+	// CAUTION applies here exactly as it does to Sp above, and it is not
+	// hypothetical: the TypeScript side of this shipped with SIX passes
+	// silently dropping the annotation, so a rule that declared a value
+	// quietly built a tree instead. Mirrors the TS `Production.value`.
+	Value *ValueAnnotation
+}
+
+// ValueAnnotation is what a production builds when it carries one.
+//
+// Members names one member per PUSHING segment of the alternative, in
+// order — the parts the author named. The names matter because the
+// emitter cannot recover them from the chain: a production's leading
+// reference is INLINED by the left-recursion pass, so the first member
+// pushes a generated helper rather than the rule the author wrote. The
+// annotation naming its own parts is what makes this independent of that
+// rewrite. Mirrors the TS `ValueAnnotation`.
+//
+// An array has no member names: every pushing segment is an element.
+type ValueAnnotation struct {
+	Kind    string // "object" or "array"
+	Members []string
 }
 
 // originOf is the author-written production a (possibly synthesised)
@@ -358,10 +391,450 @@ func (e *EmitError) Unwrap() error { return e.Cause }
 // diagPrefix names the NOTATION a grammar was written in, not this
 // package: a front-end's users should not see "bnf:" on an error about
 // their own syntax. EmitGrammarSpec sets it from ConvertOptions.Tag for
-// the duration of one emit. Mirrors `_diagName` in ts/src/compiler.ts.
+// the duration of one emit, holding emitMu. Mirrors `_diagName` in
+// ts/src/compiler.ts.
 var diagPrefix = "bnf"
 
+// emitMu serialises emitGrammarSpec, which is what makes the package
+// state above safe to write per-emit. See the comment at the top of
+// emitGrammarSpec for why a lock and not a threaded parameter.
+var emitMu sync.Mutex
+
 func diagName() string { return diagPrefix }
+
+// planValueAnnotations validates every value annotation against the
+// AUTHORED grammar and works out which members nest — both BEFORE any
+// rewrite runs.
+//
+// The rewrites are exactly why this cannot wait for emit time. Paull's
+// pass INLINES a leading reference, so by then the first member's rule is
+// gone and the segments no longer correspond to the parts the author
+// named: a member whose rule carried a trailing literal loses it, and a
+// member whose rule pushed twice silently becomes two members. The shape
+// the AUTHOR wrote is the only place those are still visible.
+//
+// Nesting is decided by POSITION, not by looking a member name up as a
+// rule name. An array names nothing at all, so a name-based rule could
+// never nest an array element. Mirrors the TS `planValueAnnotations`.
+func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
+	byName := map[string]*Production{}
+	for _, p := range grammar.Productions {
+		byName[p.Name] = p
+	}
+	plan := map[string][]bool{}
+
+	// Nothing annotated means nothing to predict, and this is the common
+	// case by a wide margin — every grammar in the conformance corpus.
+	anyValue := false
+	for _, p := range grammar.Productions {
+		if p.Value != nil {
+			anyValue = true
+			break
+		}
+	}
+	if !anyValue {
+		return plan, nil
+	}
+
+	// Which productions keep their leading reference. Computed on the
+	// AUTHORED grammar for the same reason everything else here is.
+	cyclic := findLeadingRefCycleMembers(grammar.Productions)
+
+	// Inlining an annotated rule erases the builders it was going to run,
+	// and that happens wherever the rule is a LEADING reference — not only
+	// where the caller is itself annotated. `top = leaf ","` with an
+	// annotated `leaf` silently handed back an ordinary AST, because
+	// nothing looked at `top` at all: it names no members, so the loop
+	// below skipped it.
+	//
+	// Every alternative, not just the first: Paull's pass substitutes into
+	// any alternative whose leading element is a reference.
+	for _, prod := range grammar.Productions {
+		if exemptAlias(prod, cyclic) {
+			continue
+		}
+		for _, alt := range prod.Alts {
+			if len(alt) == 0 || alt[0].Kind != KindRef {
+				continue
+			}
+			_, hit := resolveLeadingFold(alt[0].Name, byName)
+			if hit == "" {
+				continue
+			}
+			return nil, &EmitError{Rule: prod.Name, Sp: prod.Sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' begins with '%s', and '%s' is folded "+
+					"into '%s' by left-recursion elimination — which erases the "+
+					"value '%s' is annotated to build, so nothing would produce "+
+					"it. Put a literal before '%s', or remove the annotation on "+
+					"'%s'.",
+				prod.Name, alt[0].Name, hit, prod.Name, hit, alt[0].Name, hit)}
+		}
+	}
+
+	for _, prod := range grammar.Productions {
+		v := prod.Value
+		if v == nil {
+			continue
+		}
+		// Sp when the front-end recorded one: a caller that wants to
+		// underline the offending rule needs the span, and these refusals
+		// are the ones an AUTHOR is most likely to hit — they are about
+		// what they wrote, not about anything the compiler derived.
+		sp := prod.Sp
+		if v.Kind != "object" && v.Kind != "array" {
+			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation of unknown kind "+
+					"'%s'. A rule builds an 'object' or an 'array'.",
+				prod.Name, v.Kind)}
+		}
+		if len(prod.Alts) != 1 {
+			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation and %d "+
+					"alternatives. A value annotation names the parts of ONE "+
+					"alternative; with more than one it is ambiguous which "+
+					"alternative's parts are named. Split the rule, or annotate "+
+					"the alternatives' own rules.", prod.Name, len(prod.Alts))}
+		}
+
+		// An empty member name is not a name. Go's Members is []string, so
+		// it cannot hold the nil the TypeScript IR can — but "" reaches
+		// here from either, and the two ports DISAGREED about it: TS built
+		// the key "", Go skipped the @key$ entirely and let @setval$ write
+		// into whatever key the previous part had left in the slot.
+		seenMember := map[string]bool{}
+		for _, m := range v.Members {
+			if m == "" {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' has a value annotation naming a "+
+						"member that is not a name (\"\"). Every member of an "+
+						"object is named by a non-empty string.", prod.Name)}
+			}
+			// Each member is a separate KEY. Two parts named the same thing
+			// both write to it, so the second silently overwrites the first
+			// and that part's match is simply absent from the result.
+			if seenMember[m] {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names the member '%s' twice. Each "+
+						"member is a separate key, so the second part would "+
+						"overwrite the first. Give them different names.",
+					prod.Name, m)}
+			}
+			seenMember[m] = true
+			// srcField is how a parse-tree node is told apart from a value:
+			// the close-phase capture asks whether the returned child has
+			// one. So a value that HAS such a member is taken for a node —
+			// its text is folded into the parent's src and the object itself
+			// is never added as a kid, which loses it outright wherever a
+			// tree rule captures it. Measured, not assumed: "rule" and
+			// "kids" as member names are captured correctly and stay
+			// allowed.
+			if m == srcField {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names a member '%s'. That name is "+
+						"how a value is told apart from a parse-tree node, so a "+
+						"value carrying it is mistaken for a node and dropped "+
+						"wherever an ordinary rule captures this one. Name the "+
+						"member something else.", prod.Name, srcField)}
+			}
+		}
+
+		alt := prod.Alts[0]
+
+		// resolveProseTerminals drops an informational prose definition
+		// (`NR = <number>`) outright, so references to it become the
+		// built-in token and this rule is gone before anything could build
+		// its value. Annotating one is a mistake with no reading, and it
+		// was silently discarded.
+		if len(alt) == 1 && alt[0].Kind == KindProse {
+			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' has a value annotation, but its body "+
+					"is prose ('<%s>'), which describes a built-in token rather "+
+					"than defining a rule — the rule is dropped, so nothing "+
+					"would build the value. Remove the annotation.",
+				prod.Name, alt[0].Text)}
+		}
+
+		// Every part that PUSHES is a member, not every part that is a
+		// reference. A group or a repetition becomes a reference to a
+		// generated helper before the emitter sees it, so it pushes exactly
+		// like a written reference does — and counting only references left
+		// the flags below indexed by a different sequence from the one the
+		// emitter walks. `(plain) inner` then applied `inner`'s flag to the
+		// GROUP, pushing an internal tree node into the value.
+		var parts []*Element
+		for _, el := range alt {
+			if pushesValue(el) {
+				parts = append(parts, el)
+			}
+		}
+
+		if v.Kind == "array" {
+			// An array's parts are positional; there is nothing for a name
+			// to attach to. Silently ignoring the names hid the real
+			// mistake, which is that the author meant `object`.
+			if len(v.Members) > 0 {
+				plural := "s"
+				if len(v.Members) == 1 {
+					plural = ""
+				}
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' builds an array and names %d "+
+						"member%s. An array's parts are positional and are not "+
+						"named; annotate it as an object to name them.",
+					prod.Name, len(v.Members), plural)}
+			}
+		} else {
+			named := len(v.Members)
+			if named != len(parts) {
+				plural, verb := "s", "s that produce"
+				if named == 1 {
+					plural = ""
+				}
+				if len(parts) == 1 {
+					verb = " that produces"
+				}
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names %d member%s but has %d part%s "+
+						"a value. A value annotation names one member per part "+
+						"that produces a value; a literal produces no value "+
+						"and is not a member.",
+					prod.Name, named, plural, len(parts), verb)}
+			}
+		}
+
+		// The LEADING reference is folded into this rule by left-recursion
+		// elimination. Its rule has to reduce to exactly one part, or the
+		// boundary the author drew is lost — a trailing literal disappears
+		// from the member, and a second reference silently becomes a second
+		// member. Both are wrong VALUES rather than errors, so refuse.
+		//
+		// Unless this rule is a pure alias, which that pass does not
+		// substitute into at all: `top = child` keeps its reference, so the
+		// chain allocates `top`'s container and assigns `child`'s value
+		// whole. Refusing that was a refusal of a shape that works.
+		//
+		// The annotated half of this — a leading member whose own rule
+		// builds a value — is caught by the scan above, which asks the same
+		// question of every production rather than only of this one. Only
+		// the shape check is left here.
+		if len(alt) > 0 && alt[0].Kind == KindRef && !exemptAlias(prod, cyclic) {
+			if ok, _ := resolveLeadingFold(alt[0].Name, byName); !ok {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names '%s' as its first member, but "+
+						"'%s' is folded into this rule by left-recursion "+
+						"elimination and its body is not a single part, so the "+
+						"member would not cover what the author wrote. Give '%s' "+
+						"a body that is one part (a reference, a repetition or a "+
+						"group), or put a literal before it.",
+					prod.Name, alt[0].Name, alt[0].Name, alt[0].Name)}
+			}
+		}
+
+		flags := make([]bool, len(parts))
+		for i, el := range parts {
+			if el.Kind != KindRef {
+				continue
+			}
+			if p, ok := byName[el.Name]; ok && p.Value != nil {
+				flags[i] = true
+			}
+		}
+
+		// A member that is not itself annotated resolves to the source text
+		// its tree builders accumulated — which a rule that builds a value
+		// does not contribute to. Refuse rather than hand back the hole:
+		// see reachesAnnotated.
+		for i, el := range parts {
+			if flags[i] {
+				continue
+			}
+			hit := reachesAnnotated(el, byName, map[string]bool{})
+			if hit == "" {
+				continue
+			}
+			which := fmt.Sprintf("element %d", i+1)
+			if v.Kind != "array" {
+				which = fmt.Sprintf("member '%s'", v.Members[i])
+			}
+			// Reaching ITSELF is the recursive case, and `add = 1*DIGIT
+			// [ "+" add ]` is how it is usually written — worth its own
+			// wording, since "make that part 'add' itself" is nonsense
+			// advice for a rule that already is.
+			if hit == prod.Name {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' takes %s as source text, but that "+
+						"part reaches '%s' itself, which builds a value — a rule "+
+						"that builds a value contributes no text to the part "+
+						"above it, so a recursive rule cannot take its own "+
+						"repetition as text. Annotate the rule the recursion "+
+						"pushes instead.",
+					prod.Name, which, prod.Name)}
+			}
+			return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+				diagName()+": rule '%s' takes %s as source text, but '%s' is "+
+					"reached from it and builds a value of its own — a rule "+
+					"that builds a value contributes no text to the part above "+
+					"it, so the member would be missing '%s's match, or empty. "+
+					"Make that part '%s' itself so it nests, or remove the "+
+					"annotation on '%s'.",
+				prod.Name, which, hit, hit, hit, hit)}
+		}
+
+		plan[prod.Name] = flags
+	}
+	return plan, nil
+}
+
+// srcField is the field a parse-tree node carries its matched text in,
+// and the one captureChildFields tests for to tell a node from anything
+// else. A value annotation may not name a member this, or the two become
+// indistinguishable — see the refusal in planValueAnnotations. Mirrors
+// the TS `SRC_FIELD`.
+const srcField = "src"
+
+// reachesAnnotated returns the first rule that BUILDS A VALUE reachable
+// from this element, or "". Walks sugar and follows rule references
+// transitively, stopping at the first hit.
+//
+// This is asked about a member that is NOT itself annotated, whose value
+// is therefore the source text its tree builders accumulated. A rule
+// that builds a value does not contribute text to the node above it —
+// its object is a child, not a span — so an ancestor's src comes out
+// missing that rule's match. In a tree that is lossy; in a MEMBER it is
+// the whole value, so `top = "<" (inner) ">"` as an array built [""]
+// where the annotated inner matched, and `"[" inner "]"` built "[]".
+// Nothing is between the two to notice, which is why this is refused
+// rather than corrected. Mirrors the TS `reachesAnnotated`.
+func reachesAnnotated(
+	el *Element, byName map[string]*Production, seen map[string]bool,
+) string {
+	switch el.Kind {
+	case KindRef:
+		target, ok := byName[el.Name]
+		if !ok {
+			return ""
+		}
+		if target.Value != nil {
+			return target.Name
+		}
+		if seen[target.Name] {
+			return ""
+		}
+		seen[target.Name] = true
+		for _, alt := range target.Alts {
+			for _, inner := range alt {
+				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
+					return hit
+				}
+			}
+		}
+		return ""
+	case KindOpt, KindStar, KindPlus, KindRep:
+		if el.Inner == nil {
+			return ""
+		}
+		return reachesAnnotated(el.Inner, byName, seen)
+	case KindGroup:
+		for _, alt := range el.Alts {
+			for _, inner := range alt {
+				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
+					return hit
+				}
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// exemptAlias reports whether eliminateLeftRecursion will leave this
+// production's leading reference ALONE. Paull's pass exempts a *pure
+// alias* — one alternative that is one reference — from being
+// substituted into, unless it or its target is caught in a
+// leading-reference cycle, where the substitution is doing real work.
+// See that pass for the full reasoning.
+//
+// Shared with planValueAnnotations because the annotation checks are a
+// prediction of exactly this: whether a leading reference survives. Two
+// copies of the condition would be two predictions, and the one here
+// would be the wrong one. Mirrors the TS `exemptAlias`.
+func exemptAlias(p *Production, cyclic map[string]bool) bool {
+	if len(p.Alts) != 1 || len(p.Alts[0]) != 1 {
+		return false
+	}
+	el := p.Alts[0][0]
+	if el.Kind != KindRef {
+		return false
+	}
+	return !cyclic[p.Name] && !cyclic[el.Name]
+}
+
+// pushesValue reports whether an element produces a value when it is
+// matched. A reference, a repetition and a group all become a push of one
+// child; a terminal in any of its spellings consumes input and pushes
+// nothing. This is the one definition of "is a member" — the planner
+// counts parts with it and resolveLeadingFold asks it about a body of one
+// element, so the two cannot drift apart. Mirrors the TS `pushesValue`.
+func pushesValue(el *Element) bool {
+	switch el.Kind {
+	case KindTerm, KindRegex, KindToken, KindProse:
+		return false
+	}
+	return true
+}
+
+// resolveLeadingFold follows a leading reference the way left-recursion
+// elimination will.
+//
+// The pass inlines a leading reference into its caller — and then inlines
+// the leading reference of THAT body in turn, so an alias chain collapses
+// all the way down. Asking only about the first rule therefore answered
+// the wrong question: `top = a "," c` with `a = b` and `b = x ":"` passed,
+// because `a`'s body is a single reference, and then quietly lost the
+// `":"` from the member, because what actually landed in `top` was `b`'s
+// two-part body.
+//
+// Two answers, because they need different diagnostics. The name returned
+// is the first rule in the chain that builds a value of its own: inlining
+// erases its builder, so the member would hold an internal node instead
+// of the value the author annotated for. The bool is whether the chain
+// ends in a body of exactly one pushing part. Mirrors the TS
+// `resolveLeadingFold`.
+func resolveLeadingFold(
+	name string, byName map[string]*Production,
+) (bool, string) {
+	seen := map[string]bool{}
+	prod, ok := byName[name]
+	for ok {
+		// A cycle is left recursion reached through aliases. The pass that
+		// rewrites it is the one whose output this is predicting, so stop
+		// rather than guess; the member-count check downstream still holds.
+		if seen[prod.Name] {
+			return false, ""
+		}
+		seen[prod.Name] = true
+		if prod.Value != nil {
+			return false, prod.Name
+		}
+		if len(prod.Alts) != 1 || len(prod.Alts[0]) != 1 {
+			return false, ""
+		}
+		el := prod.Alts[0][0]
+		if !pushesValue(el) {
+			return false, ""
+		}
+		// A group or repetition is opaque to the fold: it becomes one
+		// helper reference, which is one part, and nothing inside it is
+		// inlined.
+		if el.Kind != KindRef {
+			return true, ""
+		}
+		prod, ok = byName[el.Name]
+	}
+	// An undefined rule is not this check's to refuse — the reference
+	// resolution pass reports it, with a better message.
+	return true, ""
+}
 
 func intToStr(n int) string { return strconv.Itoa(n) }
 
