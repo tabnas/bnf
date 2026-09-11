@@ -575,4 +575,53 @@ describe('value annotations', () => {
       assert.ok(!('a' in alt), `expected no 'a' key, got ${JSON.stringify(alt.a)}`)
     }
   })
+
+  it('refuses a member named `src`', () => {
+    // `src` is how the close-phase capture tells a parse-tree node from
+    // anything else. A value carrying it is taken for a node: its text
+    // folds into the parent's `src` and the object is never added as a
+    // kid, so it is lost outright — and the result is indistinguishable
+    // from the same grammar with no annotation at all:
+    //
+    //   {"rule":"top","src":"<7>","kids":[]}
+    //
+    const prods = [
+      { name: 'top', alts: [[term('<'), ref('inner'), term('>')]] },
+      { name: 'inner', value: { kind: 'object', members: ['src'] },
+        alts: [[ref('d')]] },
+      { name: 'd', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /names a member 'src'/)
+  })
+
+  it('allows `rule` and `kids` as member names', () => {
+    // The other two fields of a node shape are NOT confusable: a value
+    // with `rule` or `kids` but no `src` fails the node test and is
+    // pushed as a kid, correctly. Measured rather than assumed — the
+    // refusal above is deliberately narrow, because refusing a shape
+    // that works is its own defect.
+    for (const name of ['rule', 'kids']) {
+      const prods = [
+        { name: 'top', alts: [[term('<'), ref('inner'), term('>')]] },
+        { name: 'inner', value: { kind: 'object', members: [name] },
+          alts: [[ref('d')]] },
+        { name: 'd', alts: [[digits()]] },
+      ]
+      const out = build(prods, 'top', '<7>')
+      assert.deepEqual(out.kids, [{ [name]: '7' }], `member '${name}'`)
+    }
+  })
+
+  it('refuses a member name used twice', () => {
+    // Both parts write to the one key, so the first match is overwritten
+    // and that much of the input is absent from the result — `['x','x']`
+    // over two parts built `{x:'2'}`.
+    const prods = [
+      { name: 'top', value: { kind: 'object', members: ['x', 'x'] },
+        alts: [[ref('a'), term('.'), ref('b')]] },
+      { name: 'a', alts: [[digits()]] },
+      { name: 'b', alts: [[digits()]] },
+    ]
+    assert.throws(() => emit(prods, 'top'), /names the member 'x' twice/)
+  })
 })

@@ -363,12 +363,40 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
         at)
     }
     if (null != members) {
+      const seen = new Set<string>()
       for (const m of members) {
         if ('string' !== typeof m || '' === m) {
           throw new EmitError(
             `${diagName()}: rule '${prod.name}' has a value annotation ` +
             `naming a member that is not a name (${JSON.stringify(m)}). ` +
             `Every member of an object is named by a non-empty string.`,
+            at)
+        }
+        // Each member is a separate KEY. Two parts named the same thing
+        // both write to it, so the second silently overwrites the first
+        // and that part's match is simply absent from the result.
+        if (seen.has(m)) {
+          throw new EmitError(
+            `${diagName()}: rule '${prod.name}' names the member '${m}' ` +
+            `twice. Each member is a separate key, so the second part ` +
+            `would overwrite the first. Give them different names.`,
+            at)
+        }
+        seen.add(m)
+        // `src` is how a parse-tree node is told apart from a value: the
+        // close-phase capture asks whether the returned child has one.
+        // So a value that HAS a `src` member is taken for a node — its
+        // text is folded into the parent's `src` and the object itself is
+        // never added as a kid, which loses it outright wherever a tree
+        // rule captures it. Measured, not assumed: `rule` and `kids` as
+        // member names are captured correctly and stay allowed.
+        if (SRC_FIELD === m) {
+          throw new EmitError(
+            `${diagName()}: rule '${prod.name}' names a member '${SRC_FIELD}'. ` +
+            `That name is how a value is told apart from a parse-tree node, ` +
+            `so a value carrying it is mistaken for a node and dropped ` +
+            `wherever an ordinary rule captures this one. Name the member ` +
+            `something else.`,
             at)
         }
       }
@@ -497,6 +525,13 @@ function planValueAnnotations(grammar: Grammar): Map<string, boolean[]> {
   }
   return plan
 }
+
+
+// The field a parse-tree node carries its matched text in, and the one
+// `captureChildFields` tests for to tell a node from anything else. A
+// value annotation may not name a member this, or the two become
+// indistinguishable — see the refusal in `planValueAnnotations`.
+const SRC_FIELD = 'src'
 
 
 // The first rule that BUILDS A VALUE reachable from this element, or

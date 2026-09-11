@@ -912,3 +912,57 @@ func TestValueAnnotationEmitsNoActionKeyForAnEmptyLink(t *testing.T) {
 		}
 	}
 }
+
+// `src` is how the close-phase capture tells a parse-tree node from
+// anything else. A value carrying it is taken for a node: its text folds
+// into the parent's src and the object is never added as a kid, so it is
+// lost outright — and the result is indistinguishable from the same
+// grammar with no annotation at all.
+//
+// The refusal is deliberately narrow. "rule" and "kids" as member names
+// are NOT confusable (a value with either but no "src" fails the node
+// test and is pushed correctly), so they stay allowed; refusing a shape
+// that works is its own defect.
+func TestValueAnnotationRefusesOnlyTheSrcMemberName(t *testing.T) {
+	prods := func(member string) []*Production {
+		return []*Production{
+			{Name: "top", Alts: []Sequence{{termEl("<"), refEl("inner"), termEl(">")}}},
+			{Name: "inner",
+				Value: &ValueAnnotation{Kind: "object", Members: []string{member}},
+				Alts:  []Sequence{{refEl("d")}}},
+			{Name: "d", Alts: []Sequence{{digitsEl()}}},
+		}
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods("src")},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "names a member 'src'") {
+		t.Errorf("expected a reserved-name refusal, got %v", err)
+	}
+
+	for _, name := range []string{"rule", "kids"} {
+		got := buildValue(t, prods(name), "top", "<7>")
+		want := map[string]any{"rule": "top", "src": "<>",
+			"kids": []any{map[string]any{name: "7"}}}
+		if !valueEquals(got, want) {
+			t.Errorf("member %q: got %#v, want %#v", name, got, want)
+		}
+	}
+}
+
+// Both parts write to the one key, so the first match is overwritten and
+// that much of the input is absent from the result — ["x","x"] over two
+// parts built {x:"2"}.
+func TestValueAnnotationRefusesARepeatedMemberName(t *testing.T) {
+	prods := []*Production{
+		{Name: "top",
+			Value: &ValueAnnotation{Kind: "object", Members: []string{"x", "x"}},
+			Alts:  []Sequence{{refEl("a"), termEl("."), refEl("b")}}},
+		{Name: "a", Alts: []Sequence{{digitsEl()}}},
+		{Name: "b", Alts: []Sequence{{digitsEl()}}},
+	}
+	_, err := EmitGrammarSpec(&Grammar{Productions: prods},
+		&ConvertOptions{Tag: "tst", Start: "top", Builtins: true})
+	if err == nil || !strings.Contains(err.Error(), "names the member 'x' twice") {
+		t.Errorf("expected a duplicate-member refusal, got %v", err)
+	}
+}

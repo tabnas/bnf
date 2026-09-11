@@ -501,12 +501,40 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 		// here from either, and the two ports DISAGREED about it: TS built
 		// the key "", Go skipped the @key$ entirely and let @setval$ write
 		// into whatever key the previous part had left in the slot.
+		seenMember := map[string]bool{}
 		for _, m := range v.Members {
 			if m == "" {
 				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
 					diagName()+": rule '%s' has a value annotation naming a "+
 						"member that is not a name (\"\"). Every member of an "+
 						"object is named by a non-empty string.", prod.Name)}
+			}
+			// Each member is a separate KEY. Two parts named the same thing
+			// both write to it, so the second silently overwrites the first
+			// and that part's match is simply absent from the result.
+			if seenMember[m] {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names the member '%s' twice. Each "+
+						"member is a separate key, so the second part would "+
+						"overwrite the first. Give them different names.",
+					prod.Name, m)}
+			}
+			seenMember[m] = true
+			// srcField is how a parse-tree node is told apart from a value:
+			// the close-phase capture asks whether the returned child has
+			// one. So a value that HAS such a member is taken for a node —
+			// its text is folded into the parent's src and the object itself
+			// is never added as a kid, which loses it outright wherever a
+			// tree rule captures it. Measured, not assumed: "rule" and
+			// "kids" as member names are captured correctly and stay
+			// allowed.
+			if m == srcField {
+				return nil, &EmitError{Rule: prod.Name, Sp: sp, Message: fmt.Sprintf(
+					diagName()+": rule '%s' names a member '%s'. That name is "+
+						"how a value is told apart from a parse-tree node, so a "+
+						"value carrying it is mistaken for a node and dropped "+
+						"wherever an ordinary rule captures this one. Name the "+
+						"member something else.", prod.Name, srcField)}
 			}
 		}
 
@@ -656,6 +684,13 @@ func planValueAnnotations(grammar *Grammar) (map[string][]bool, error) {
 	}
 	return plan, nil
 }
+
+// srcField is the field a parse-tree node carries its matched text in,
+// and the one captureChildFields tests for to tell a node from anything
+// else. A value annotation may not name a member this, or the two become
+// indistinguishable — see the refusal in planValueAnnotations. Mirrors
+// the TS `SRC_FIELD`.
+const srcField = "src"
 
 // reachesAnnotated returns the first rule that BUILDS A VALUE reachable
 // from this element, or "". Walks sugar and follows rule references
