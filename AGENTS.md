@@ -105,6 +105,80 @@ order of authority:
    `ts/test/bnf.test.js` and `go/version_test.go` fail the build if they
    drift.
 
+## Releasing
+
+Publishing is **tag-driven and runs in CI**, never locally:
+`.github/workflows/release.yml` publishes `@tabnas/bnf` to npm over GitHub
+OIDC trusted publishing (no token, provenance attached), and a `go/v*` tag
+is the Go module release. A local `npm publish` goes out over a token and
+bypasses OIDC — do not.
+
+### Dispatch it; do not push the tag
+
+**Run the workflow with `workflow_dispatch` on `main`, `go` input true.**
+That is the path the workflow's header calls normal, and the only one an
+agent can take: **a session's credentials cannot push tag refs —
+`git push origin ts/v…` fails with HTTP 403** while branch pushes from the
+same credentials succeed. No loss, because the workflow creates both tags
+itself, atomically, *after* npm accepts the publish.
+
+1. Bump all **three** version sites — `ts/package.json`,
+   `export const VERSION` in `ts/src/bnf.ts`, `const VERSION` in
+   `go/bnf.go`. They are held equal by `ts/test/version.test.*` and
+   `go/version_test.go`. (No generated registry here; that is parser's.)
+2. Verify: `cd ts && npm test`, `cd go && GOWORK=off go test ./...`, and
+   **the downstream suite** — a green build here proves much less, per
+   "Provenance" above.
+3. Commit and push to `main`. House convention is to bump in a reviewed PR;
+   a direct push works but is a deviation — say so if you take it.
+4. **Wait for `main` CI to go green on the bump commit.** The release
+   workflow runs no tests: it reads `main`, publishes it and tags it. An npm
+   version and a Go module tag are both immutable.
+5. Dispatch `release.yml` on `main` with `go: true`.
+6. Confirm with `npm view @tabnas/bnf@<version> version` and
+   `git ls-remote --tags origin | grep v<version>`.
+
+### The engine comes first
+
+This package emits specs the engine executes, so a change here that depends
+on new engine behaviour is a **chain**, and the order is not optional:
+
+```
+parser  merge -> release          (@tabnas/parser@X)
+bnf     bump go.mod to X -> merge -> release
+abnf    bump both -> merge -> release
+```
+
+`deps: "parser"` in CI clones the sibling from *its default branch*, so this
+repo's `ci / go` goes green as soon as the engine's fix is on `main` — which
+is **not** the same as the release being usable. `go/go.mod` still names the
+old version, and a clean consumer resolving it gets the old engine. Bump the
+`require` in the same change, and verify it with **`GOWORK=off`** so the
+declared version is what runs rather than a `go.work` or a `replace`.
+
+Only Go usually needs the bump: the TypeScript peer range is wide, and most
+engine divergences repaired in Go were never wrong in TypeScript.
+
+### Never commit the local wiring
+
+Testing against unreleased siblings means `replace` directives and a
+workspace. None of it may reach a commit, and `git add -A` is how it does:
+
+- `go mod edit -replace …=/abs/path` — CI reports it as
+  `replacement directory /… does not exist`.
+- **`go.sum`, after the replace comes out.** A `replace` makes the sibling's
+  sums unused, so `go mod tidy` drops them; reverting `go.mod` alone leaves
+  `missing go.sum entry`. Revert both and diff against the last release
+  commit.
+- A `go.work` belongs *outside* every repo. It also **never consults
+  `go.sum`**, so it cannot tell you whether a declared version is sound —
+  re-check with `GOWORK=off`.
+- Scratch files.
+
+Stage deliberately and read `git status --short` before committing. This
+bites hardest on a PR whose CI is *expected* red for a known dependency: a
+new breakage hides inside the expected failure.
+
 ## Error codes
 
 This package declares **no** error codes: there is no `error`/`hint`
