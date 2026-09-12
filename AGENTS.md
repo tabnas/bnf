@@ -70,6 +70,21 @@ cd ts && npm install && npm run build && npm test
 cd go && go build ./... && go test ./...
 ```
 
+The repo-root `Makefile` also carries `publish-ts` and `publish-go`. Both
+**predate `release.yml` and are not the release path for anyone** — not an
+agent, not a maintainer on a trusted machine. See "Releasing":
+
+- `publish-ts` runs a local `npm publish`, which goes out over a token and
+  bypasses the OIDC trusted publishing the workflow uses.
+- `publish-go V=x.y.z` breaks the three-version invariant. It `sed`s and
+  stages **only** `go/bnf.go`, then commits and tags — leaving
+  `ts/package.json` and `ts/src/bnf.ts` on the previous version, the exact
+  state `ts/test/version.test.*` and `go/version_test.go` exist to reject.
+  Its `test-go` prerequisite also runs *before* the `sed`, so what it
+  verifies is not what it tags.
+
+They stay in the Makefile because removing them is a separate change.
+
 ## Verify your work
 
 The commands that prove a change is correct. Run them from the repo root
@@ -129,14 +144,27 @@ itself, atomically, *after* npm accepts the publish.
 2. Verify: `(cd ts && npm run build && npm test)`,
    `(cd go && GOWORK=off go test ./...)`, and **the downstream suite** — a green build here proves much less, per
    "Provenance" above.
-3. Commit and push to `main`. House convention is to bump in a reviewed PR;
-   a direct push works but is a deviation — say so if you take it.
+3. **Merge the bump through a reviewed PR.** That is the house convention
+   and what `release.yml`'s own header describes. A direct push to `main`
+   is a recovery path, not the normal one: CI still gates it, but nothing
+   reviews it, and step 5 then publishes that unreviewed commit
+   immutably. If you take it, say so.
 4. **Wait for `main` CI to go green on the bump commit.** The release
    workflow runs no tests: it reads `main`, publishes it and tags it. An npm
    version and a Go module tag are both immutable.
 5. Dispatch `release.yml` on `main` with `go: true`.
-6. Confirm with `npm view @tabnas/bnf@<version> version` and
-   `git ls-remote --tags origin | grep v<version>`.
+6. Confirm `npm view @tabnas/bnf@$V version`, and **query both tags
+   exactly**:
+
+   ```bash
+   V=x.y.z
+   git ls-remote --tags origin "refs/tags/ts/v$V" "refs/tags/go/v$V" | wc -l   # want 2
+   ```
+
+   `git ls-remote --tags origin | grep v$V` is not a check. `grep` exits 0
+   if *either* ref matches, so it reports success in precisely the
+   half-finished state — npm tag written, Go tag not — that `release.yml`
+   documents repairing by re-dispatching.
 
 ### The engine comes first
 
@@ -153,8 +181,9 @@ abnf    bump both -> merge -> release
 repo's `ci / go` goes green as soon as the engine's fix is on `main` — which
 is **not** the same as the release being usable. `go/go.mod` still names the
 old version, and a clean consumer resolving it gets the old engine. Bump the
-`require` in the same change, and verify it with **`GOWORK=off`** so the
-declared version is what runs rather than a `go.work` or a `replace`.
+`require` in the same change, and verify it with **`GOWORK=off` and a
+`go.mod` carrying no `replace`** — see below, because one without the other
+still resolves to the sibling checkout.
 
 Only Go usually needs the bump: the TypeScript peer range is wide, and most
 engine divergences repaired in Go were never wrong in TypeScript.
@@ -171,9 +200,27 @@ workspace. None of it may reach a commit, and `git add -A` is how it does:
   `missing go.sum entry`. Revert both and diff against the last release
   commit.
 - A `go.work` belongs *outside* every repo. It also **never consults
-  `go.sum`**, so it cannot tell you whether a declared version is sound —
-  re-check with `GOWORK=off`.
+  `go.sum`**, so it cannot tell you whether a declared version is sound.
 - Scratch files.
+
+**`GOWORK=off` disables the workspace and nothing else.** It does *not*
+neutralise a `replace` in `go.mod`: a replacement with no version on the
+left applies to every version, so the `require` still resolves to the
+sibling directory and the run goes green against the checkout you were
+trying to stop using. Measured here, with the published `v0.9.6` required:
+
+```
+$ GOWORK=off go list -m github.com/tabnas/parser/go
+github.com/tabnas/parser/go v0.9.6 => /…/parser/go
+```
+
+So assert the absence first, and only then believe the run:
+
+```bash
+cd go
+go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod still has a replace'; exit 1; }
+GOWORK=off go test ./...
+```
 
 Stage deliberately and read `git status --short` before committing. This
 bites hardest on a PR whose CI is *expected* red for a known dependency: a
