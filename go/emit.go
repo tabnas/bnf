@@ -54,6 +54,107 @@ import (
 func syncG(tag, group string) string { return tag + "," + group }
 
 // emitGrammarSpec converts an ABNF grammar AST into a tabnas GrammarSpec.
+// regexDerivesEmpty reports whether a regex terminal can match nothing.
+//
+// Decided by asking the regex rather than reading the pattern: `[a-z]*`,
+// `a|` and `(?:)` all match the empty string, and pattern-inspection will
+// not keep up with that. A pattern this port cannot compile answers true
+// — the permissive direction, because a wrong false here rejects input
+// the grammar does admit, while a wrong true only restores the old
+// accept-everything behaviour for that one grammar.
+func regexDerivesEmpty(pattern, flags string) bool {
+	src := "^(?:" + pattern + ")$"
+	if strings.Contains(flags, "i") {
+		src = "(?i)" + src
+	}
+	re, err := regexp.Compile(src)
+	if err != nil {
+		return true
+	}
+	return re.MatchString("")
+}
+
+func elementDerivesEmpty(el *Element, nullable map[string]bool) bool {
+	switch el.Kind {
+	case KindOpt, KindStar:
+		return true
+	case KindPlus:
+		return elementDerivesEmpty(el.Inner, nullable)
+	case KindRep:
+		return el.Min == 0 || elementDerivesEmpty(el.Inner, nullable)
+	case KindGroup:
+		for _, alt := range el.Alts {
+			if sequenceDerivesEmpty(alt, nullable) {
+				return true
+			}
+		}
+		return false
+	case KindRef:
+		return nullable[el.Name]
+	case KindTerm:
+		// An empty literal is kept rather than refused, and a terminal
+		// matching nothing matches nothing.
+		return el.Literal == ""
+	case KindRegex:
+		return regexDerivesEmpty(el.Pattern, el.Flags)
+	case KindToken:
+		// Two of the engine's own tokens are satisfied without consuming
+		// anything, and calling them consuming would reject a grammar's only
+		// string. Neither is reachable from grammar TEXT — a bareword only
+		// becomes a token element if it is in BUILTIN_TOKENS, which holds just
+		// TX/NR/ST/VL — but the IR is the shared contract, so a front-end may
+		// build one directly.
+		//
+		//   #ZZ  end of source. `S = #ZZ` matches the empty input and nothing
+		//        else; measured, it accepts "" and rejects "a".
+		//   #AA  the ANY wildcard. The engine compiles it to a position with
+		//        no constraint, so it is satisfied by whatever token is there
+		//        — including the #ZZ that ends every source. Measured,
+		//        `S = "a" #AA` accepts "a" with nothing left for it to take.
+		//
+		// Every other token matches real input.
+		return el.Name == "#ZZ" || el.Name == "#AA"
+	}
+	// KindProse is gone by the time this runs (resolveProseTerminals).
+	return false
+}
+
+func sequenceDerivesEmpty(alt Sequence, nullable map[string]bool) bool {
+	for _, el := range alt {
+		if !elementDerivesEmpty(el, nullable) {
+			return false
+		}
+	}
+	return true
+}
+
+// nullableRules returns the rules that derive the empty string.
+//
+// Least fixed point: a rule is nullable if any alternative is, and that
+// can only become true as more rules are found nullable. One pass is not
+// enough, because a rule's nullability can depend on a rule defined
+// later; a rule that reaches itself without consuming stays false, which
+// is what the bottom of the fixed point means.
+func nullableRules(prods []*Production) map[string]bool {
+	nullable := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range prods {
+			if nullable[p.Name] {
+				continue
+			}
+			for _, alt := range p.Alts {
+				if sequenceDerivesEmpty(alt, nullable) {
+					nullable[p.Name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return nullable
+}
+
 func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.GrammarSpec, err error) {
 	// One emit at a time. `diagPrefix` below is package state, written at
 	// the start of every emit and read by forty diagnostics across seven
@@ -157,6 +258,15 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		}
 		start = grammar.Productions[0].Name
 	}
+
+	// Whether the empty input is in the language, decided HERE because the
+	// engine short-circuits "" before the parse loop starts — no rule ever
+	// sees it, so Lex.Empty alone answers. Computed before the rewrite
+	// passes below, on the grammar as written: desugaring, left-recursion
+	// elimination and literal lifting all preserve the language, so they
+	// preserve the answer, but they do not preserve the shape this reads.
+	acceptsEmpty := nullableRules(grammar.Productions)[start]
+
 	tag := opts.Tag
 	if tag == "" {
 		// "bnf", this package's own name — NOT a notation.
@@ -480,6 +590,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	opt := &tabnas.Options{
 		Fixed: &tabnas.FixedOptions{Token: fixedTokens},
 		Rule:  &tabnas.RuleOptions{Start: startWrapper},
+		Lex:   &tabnas.LexOptions{Empty: &acceptsEmpty},
 	}
 	if len(matchTokens) > 0 {
 		opt.Match = &tabnas.MatchOptions{

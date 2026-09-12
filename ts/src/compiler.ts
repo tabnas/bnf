@@ -2991,6 +2991,97 @@ function cloneGrammar(grammar: Grammar): Grammar {
 }
 
 
+// Whether a regex terminal can match nothing.
+//
+// Decided by asking the regex rather than reading the pattern: `[a-z]*`,
+// `a|` and `(?:)` all match the empty string, and pattern-inspection
+// will not keep up with that. An invalid pattern answers true — the
+// permissive direction, because a wrong `false` here rejects input the
+// grammar does admit, while a wrong `true` only restores the old
+// accept-everything behaviour for that one grammar.
+function regexDerivesEmpty(pattern: string, flags: string): boolean {
+  try {
+    return new RegExp('^(?:' + pattern + ')$', flags).test('')
+  } catch {
+    return true
+  }
+}
+
+
+function elementDerivesEmpty(el: Element, nullable: Set<string>): boolean {
+  switch (el.kind) {
+    case 'opt':
+    case 'star':
+      return true
+    case 'plus':
+      return elementDerivesEmpty(el.inner, nullable)
+    case 'rep':
+      return 0 === el.min || elementDerivesEmpty(el.inner, nullable)
+    case 'group':
+      return el.alts.some((alt) => sequenceDerivesEmpty(alt, nullable))
+    case 'ref':
+      return nullable.has(el.name)
+    case 'term':
+      // `liftLiteralTokens` keeps an empty literal (it is skipped rather
+      // than refused), and a terminal matching nothing matches nothing.
+      return '' === el.literal
+    case 'regex':
+      return regexDerivesEmpty(el.pattern, el.flags)
+    case 'token':
+      // Two of the engine's own tokens are satisfied without consuming
+      // anything, and calling them consuming would reject a grammar's
+      // only string. Neither is reachable from grammar TEXT — a bareword
+      // only becomes a token element if it is in BUILTIN_TOKENS, which
+      // holds just TX/NR/ST/VL — but the IR is the shared contract, so a
+      // front-end may build one directly.
+      //
+      //   #ZZ  end of source. `S = #ZZ` matches the empty input and
+      //        nothing else; measured, it accepts '' and rejects 'a'.
+      //   #AA  the ANY wildcard. The engine compiles it to a position
+      //        with no constraint (`rules.ts`, `S[i] = null`), so it is
+      //        satisfied by whatever token is there — including the #ZZ
+      //        that ends every source. Measured, `S = "a" #AA` accepts
+      //        'a' with nothing left for the #AA to take.
+      //
+      // Every other token matches real input.
+      return '#ZZ' === el.name || '#AA' === el.name
+    default:
+      // `prose` is gone by the time this runs (`resolveProseTerminals`).
+      return false
+  }
+}
+
+
+const sequenceDerivesEmpty = (
+  alt: Sequence,
+  nullable: Set<string>,
+): boolean => alt.every((el) => elementDerivesEmpty(el, nullable))
+
+
+// The rules that derive the empty string.
+//
+// Least fixed point: a rule is nullable if any alternative is, and that
+// can only become true as more rules are found nullable. One pass is not
+// enough, because a rule's nullability can depend on a rule defined
+// later; a rule that reaches itself without consuming stays false, which
+// is what the bottom of the fixed point means.
+function nullableRules(prods: Production[]): Set<string> {
+  const nullable = new Set<string>()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const p of prods) {
+      if (nullable.has(p.name)) continue
+      if (p.alts.some((alt) => sequenceDerivesEmpty(alt, nullable))) {
+        nullable.add(p.name)
+        changed = true
+      }
+    }
+  }
+  return nullable
+}
+
+
 // Convert an ABNF grammar AST into a tabnas GrammarSpec.
 function emitGrammarSpec(
   grammar: Grammar,
@@ -3033,6 +3124,15 @@ function emitGrammarSpec(
   // rule. Only the diagnostic prefix moved up.
   const start = opts?.start ?? grammar.productions[0].name
   const wordKeywords = !!opts?.wordKeywords
+
+  // Whether the empty input is in the language, decided HERE because the
+  // engine short-circuits `''` before the parse loop starts — no rule
+  // ever sees it, so `lex.empty` alone answers. Computed before the
+  // rewrite passes below, on the grammar as written: desugaring,
+  // left-recursion elimination and literal lifting all preserve the
+  // language, so they preserve the answer, but they do not preserve the
+  // shape this reads.
+  const acceptsEmpty = nullableRules(grammar.productions).has(start)
 
   // Turn single-literal productions (`PL = "+"`) into named lexer
   // tokens, then resolve bare built-in token names (`TX`/`NR`/`ST`/`VL`)
@@ -3312,6 +3412,7 @@ function emitGrammarSpec(
   const options: any = {
     fixed: { token: fixedTokens },
     rule: { start: startWrapper },
+    lex: { empty: acceptsEmpty },
   }
   if (Object.keys(matchTokens).length > 0) {
     options.match = { token: matchTokens }
