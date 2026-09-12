@@ -162,6 +162,13 @@ itself, atomically, *after* npm accepts the publish.
    ```
 
    Then dispatch `release.yml` on `main` with `go: true`.
+
+   Keep that SHA. If a later run has to repair this release, the comparison
+   must still be against the commit npm actually served — re-reading `main`
+   at repair time gives you whatever it has become, which is exactly the
+   value the faulty anchor would also produce, so the check would agree with
+   itself and pass. If you no longer have it, recover it from the original
+   run: the `head_sha` of that `release.yml` run is the commit it published.
 6. Confirm `npm view @tabnas/bnf@$V version`, and **query both tags
    exactly**:
 
