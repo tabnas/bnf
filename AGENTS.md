@@ -126,8 +126,8 @@ itself, atomically, *after* npm accepts the publish.
    `export const VERSION` in `ts/src/bnf.ts`, `const VERSION` in
    `go/bnf.go`. They are held equal by `ts/test/version.test.*` and
    `go/version_test.go`. (No generated registry here; that is parser's.)
-2. Verify: `cd ts && npm test`, `cd go && GOWORK=off go test ./...`, and
-   **the downstream suite** — a green build here proves much less, per
+2. Verify: `(cd ts && npm run build && npm test)`,
+   `(cd go && GOWORK=off go test ./...)`, and **the downstream suite** — a green build here proves much less, per
    "Provenance" above.
 3. Commit and push to `main`. House convention is to bump in a reviewed PR;
    a direct push works but is a deviation — say so if you take it.
