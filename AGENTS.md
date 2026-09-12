@@ -244,9 +244,11 @@ github.com/tabnas/parser/go v0.9.6 => /…/parser/go
 So assert the absence first, and only then believe the run:
 
 ```bash
-cd go
-go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod still has a replace'; exit 1; }
-GOWORK=off go test ./...
+(
+  cd go
+  go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod still has a replace'; exit 1; }
+  GOWORK=off go test ./...
+)
 ```
 
 Stage deliberately and read `git status --short` before committing. This
