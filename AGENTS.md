@@ -151,20 +151,45 @@ itself, atomically, *after* npm accepts the publish.
 4. **Wait for `main` CI to go green on the bump commit.** The release
    workflow runs no tests: it reads `main`, publishes it and tags it. An npm
    version and a Go module tag are both immutable.
-5. Dispatch `release.yml` on `main` with `go: true`.
+5. **Record the release commit, then dispatch.** The confirmation
+   below compares each tag against the commit you released, and a run
+   that publishes and then fails to tag can be followed by `main`
+   moving — so capture it *before* the dispatch, and read it from the
+   remote rather than a local ref that may be stale:
+
+   ```bash
+   REL=$(git ls-remote origin refs/heads/main | cut -f1)
+   ```
+
+   Then dispatch `release.yml` on `main` with `go: true`.
+
+   Keep that SHA. If a later run has to repair this release, the comparison
+   must still be against the commit npm actually served — re-reading `main`
+   at repair time gives you whatever it has become, which is exactly the
+   value the faulty anchor would also produce, so the check would agree with
+   itself and pass. If you no longer have it, recover it from the original
+   run: the `head_sha` of that `release.yml` run is the commit it published.
 6. Confirm `npm view @tabnas/bnf@$V version`, and **query both tags
    exactly**:
 
    ```bash
    V=x.y.z
-   n=$(git ls-remote --tags origin "refs/tags/ts/v$V" "refs/tags/go/v$V" | wc -l)
-   [ "$n" = 2 ] || { echo "incomplete release: $n/2 tags"; exit 1; }
+   for T in "ts/v$V" "go/v$V"; do
+     S=$(git ls-remote origin "refs/tags/$T" | cut -f1)
+     [ -n "$S" ] || { echo "missing tag $T"; exit 1; }
+     [ "$S" = "$REL" ] || { echo "$T is $S, expected $REL"; exit 1; }
+   done
    ```
 
    `git ls-remote --tags origin | grep v$V` is not a check. `grep` exits 0
    if *either* ref matches, so it reports success in precisely the
    half-finished state — npm tag written, Go tag not — that `release.yml`
-   documents repairing by re-dispatching.
+   documents repairing by re-dispatching. Counting the two refs is not
+   enough either: an anchor fallback writes *both* tags on a commit npm
+   never served, and two wrong tags count as two. Comparing each against
+   the commit you released is what catches that. The refs carry the commit
+   directly — `release.yml` uses `git tag "$T" "$ANCHOR"`, so they are
+   lightweight and there is no `^{}` to peel.
 
 ### The engine comes first
 
@@ -219,9 +244,11 @@ github.com/tabnas/parser/go v0.9.6 => /…/parser/go
 So assert the absence first, and only then believe the run:
 
 ```bash
-cd go
-go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod still has a replace'; exit 1; }
-GOWORK=off go test ./...
+(
+  cd go
+  go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod still has a replace'; exit 1; }
+  GOWORK=off go test ./...
+)
 ```
 
 Stage deliberately and read `git status --short` before committing. This
