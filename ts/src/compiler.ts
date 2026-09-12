@@ -3027,9 +3027,26 @@ function elementDerivesEmpty(el: Element, nullable: Set<string>): boolean {
       return '' === el.literal
     case 'regex':
       return regexDerivesEmpty(el.pattern, el.flags)
+    case 'token':
+      // Two of the engine's own tokens are satisfied without consuming
+      // anything, and calling them consuming would reject a grammar's
+      // only string. Neither is reachable from grammar TEXT — a bareword
+      // only becomes a token element if it is in BUILTIN_TOKENS, which
+      // holds just TX/NR/ST/VL — but the IR is the shared contract, so a
+      // front-end may build one directly.
+      //
+      //   #ZZ  end of source. `S = #ZZ` matches the empty input and
+      //        nothing else; measured, it accepts '' and rejects 'a'.
+      //   #AA  the ANY wildcard. The engine compiles it to a position
+      //        with no constraint (`rules.ts`, `S[i] = null`), so it is
+      //        satisfied by whatever token is there — including the #ZZ
+      //        that ends every source. Measured, `S = "a" #AA` accepts
+      //        'a' with nothing left for the #AA to take.
+      //
+      // Every other token matches real input.
+      return '#ZZ' === el.name || '#AA' === el.name
     default:
-      // `token` matches a whole lexer token, and `prose` is gone by the
-      // time this runs (`resolveProseTerminals`). Both consume.
+      // `prose` is gone by the time this runs (`resolveProseTerminals`).
       return false
   }
 }

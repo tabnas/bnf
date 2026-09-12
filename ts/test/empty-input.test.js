@@ -61,6 +61,34 @@ describe('the empty input', () => {
   })
 
 
+  // The engine's own zero-width tokens. Neither is reachable from
+  // grammar text (a bareword becomes a token element only if it is in
+  // BUILTIN_TOKENS, which holds just TX/NR/ST/VL) but the IR is the
+  // shared contract, and calling either consuming rejects a grammar's
+  // only string.
+  it('#ZZ is end-of-source, so a rule naming it derives empty', () => {
+    assert.equal(emptyOf(one([{ kind: 'token', name: '#ZZ' }])), true)
+  })
+
+
+  it('#AA is the ANY wildcard, satisfied by the #ZZ that ends every source', () => {
+    assert.equal(emptyOf(one([{ kind: 'token', name: '#AA' }])), true)
+  })
+
+
+  it('every other engine token matches real input', () => {
+    for (const name of ['#TX', '#NR', '#ST', '#VL', '#SP', '#LN', '#CM']) {
+      assert.equal(emptyOf(one([{ kind: 'token', name }])), false, name)
+    }
+  })
+
+
+  it('a zero-width token does not make its whole sequence empty', () => {
+    assert.equal(
+      emptyOf(one([term('a'), { kind: 'token', name: '#ZZ' }])), false)
+  })
+
+
   // Two element kinds can match nothing without looking like it, and
   // reading them as consuming would reject input the grammar admits —
   // the worse direction of the two.

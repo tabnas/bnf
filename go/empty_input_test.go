@@ -39,6 +39,17 @@ func TestEmptyInputFromTheGrammar(t *testing.T) {
 		{"1*A", Sequence{{Kind: KindPlus, Inner: termEl("a")}}, false},
 		{"a class", Sequence{rxEl("[a-z]", "")}, false},
 		{"a built-in token", Sequence{{Kind: KindToken, Name: "#TX"}}, false},
+
+		// The engine's own zero-width tokens. Neither is reachable from
+		// grammar text (a bareword becomes a token element only if it is in
+		// BUILTIN_TOKENS, which holds just TX/NR/ST/VL) but the IR is the
+		// shared contract, and calling either consuming rejects a grammar's
+		// only string.
+		{"#ZZ, end of source", Sequence{{Kind: KindToken, Name: "#ZZ"}}, true},
+		{"#AA, the ANY wildcard", Sequence{{Kind: KindToken, Name: "#AA"}}, true},
+		{"#SP still consumes", Sequence{{Kind: KindToken, Name: "#SP"}}, false},
+		{"a zero-width token does not make its sequence empty",
+			Sequence{termEl("a"), {Kind: KindToken, Name: "#ZZ"}}, false},
 		{"a group of consuming alternatives", Sequence{{Kind: KindGroup, Alts: []Sequence{
 			{termEl("a")}, {termEl("b")}}}}, false},
 
