@@ -101,10 +101,9 @@ Narrower, when iterating:
 (cd go && go test ./...)
 ```
 
-Each line is a subshell, and the TS one builds before testing on purpose:
-`npm test` runs `test/**/*.test.js` against the compiled `dist/` and does
-**not** compile — run it alone on a fresh checkout and it either fails for
-want of `dist/` or silently passes against stale output.
+Each line is a subshell. The explicit TS build is redundant but harmless:
+`ts/package.json` sets `pretest` to `npm run build`, which npm runs
+automatically, so `npm test` compiles `dist/` first on its own.
 
 A green build here proves much less than usual. What "correct" means, in
 order of authority:
@@ -158,7 +157,8 @@ itself, atomically, *after* npm accepts the publish.
 
    ```bash
    V=x.y.z
-   git ls-remote --tags origin "refs/tags/ts/v$V" "refs/tags/go/v$V" | wc -l   # want 2
+   n=$(git ls-remote --tags origin "refs/tags/ts/v$V" "refs/tags/go/v$V" | wc -l)
+   [ "$n" = 2 ] || { echo "incomplete release: $n/2 tags"; exit 1; }
    ```
 
    `git ls-remote --tags origin | grep v$V` is not a check. `grep` exits 0
@@ -199,8 +199,10 @@ workspace. None of it may reach a commit, and `git add -A` is how it does:
   sums unused, so `go mod tidy` drops them; reverting `go.mod` alone leaves
   `missing go.sum entry`. Revert both and diff against the last release
   commit.
-- A `go.work` belongs *outside* every repo. It also **never consults
-  `go.sum`**, so it cannot tell you whether a declared version is sound.
+- A `go.work` belongs *outside* every repo. It also **does not validate the
+  declared version of a module it replaces** with a local one, so it cannot
+  tell you whether that version is sound. (It does still consult its members'
+  `go.sum` files, writing any missing sums to `go.work.sum`.)
 - Scratch files.
 
 **`GOWORK=off` disables the workspace and nothing else.** It does *not*
