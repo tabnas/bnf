@@ -9,7 +9,9 @@
 # other as a misspelling.
 
 [Aa]BNF
+[Bb]areword
 [Bb]nf
+[Bb]uiltins
 [Dd]esugar
 [Dd]esugaring
 [Ee]num
@@ -21,6 +23,7 @@
 [Ll]exing
 [Ll]ookahead
 [Mm]atchers
+[Mm]etacharacters
 [Nn]ullable
 [Pp]arse
 [Pp]aull
@@ -33,6 +36,8 @@
 [Tt]abnas
 [Tt]okenised
 [Tt]okenising
+[Uu]nserialisable
 [Uu]ntyped
+[Vv]alidator
 [Zz]ig
 [Zz]ON

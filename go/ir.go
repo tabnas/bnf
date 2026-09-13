@@ -369,12 +369,12 @@ func (e *ParseError) Unwrap() error { return e.Cause }
 // this here, and the rest still raise *ParseError or a bare
 // `fmt.Errorf`.
 //
-// NOTE one of those five (`eliminateDirectLeftRec`'s purely-left-
-// recursive rule) PANICS in Go where TypeScript throws — inherited
-// behaviour the ABNF front-end's suite pins. It panics with a
-// *EmitError VALUE rather than a string precisely so the span survives
-// the panic: a `recover()` that type-asserts gets the span, where one
-// that only stringifies gets what it always got.
+// NOTE `eliminateDirectLeftRec`'s purely-left-recursive rule raises this
+// by PANICKING with a *EmitError VALUE rather than a string, precisely so
+// the span survives the panic: a `recover()` that type-asserts gets the
+// span, where one that only stringifies gets what it always got.
+// emitGrammarSpec recovers it and RETURNS it, so a caller sees an error
+// like every other diagnostic; the panic never escapes the facade.
 type EmitError struct {
 	Message string
 	// Rule is the rule being compiled when the failure was raised.

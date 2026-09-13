@@ -1,171 +1,279 @@
 # How-to guide (Go)
 
-Short, task-focused recipes. Each is self-contained and assumes you
-have the module installed (see the [tutorial](tutorial.md) for the
-basics). For the full API, every option, and the complete syntax,
-follow the links into the [reference](reference.md).
-
-```go
-import tabnaszon "github.com/tabnas/zon/go"
-```
-
-## Parse a single string
-
-`tabnaszon.Parse` is the simplest entry point — pass source, get a value and
-an error:
-
-```go
-result, err := tabnaszon.Parse(`.{ .a = 1, .b = 2 }`)
-// result: map[string]any{"a": float64(1), "b": float64(2)}
-```
-
-The no-options path reuses a single cached parser instance internally,
-so repeated `tabnaszon.Parse(src)` calls do not rebuild the engine each time.
-It is safe for concurrent use.
-
-## Parse a realistic build.zig.zon
-
-A ZON manifest mixes named struct fields with tuple-style `paths`
-lists and allows trailing commas and `//` line comments:
-
-```go
-src := `.{
-    .name = "example",
-    .version = "0.0.1",
-    .minimum_zig_version = "0.14.0",
-    .dependencies = .{
-        .foo = .{
-            .url = "https://example.com/foo.tar.gz",
-            .hash = "1220deadbeef",
-        },
-    },
-    .paths = .{
-        "build.zig",
-        "src",
-    },
-}`
-
-result, err := tabnaszon.Parse(src)
-// result: map[string]any{
-//   "name":                "example",
-//   "version":             "0.0.1",
-//   "minimum_zig_version":  "0.14.0",
-//   "dependencies": map[string]any{
-//     "foo": map[string]any{
-//       "url": "https://example.com/foo.tar.gz", "hash": "1220deadbeef",
-//     },
-//   },
-//   "paths": []any{"build.zig", "src"},
-// }
-```
-
-## Parse numbers in every ZON base
-
-Numbers accept decimal, hex, octal, binary, floats, and `_` digit
-separators. Every number is a `float64`:
-
-```go
-tabnaszon.Parse("0x2a")      // float64(42)
-tabnaszon.Parse("0o52")      // float64(42)
-tabnaszon.Parse("0b101010")  // float64(42)
-tabnaszon.Parse("1_000_000") // float64(1000000)
-tabnaszon.Parse("3.14")      // float64(3.14)
-```
-
-## Parse character literals as code points
-
-By default Zig char literals (`'A'`, `'\n'`, `'\u{1F600}'`) parse as
-one-character strings. Set `CharAsNumber` to receive numeric code
-points (as `float64`) instead:
-
-```go
-charAsNum := true
-result, err := tabnaszon.Parse(`'A'`, tabnaszon.ZonOptions{CharAsNumber: &charAsNum})
-// result: float64(65)
-```
-
-## Tag enum literals to tell them apart from strings
-
-Without options, an enum-literal value like `.red` becomes the plain
-string `"red"` — indistinguishable from `"red"` in the parsed tree.
-Set `EnumTag` to wrap each enum value in a one-key map so you can tell
-which was which:
-
-```go
-result, err := tabnaszon.Parse(
-    `.{ .kind = .red, .label = "red" }`,
-    tabnaszon.ZonOptions{EnumTag: "$enum"},
-)
-// result: map[string]any{
-//   "kind":  map[string]any{"$enum": "red"},
-//   "label": "red",
-// }
-```
-
-## Read multi-line Zig strings
-
-Consecutive lines prefixed with `\\` become a single string, joined
-with `\n` (the `\\` prefix is stripped from each line):
-
-```go
-src := ".{\n" +
-    "    .description =\n" +
-    "        \\\\first line\n" +
-    "        \\\\second line\n" +
-    "    ,\n" +
-    "}"
-
-result, err := tabnaszon.Parse(src)
-// result: map[string]any{"description": "first line\nsecond line"}
-```
-
-## Reuse a parser for many inputs (with options)
-
-`tabnaszon.Parse(src, opts)` builds a dedicated instance per call when you
-pass options, since the configuration differs per call. For a hot loop
-with fixed options, build one instance with `MakeJsonic` and reuse it:
-
-```go
-j := tabnaszon.MakeJsonic(tabnaszon.ZonOptions{EnumTag: "$enum"})
-for _, src := range inputs {
-    result, err := j.Parse(src)
-    _ = result
-    _ = err
-}
-```
-
-(With *no* options, plain `tabnaszon.Parse(src)` already reuses a cached
-instance, so you do not need `MakeJsonic` for that case.)
-
-## Handle a parse error
-
-ZON deliberately rejects non-ZON input — a bare `{` opener, for
-instance. The parse never panics; it returns an `error`:
-
-```go
-result, err := tabnaszon.Parse(`{ a = 1 }`) // not ZON: bare { is rejected
-if err != nil {
-    // handle the syntax error; result is nil
-}
-```
-
-## Re-enable strict JSON while the plugin is loaded
-
-Every grammar alternate the plugin adds carries the group tag `zon`.
-To switch those alts off — restoring the plain jsonic grammar while
-the plugin stays registered — exclude that tag through the underlying
-jsonic instance:
+Recipes for the tasks a front-end actually has to do, one at a time. For
+a guided introduction see the [tutorial](tutorial.md); for exact
+signatures see the [reference](reference.md); for what happens between
+the IR and the spec see [concepts](concepts.md).
 
 ```go
 import (
-    tabnasjsonic "github.com/tabnas/jsonic/go"
-    tabnaszon "github.com/tabnas/zon/go"
+    bnf "github.com/tabnas/bnf/go"
+    tabnas "github.com/tabnas/parser/go"
 )
-
-j := tabnasjsonic.Make()
-j.UseDefaults(tabnaszon.Zon, tabnaszon.Defaults)
-j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "zon"}})
 ```
 
-This is rarely useful — you would normally just not load the plugin —
-but it is the supported way to peel the ZON layer back off.
+## Compile an IR and install it
+
+`EmitGrammarSpec` is the entry point, and `Grammar` on an engine
+instance is where the result goes:
+
+```go
+spec, err := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "top",
+    Tag:   "demo",
+})
+if err != nil {
+    return err
+}
+j := tabnas.Make()
+if err := j.Grammar(spec); err != nil {
+    return err
+}
+value, err := j.Parse(src)
+```
+
+Always pass `Tag`. It is stamped on every emitted alternate, and it is
+also the prefix on every diagnostic this compiler raises, so a compile
+failure reads `demo: ...` rather than naming a package the author has
+never used. Omitting it defaults the tag to `bnf`, which asserts nothing
+true about the syntax.
+
+## Attach a semantic action to an alternate
+
+Actions bind to alternates by **mark**, and marks are off by default.
+Turn them on, ask what they are called, then bind:
+
+```go
+spec, _ := bnf.EmitGrammarSpec(&bnf.Grammar{Productions: []*bnf.Production{
+    {Name: "op", Alts: []bnf.Sequence{
+        {{Kind: bnf.KindTerm, Literal: "inc"}},
+        {{Kind: bnf.KindTerm, Literal: "dec"}},
+    }},
+}}, &bnf.ConvertOptions{Tag: "demo", Start: "op", Marks: true})
+
+bnf.MarkListing(spec)
+// op  o:INC  s:#INC
+// op  o:DEC  s:#DEC
+```
+
+The mark comes from the alternate's first element, so a literal `"inc"`
+becomes the token `#INC` and the mark `INC`. An action ref is
+`@rule:phase:mark`, where the phase is `o` for open or `c` for close:
+
+```go
+err := bnf.AttachActions(spec, bnf.ActionsMap{
+    "@op:o:INC": {func(r *tabnas.Rule, ctx *tabnas.Context) {
+        // runs when the INC alternate opens
+    }},
+})
+```
+
+The value is a slice, so several functions can share one ref; they run
+in order. A ref that matches no alternate is an error rather than a
+silent no-op:
+
+```
+demo: action ref '@op:o:inc' matches no open alt with mark 'inc' in rule 'op'
+```
+
+Use `MarkListing` rather than guessing the mark, which is what that
+message is telling you to do.
+
+## Declare a slot without supplying a function
+
+A pure-data spec cannot carry closures, so a grammar meant for embedding
+declares the slot by name and lets whoever installs it fill in the
+function later:
+
+```go
+err := bnf.AttachActionSlots(spec, []string{"@op:o:DEC"})
+```
+
+A slot is a declaration, not a binding. Installing a spec whose slot
+nobody filled in is refused by the engine:
+
+```
+Grammar: unknown action function reference: @op:o:DEC
+```
+
+So declare slots in the grammar you ship, and call `AttachActions` with
+the same refs before `Grammar`.
+
+Slots are for alternate actions only. A rule-phase ref is refused, since
+a slot has nowhere to hang on one.
+
+## Emit a grammar you can embed
+
+Two steps. Compile with `Builtins: true`, which makes every action a
+`@name$` string rather than a closure, then reduce:
+
+```go
+spec, _ := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "top", Tag: "demo", Builtins: true,
+})
+pure, err := bnf.ToPureSpec(spec)
+```
+
+`pure` is a `map[string]any` of plain data, ready for `encoding/json`.
+Skipping the first step fails loudly rather than emitting something that
+cannot be serialised:
+
+```
+demo: spec still contains closures; convert with `builtins: true` for
+pure-data output. Stray ref(s): @abnf_a0, @abnf_a1
+```
+
+## Emit a recognition-only grammar
+
+`ToRecognitionSpec` strips the tree and value builders out, leaving a
+grammar that decides whether input matches and builds nothing:
+
+```go
+rec, err := bnf.ToRecognitionSpec(spec)
+```
+
+Unlike `ToPureSpec`, this does not need the `Builtins: true` compile for
+an ordinary grammar: the tree and value builders it would have tripped
+over are the very things it removes. It refuses only when **control**
+logic is still a closure, which happens when a grammar needing a probe
+dispatcher is compiled without builtins.
+
+## Make keyword literals match whole words
+
+By default a literal compiles to an anchored, case-insensitive regex, so
+`option` also matches the first six characters of `optional`. The
+`WordKeywords` option adds a word-boundary guard to any literal ending
+in a word character:
+
+```go
+spec, _ := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "stmt", Tag: "demo", WordKeywords: true,
+})
+// #OPTION: "@~/^option/i"    without it
+// #OPTION: "@~/^option\b/i"  with it
+```
+
+Punctuation is unaffected, since a word boundary after `+` would be
+wrong.
+
+## Control literal case sensitivity
+
+ABNF strings are case-insensitive by default, and this compiler keeps
+that. Set both fields to override it for one literal:
+
+```go
+&bnf.Element{
+    Kind: bnf.KindTerm, Literal: "If",
+    CaseSensitive: true, HasCaseSens: true,
+}
+```
+
+`HasCaseSens` is what distinguishes "explicitly insensitive" from "not
+specified", which Go's zero value cannot do on its own.
+
+A literal with no ASCII letter in it is case-sensitive either way, and
+`IsEffectivelyCaseSensitive` reports the answer the compiler will use.
+`TermKey` shows the identity a terminal is allocated under: `cs:+` for
+that literal, `ci:if` for an insensitive word.
+
+## Remove rules from the host instance
+
+`Grammar.Remove` names rules or tokens to drop, and `ClearAll` wipes the
+instance first. Both survive into the spec:
+
+```go
+grammar := &bnf.Grammar{
+    Productions: []*bnf.Production{ /* ... */ },
+    Remove:      []string{"val", "map"},
+}
+```
+
+A removal is carried as a nil rule entry, which is how the engine
+represents one. So `spec.Rule["val"]` is present and nil; it has not
+been left out.
+
+## Name the author's rule, not the machinery's
+
+A compiled grammar carries an order of magnitude more rules than the
+author wrote, and every generated name shows up in rule stacks, hover
+and completion. The compiler exports a map from each generated name back
+to the production it descends from:
+
+```go
+provenance, _ := spec.Meta["provenance"].(map[string]any)
+provenance["__start__"] // "list"
+```
+
+It is on unless you turn it off. For an embedded grammar where size
+matters more than names:
+
+```go
+off := false
+spec, _ := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "list", Tag: "demo", Provenance: &off,
+})
+// spec.Meta has no "provenance" key
+```
+
+The field is a pointer for that reason: absent means on, and only an
+explicit `false` turns it off.
+
+## Give your errors a source range
+
+Fill in `Sp` on the elements and productions your parser builds, and a
+compile failure can point at the text:
+
+```go
+{Kind: bnf.KindRef, Name: "expr", Sp: &bnf.SrcSpan{S: 12, E: 16, R: 2, C: 5}}
+```
+
+`S` and `E` are offsets in the same units your engine tokens use, so
+copy `sI` across rather than converting. In Go those are **bytes**,
+where TypeScript counts UTF-16 code units; convert at the boundary that
+knows the document encoding, such as an LSP server, because the IR does
+not hold the source text and cannot convert for you.
+
+`R` and `C` are 1-based, so zero means "not recorded". The whole span is
+a pointer for the same reason: `SrcSpan{S: 0, E: 0}` is a real empty
+span at the start of a file and must not read as absence.
+
+## Read a compile failure
+
+```go
+var ee *bnf.EmitError
+if errors.As(err, &ee) {
+    ee.Rule // the rule being compiled
+    ee.Sp   // where, when the IR knew
+}
+```
+
+`EmitError` is what the author-facing diagnostics raise. The rest raise
+`*bnf.ParseError` or a plain error, so match on `error` and narrow when
+you want the span. A purely left-recursive production is an error return
+like the rest: the pass raising it panics internally with an
+`*bnf.EmitError`, and `EmitGrammarSpec` recovers and returns it.
+
+## Inspect the left-recursion rewrite
+
+`EliminateLeftRecursion` runs that pass alone, which is what you want in
+a test that pins the rewrite rather than the emitted spec:
+
+```go
+rewritten := bnf.EliminateLeftRecursion(grammar)
+```
+
+It returns a new `*Grammar`; the input is not modified.
+
+## Serialise a spec for a golden test
+
+```go
+text := bnf.SpecToJSON(spec, 2)   // indent 2
+data := bnf.SpecToData(spec)      // map[string]any
+```
+
+Both return an empty result on failure. The `Err` variants,
+`SpecToJSONErr` and `SpecToDataErr`, return the failure instead, and are
+the ones to use anywhere the output is not immediately eyeballed.
+
+The TypeScript recipes for the same tasks are in
+[`../../ts/README.md`](../../ts/README.md).
