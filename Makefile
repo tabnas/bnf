@@ -5,7 +5,7 @@
 # repo-set go.work + node_modules symlinks (admin/scripts/link.sh).
 
 .PHONY: all build test clean build-ts build-go test-ts test-go \
-        clean-ts clean-go publish-ts publish-go tags-go reset
+        clean-ts clean-go downstream publish-ts publish-go tags-go reset
 
 all: build test
 
@@ -14,6 +14,16 @@ build: build-ts build-go
 test: test-ts test-go
 
 clean: clean-ts clean-go
+
+# Run the front-end suites against this working tree. Required before any
+# emit-pipeline change is done, and before a release: a green build here
+# proves much less than usual, because what this package emits is executed
+# elsewhere. See scripts/downstream.sh and AGENTS.md, "Verify your work".
+#
+#   make downstream                # abnf ebnf gbnf
+#   make downstream PEERS="gbnf"   # just that one
+downstream:
+	./scripts/downstream.sh $(PEERS)
 
 # --- TypeScript (package in ts/) ---
 build-ts:
