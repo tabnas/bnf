@@ -1,115 +1,195 @@
-# Tutorial — your first ZON parse (Go)
+# Tutorial: your first compile (Go)
 
-This walks you from nothing to a working parse, then through one option
-and one error. Follow it in order; each step builds on the last. When
-you finish you will have installed the module, parsed a struct and a
-tuple, switched on an option, and handled a parse error.
+This walks you from nothing to a working parser, built out of a grammar
+IR rather than out of notation text. Follow it in order; each step builds
+on the last. When you finish you will have compiled an IR into a tabnas
+`GrammarSpec`, installed it on an engine, parsed input with it, added
+repetition and a start rule, read a compile error, and serialised the
+result.
 
-For a recipe-style index of individual tasks, see the
-[how-to guide](guide.md). For exhaustive signatures and the full
-syntax, see the [reference](reference.md). For how it all works — and
-how the Go version differs from TypeScript — see
-[concepts](concepts.md).
+For recipes covering one task at a time, see the
+[how-to guide](guide.md). For exact signatures and every option, see the
+[reference](reference.md). For what the compiler does between the IR and
+the spec, see [concepts](concepts.md).
 
 ## 1. Install
 
-`zon` is a jsonic plugin. The convenience helpers pull in the jsonic
-engine for you, so a single `go get` is enough:
+`bnf` is the shared compiler behind the BNF-family front-ends. The
+engine it compiles for is a dependency of the module, so one `go get` is
+enough:
 
 ```bash
-go get github.com/tabnas/zon/go@latest
+go get github.com/tabnas/bnf/go@latest
 ```
 
 ```go
-import tabnaszon "github.com/tabnas/zon/go"
+import (
+    bnf "github.com/tabnas/bnf/go"
+    tabnas "github.com/tabnas/parser/go"
+)
 ```
 
-## 2. Parse a struct
+## 2. Build the smallest grammar
 
-`tabnaszon.Parse` is the one-call entry point. Give it ZON source and it
-returns the parsed value as `any` plus an `error`:
+This package holds no notation. You hand it a `*bnf.Grammar`, which is a
+list of productions, each an alternation of sequences of elements:
 
 ```go
-result, err := tabnaszon.Parse(`.{ .name = "Alice", .age = 30 }`)
-// result: map[string]any{"name": "Alice", "age": float64(30)}
-// err:    nil
+grammar := &bnf.Grammar{Productions: []*bnf.Production{
+    {Name: "val", Alts: []bnf.Sequence{
+        {{Kind: bnf.KindToken, Name: "#NR"}},
+    }},
+}}
 ```
 
-You wrote Zig anonymous-struct syntax — `.{ ... }` to open, `.field`
-for each key, `=` to assign — and got back a `map[string]any`. Note
-that numbers come back as `float64`; that is the only numeric type ZON
-produces.
+A `Sequence` is a `[]*Element`, and an element's `Kind` says what it is.
+Three kinds carry the whole of this tutorial:
 
-## 3. Parse a tuple
+| Kind | What it matches | Field that carries it |
+|---|---|---|
+| `bnf.KindToken` | a lexer token the engine already provides | `Name` |
+| `bnf.KindTerm` | a literal the compiler allocates a token for | `Literal` |
+| `bnf.KindRef` | another production by name | `Name` |
 
-The same `.{ ... }` opener also makes tuples. When the brace is *not*
-immediately followed by `.field =`, the values inside become a slice:
+`#NR` is one of four builtin tokens. `bnf.BuiltinTokens()` returns the
+whole map: `NR`, `ST`, `TX` and `VL`, for numbers, strings, bare text and
+keyword values.
+
+## 3. Compile it
+
+`EmitGrammarSpec` takes the IR and options, and returns a
+`*tabnas.GrammarSpec`:
 
 ```go
-result, err := tabnaszon.Parse(`.{ 1, 2, 3 }`)
-// result: []any{float64(1), float64(2), float64(3)}
-
-result, err = tabnaszon.Parse(`.{ "a", "b" }`)
-// result: []any{"a", "b"}
+spec, err := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "val",
+    Tag:   "demo",
+})
 ```
 
-The plugin decides struct-vs-tuple by peeking past the opening brace,
-so you never mark which one you mean — just write it.
+`Tag` is the notation's own name, and it is stamped on every alternate
+the compile emits. Pass the syntax your front-end reads, so a rule stack
+or a diagnostic names what the author actually wrote. `Start` names the
+production the engine begins at.
 
-## 4. Nest and mix
+## 4. Install it and parse
 
-Structs and tuples nest freely, and a struct can hold both:
+A spec goes onto a bare engine with `Grammar`:
 
 ```go
-result, err := tabnaszon.Parse(`.{ .xs = .{ 1, 2, 3 }, .y = .{ .z = true } }`)
-// result: map[string]any{
-//   "xs": []any{float64(1), float64(2), float64(3)},
-//   "y":  map[string]any{"z": true},
-// }
+j := tabnas.Make()
+if err := j.Grammar(spec); err != nil {
+    return err
+}
+out, err := j.Parse("42")
 ```
 
-This is the shape of a real `build.zig.zon` manifest: named fields,
-some holding nested structs, some holding tuple-style path lists.
-
-## 5. Turn on an option
-
-Options are passed as a `tabnaszon.ZonOptions` value after the source. For
-example, a Zig char literal like `'A'` is a one-character string by
-default; set `CharAsNumber` to get its code point (a `float64`)
-instead:
+`out` is the AST the compiler's tree builders produce: a
+`map[string]any` with `rule`, `src` and `kids`.
 
 ```go
-charAsNum := true
-result, err := tabnaszon.Parse(`'A'`, tabnaszon.ZonOptions{CharAsNumber: &charAsNum})
-// result: float64(65)
+// map[string]any{"rule": "val", "src": "42", "kids": []any{}}
 ```
 
-`CharAsNumber` is a `*bool` so you can express "leave it at the
-default" (nil) versus "set it". There are only two options,
-`CharAsNumber` and `EnumTag`; the [reference](reference.md#options)
-lists both.
+## 5. Add structure
 
-## 6. Handle an error
-
-ZON is not a superset of JSON. A bare `{` is not a valid opener — the
-plugin removes it on purpose — so parsing one returns an error rather
-than panicking:
+Now something with nesting and repetition. `KindStar` is zero or more of
+its `Inner` element, and a production can reference itself through
+another:
 
 ```go
-result, err := tabnaszon.Parse(`{ a = 1 }`) // not ZON: bare { is rejected
-// result: nil
-// err:    non-nil parse error
-if err != nil {
-    // handle the syntax error
+grammar := &bnf.Grammar{Productions: []*bnf.Production{
+    {Name: "list", Alts: []bnf.Sequence{{
+        {Kind: bnf.KindTerm, Literal: "("},
+        {Kind: bnf.KindStar, Inner: &bnf.Element{
+            Kind: bnf.KindRef, Name: "item"}},
+        {Kind: bnf.KindTerm, Literal: ")"},
+    }}},
+    {Name: "item", Alts: []bnf.Sequence{
+        {{Kind: bnf.KindToken, Name: "#NR"}},
+        {{Kind: bnf.KindRef, Name: "list"}},
+    }},
+}}
+
+spec, err := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "list", Tag: "demo",
+})
+```
+
+Two productions go in; thirteen rules come out. The compiler desugars
+the star into a helper production, adds the dispatch machinery the
+engine needs, and wraps the start rule. Parsing `(1 2 (3))` gives a
+`list` node with three `item` children, the last of them holding a
+nested `list`:
+
+```go
+j := tabnas.Make()
+j.Grammar(spec)
+out, _ := j.Parse("(1 2 (3))")
+// rule "list", src "(12(3))", three item kids
+```
+
+The `src` has no spaces in it because the engine's lexer skips them
+between tokens, not because anything was lost.
+
+## 6. Read a compile error
+
+A grammar that references a production it does not define fails to
+compile, and the failure says which rule:
+
+```go
+_, err := bnf.EmitGrammarSpec(&bnf.Grammar{Productions: []*bnf.Production{
+    {Name: "a", Alts: []bnf.Sequence{
+        {{Kind: bnf.KindRef, Name: "missing"}},
+    }},
+}}, &bnf.ConvertOptions{Tag: "demo"})
+
+// err.Error() == "demo: rule 'a' references unknown rule 'missing'"
+```
+
+Note the prefix. It is the `Tag` you passed, not this package's name,
+because the person reading it wrote `demo` syntax and has never heard of
+`bnf`.
+
+The error is a `*bnf.EmitError`, which carries the rule and, when the
+front-end recorded one, a source span:
+
+```go
+var ee *bnf.EmitError
+if errors.As(err, &ee) {
+    ee.Rule // "a"
+    ee.Sp   // *bnf.SrcSpan, or nil when nothing recorded one
 }
 ```
 
-Go never panics on a parse error; always check the returned `error`.
+Spans are optional everywhere. A front-end that fills in `Element.Sp`
+and `Production.Sp` gets ranged errors; one that does not compiles to
+exactly the same grammar.
+
+## 7. Serialise the result
+
+`SpecToJSON` renders a spec as JSON, which is what you want for a golden
+test or for an embedded grammar:
+
+```go
+text := bnf.SpecToJSON(spec, 2)
+```
+
+The second argument is the indent. `SpecToData` returns the same content
+as a `map[string]any` instead of text. Both have `Err` variants that
+surface the failure rather than returning an empty result:
+
+```go
+data, err := bnf.SpecToDataErr(spec)
+```
 
 ## Where to go next
 
-- [How-to guide](guide.md) — focused recipes for individual tasks.
-- [Reference](reference.md) — the public API, every option, the full
-  ZON syntax accepted.
-- [Concepts](concepts.md) — how the plugin reshapes the engine, and
-  how the Go version differs from TypeScript.
+- [How-to guide](guide.md). Recipes: semantic actions, recognition-only
+  specs, whole-word keywords, rule removal, source spans.
+- [Reference](reference.md). Every exported name, every option field,
+  and the error types.
+- [Concepts](concepts.md). What the passes between the IR and the spec
+  do, and why the IR is the boundary.
+- The root [README](../../README.md) and [AGENTS.md](../../AGENTS.md).
+  How this package relates to the front-ends that feed it.

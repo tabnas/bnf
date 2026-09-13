@@ -136,25 +136,21 @@ render them to somebody who has the package and not the repository.
 ### Withheld pages
 
 A page can be reader-facing and still be wrong to gate. `gated-docs.cjs`
-carries a `WITHHELD` map for that case, and every entry names its reason:
+carries a `WITHHELD` map for that case, and every entry names its reason.
 
-| Page | Withheld because |
-|---|---|
-| `go/doc/concepts.md` | byte-identical to `tabnas/zon`'s; documents the ZON plugin |
-| `go/doc/guide.md` | byte-identical to `tabnas/zon`'s; documents the ZON plugin |
-| `go/doc/reference.md` | byte-identical to `tabnas/zon`'s; documents the ZON plugin |
-| `go/doc/tutorial.md` | byte-identical to `tabnas/zon`'s; documents the ZON plugin |
+**The map is empty.** It held four Go pages that were copied from
+`tabnas/zon` and never rewritten, so they described a ZON parser under
+the name of this compiler. A clean Vale run over them would have
+reported that another package's documentation is well written, which is
+worse than no report: it reads as a check on content, and the one
+problem those pages had is the one no linter can see. They have since
+been written for this package and are gated with the rest.
 
-These four pages were copied from another repository and never rewritten,
-so they describe a ZON parser under the name of this compiler. A clean
-Vale run over them would report that another package's documentation is
-well written. That is worse than no report, because it reads as a check
-on content that no linter can see, and the one problem these pages have
-is the one it cannot check.
-
-Withholding is a debt, not a category. It is tracked in `tabnas/bnf` issue
-52, and an entry leaves the map as the last step of writing the real page.
-Nothing else belongs here: a working document is out of the published set
+The map stays, empty. Withholding is a debt rather than a category, and
+the failure it guards against is a copied page nobody noticed. The next
+one will arrive the same way. An entry names the page and the reason,
+and leaves the map as the last step of writing the real one. Nothing
+else belongs there: a working document is out of the published set
 entirely and needs no entry, and a page that merely fails the gate is a
 page to fix.
 

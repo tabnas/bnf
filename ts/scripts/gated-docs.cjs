@@ -8,24 +8,30 @@ const REPO = Path.join(__dirname, '..', '..')
 // reports, ledgers) are deliberately out: see "The published set" in
 // docs/STYLE-GUIDE.md.
 const PAGES = [
+  "go/doc/tutorial.md",
+  "go/doc/guide.md",
+  "go/doc/reference.md",
+  "go/doc/concepts.md",
   "go/doc/differences.md",
   "README.md",
   "ts/README.md",
   "go/README.md"
 ]
 
-const TUTORIALS = []
+const TUTORIALS = [
+  "go/doc/tutorial.md"
+]
 
 // Pages that exist but are not this repository's documentation, so a
 // passing prose gate over them would certify the wrong content. Each
-// entry names why. Tracked in tabnas/bnf#52; the fix is to write these
-// pages, not to gate the copies.
-const WITHHELD = {
-  "go/doc/concepts.md": "byte-identical to tabnas/zon's; documents the ZON plugin",
-  "go/doc/guide.md": "byte-identical to tabnas/zon's; documents the ZON plugin",
-  "go/doc/reference.md": "byte-identical to tabnas/zon's; documents the ZON plugin",
-  "go/doc/tutorial.md": "byte-identical to tabnas/zon's; documents the ZON plugin"
-}
+// entry names why.
+//
+// EMPTY, and kept so. The four Go pages that were here held tabnas/zon's
+// documentation, copied in and never rewritten; they are now this
+// package's own and are gated above. The map stays because the failure
+// it guards against is a copy nobody noticed, and the next one will
+// arrive the same way.
+const WITHHELD = {}
 
 
 function exists(rel) {

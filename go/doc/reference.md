@@ -1,321 +1,382 @@
 # Reference (Go)
 
-The complete public surface of the Go `zon` module: exports, the parse
-entry points, the two options, and the exact ZON syntax accepted. For
-a guided introduction see the [tutorial](tutorial.md); for task recipes
-see the [how-to guide](guide.md); for how it works (and how it differs
-from TypeScript) see [concepts](concepts.md).
+The complete public surface of the Go `bnf` module: every exported name
+with its signature, the IR types a front-end builds, every option field,
+and the error contract. For a guided introduction see the
+[tutorial](tutorial.md); for task recipes see the
+[how-to guide](guide.md); for what the compiler does between the IR and
+the spec see [concepts](concepts.md).
 
 ## Module
 
 ```bash
-go get github.com/tabnas/zon/go@latest
+go get github.com/tabnas/bnf/go@latest
 ```
 
 ```go
-import tabnaszon "github.com/tabnas/zon/go"
+import (
+    bnf "github.com/tabnas/bnf/go"
+    tabnas "github.com/tabnas/parser/go"
+)
 ```
 
 | | |
 |---|---|
-| Module | `github.com/tabnas/zon/go` |
-| Package | `tabnaszon` |
-| Engine | `github.com/tabnas/jsonic/go` (pulled in transitively) |
-| `VERSION` | exported `const` string of the module version |
+| Module | `github.com/tabnas/bnf/go` |
+| Package | `bnf` |
+| Engine | `github.com/tabnas/parser/go` (imported as `tabnas`) |
+| Notation | none: this package compiles an IR, not text |
+| Front-ends | [`abnf`](https://github.com/tabnas/abnf), [`gbnf`](https://github.com/tabnas/gbnf), [`ebnf`](https://github.com/tabnas/ebnf) |
 
-## Public API
+## Compiling
 
-### `func Parse(src string, opts ...ZonOptions) (any, error)`
+### `func EmitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (*tabnas.GrammarSpec, error)`
 
-Parses a ZON string and returns the resulting value. Convenience
-wrapper around `MakeJsonic(opts...).Parse(src)`.
-
-With **no** options it reuses a single lazily-created instance, so
-repeated calls do not rebuild the engine + grammar. The shared instance
-is safe for concurrent use (each parse builds its own context and only
-reads instance state). With options, a dedicated instance is built per
-call, since the configuration differs per call.
+Compiles a grammar IR into a spec the engine can install. This is the
+whole surface a front-end needs: parse your notation into a `*Grammar`,
+then call this.
 
 ```go
-result, err := tabnaszon.Parse(`.{ .a = 1 }`)
-// result: map[string]any{"a": float64(1)}
+spec, err := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "top", Tag: "demo",
+})
 ```
 
-### `func MakeJsonic(opts ...ZonOptions) *tabnasjsonic.Jsonic`
+The call is serialised internally, because the diagnostic prefix is
+per-emit package state. Concurrent calls are safe and take their turn.
 
-Returns a reusable `*tabnasjsonic.Jsonic` instance configured for ZON
-parsing. Use this when parsing many strings with the same options:
-build once, call `.Parse()` per input.
+### `func EliminateLeftRecursion(grammar *Grammar) *Grammar`
 
-```go
-j := tabnaszon.MakeJsonic()
-result, err := j.Parse(`.{ 1, 2, 3 }`)
-// result: []any{float64(1), float64(2), float64(3)}
-```
-
-A plugin-registration failure (a programming error with static inputs)
-panics rather than misbehaving silently.
-
-### `func Zon(j *tabnasjsonic.Jsonic, options map[string]any) error`
-
-The raw plugin function. Usually invoked indirectly through
-`j.UseDefaults(tabnaszon.Zon, tabnaszon.Defaults, opts...)` or via `Parse` /
-`MakeJsonic`. It is idempotent: a re-invocation guard
-(`zon-init` decoration) makes re-application during `SetOptions` a
-no-op.
-
-```go
-j := tabnasjsonic.Make()
-j.UseDefaults(tabnaszon.Zon, tabnaszon.Defaults)
-result, err := j.Parse(`.{ .a = 1 }`)
-```
-
-### `var Defaults map[string]any`
-
-The default option map, paired with `Zon` for `UseDefaults`:
-
-```go
-var Defaults = map[string]any{
-    "charAsNumber": false,
-    "enumTag":      "",
-}
-```
-
-### `type ZonOptions struct`
-
-A typed wrapper over the option map. Fields use pointer / empty-value
-conventions so callers can express "omit" vs "set":
-
-```go
-type ZonOptions struct {
-    // When non-nil and true, parses Zig char literals ('x') as numeric
-    // code points. When nil or false (default), they are one-char strings.
-    CharAsNumber *bool
-
-    // When non-empty, wraps enum literals (.foo used as value) in
-    // map[string]any{<EnumTag>: name} instead of producing bare strings.
-    EnumTag string
-}
-```
+Runs the left-recursion pass alone, for a front-end that wants to
+inspect or test the rewritten IR. Returns a new grammar; the input is
+not modified.
 
 ## Options
 
-### `CharAsNumber`
-
-- **Type:** `*bool`
-- **Default:** `false` (nil)
-- **Effect:** Controls how Zig character literals (`'x'`, `'\n'`,
-  `'\x41'`, `'\u{1F600}'`) are parsed.
-  - nil / `false` — the literal becomes a one-character `string`. `'A'`
-    → `"A"`.
-  - `true` — the literal becomes its numeric Unicode code point as a
-    `float64`. `'A'` → `float64(65)`, `'\n'` → `float64(10)`,
-    `'\u{1F600}'` → `float64(0x1F600)`.
+### `type ConvertOptions`
 
 ```go
-charAsNum := true
-tabnaszon.Parse(`'A'`, tabnaszon.ZonOptions{CharAsNumber: &charAsNum}) // float64(65)
+type ConvertOptions struct {
+    Start        string
+    Tag          string
+    Builtins     bool
+    Marks        bool
+    WordKeywords bool
+    Provenance   *bool
+}
 ```
 
-### `EnumTag`
+| Field | Default | Effect |
+|---|---|---|
+| `Start` | none | The production the engine begins at. The compile wraps it as `__start__`. |
+| `Tag` | `"bnf"` | Stamped on every emitted alternate, and the prefix on every diagnostic. Pass the notation's own name. |
+| `Builtins` | `false` | Emit actions as `@name$` strings rather than closures. Required by `ToPureSpec`. |
+| `Marks` | `false` | Record a mark on each user alternate, so semantic actions can bind to it. |
+| `WordKeywords` | `false` | Append a `\b` guard to a literal ending in a word character, so `option` does not match inside `optional`. |
+| `Provenance` | on | Emit `Meta["provenance"]`. A pointer, so absent means on and only an explicit `false` turns it off. |
 
-- **Type:** `string`
-- **Default:** `""`
-- **Effect:** Controls how enum-literal *values* (a bare `.foo` used in
-  value position) are represented.
-  - `""` — the enum literal becomes the bare identifier `string`. `.red`
-    → `"red"`.
-  - a non-empty string `T` — the enum literal is wrapped in a one-key
-    map `map[string]any{T: name}`, so it can be told apart from a plain
-    string. With `EnumTag: "$enum"`, `.red` →
-    `map[string]any{"$enum": "red"}`.
+The Go `WordKeywords` uses `\b` where TypeScript uses a
+`(?![A-Za-z0-9_])` lookahead. RE2 has no lookahead, and the two are
+equivalent here.
 
-`EnumTag` affects enum literals only as values. A `.field` used as a
-key (before `=`) is always the plain field name.
+### `type CompileOptions`
 
 ```go
-tabnaszon.Parse(`.{ .kind = .red }`, tabnaszon.ZonOptions{EnumTag: "$enum"})
-// map[string]any{"kind": map[string]any{"$enum": "red"}}
+type CompileOptions struct {
+    Start       string
+    Tag         string
+    Strict      bool
+    Indent      int
+    Recognition *bool // default true
+}
 ```
 
-## Value types
+Declared to mirror the TypeScript type of the same name, which is the
+options argument to its `compileSpec`. Nothing in the Go package takes
+one: there is no Go `compileSpec`, and a front-end compiling and
+serialising in two steps passes `ConvertOptions` to `EmitGrammarSpec`
+and an indent to `SpecToJSON`. It is exported so a port checking parity
+can name it.
 
-`Parse` returns `any`; the concrete Go types are predictable:
+## The IR
 
-| ZON value | Go type |
+A front-end's only job is to produce one of these.
+
+### `type Grammar`
+
+```go
+type Grammar struct {
+    Productions []*Production
+    Ambiguities []AmbiguityReport
+    Remove      []string
+    ClearAll    bool
+}
+```
+
+`Remove` names rules or tokens to drop from the host instance;
+`ClearAll` wipes it first. A removal reaches the spec as a nil rule
+entry, which is how the engine represents one, so `spec.Rule["val"]` is
+present and nil rather than absent.
+
+### `type Production`
+
+```go
+type Production struct {
+    Name string
+    Alts []Sequence
+    // and compiler-written fields
+}
+```
+
+`Name` and `Alts` are what a front-end fills in. The rest are written by
+the passes: `Origin` (the author-written production a synthesised one
+descends from), `NodeKind`, `TailRepeat`, `RepeatHelper`, `DebtGuard`,
+`DebtOwed`, `ProbeDisp`, `ProbeHelper`, and `Sp`.
+
+`NodeKind` decides how a production contributes to the output AST:
+`"user"` (the default, and what an empty string means) emits a tagged
+node; `"core"` and `"helper"` flatten into the enclosing node.
+
+### `type Sequence`
+
+```go
+type Sequence []*Element
+```
+
+One alternative: the elements to match in order.
+
+### `type Element`
+
+```go
+type Element struct {
+    Kind ElemKind
+    Sp   *SrcSpan
+    // term
+    Literal       string
+    CaseSensitive bool
+    HasCaseSens   bool
+    TokenName     string
+    // prose
+    Text string
+    // regex
+    Pattern string
+    Flags   string
+    // ref
+    Name string
+    Debt map[string]int
+    // opt / star / plus / rep
+    Inner     *Element
+    Min, Max  int
+    DebtGuard string
+    // group
+    Alts []Sequence
+}
+```
+
+One struct tagged by `Kind`, rather than a union. Which fields are read
+depends on the kind:
+
+| `Kind` | Means | Fields read |
+|---|---|---|
+| `KindTerm` | a literal terminal | `Literal`, `CaseSensitive`, `HasCaseSens`, `TokenName` |
+| `KindRef` | a reference to another production | `Name`, `Debt` |
+| `KindToken` | a builtin lexer token, such as `#NR` | `Name` |
+| `KindRegex` | a regex terminal | `Pattern`, `Flags` |
+| `KindOpt` | zero or one | `Inner` |
+| `KindStar` | zero or more | `Inner`, `DebtGuard` |
+| `KindPlus` | one or more | `Inner` |
+| `KindRep` | a counted repetition | `Inner`, `Min`, `Max` |
+| `KindGroup` | a nested alternation | `Alts` |
+| `KindProse` | RFC 5234 prose, as in `NR = <number>` | `Text` |
+
+`Max` is `bnf.MaxInfinity` (`1 << 30`) for an unbounded repetition.
+
+`TokenName` is the preferred lexer token name, set when a terminal came
+from a production that names it (`PL = "+"` gives `#PL`). Without it the
+emitter derives a name from the literal, which for punctuation degrades
+to `#T`, `#T1` and so on.
+
+`KindProse` is informational: it describes a terminal in English rather
+than defining one. It is accepted only as the entire body of a
+production naming a builtin token, where it documents the token the
+lexer already provides. Anywhere else there is nothing to compile, and
+it is an error.
+
+### `type SrcSpan`
+
+```go
+type SrcSpan struct {
+    S int // start offset, inclusive
+    E int // end offset, exclusive
+    R int // row of the start, 1-based
+    C int // column of the start, 1-based
+}
+```
+
+Offsets are in the same units the front-end's own engine tokens use, so
+a front-end copies `sI`, `rI` and `cI` straight across with no
+arithmetic. Those units are runtime-native: Go counts **bytes** and
+TypeScript counts UTF-16 code units, the same divergence the engine
+already records for token positions. Convert at the boundary that knows
+the document encoding; nothing here can, because the IR does not hold
+the source text.
+
+`R` and `C` are 1-based, so zero in either means "not recorded". The
+span is reached through a pointer on `Element` and `Production` for the
+same reason: `SrcSpan{S: 0, E: 0}` is a real empty span at the start of
+a file.
+
+Spans are optional everywhere. A front-end that records them gets ranged
+compile errors; one that does not compiles to exactly the same grammar.
+
+### `const MaxInfinity = 1 << 30`
+
+The unbounded upper bound on a repetition, standing in for TypeScript's
+`Infinity`.
+
+## Semantic actions
+
+### `type ActionFn`, `type ActionsMap`
+
+```go
+type ActionFn = tabnas.AltAction
+type ActionsMap map[string][]ActionFn
+```
+
+A slice per ref, so several functions can share one; they run in order.
+
+### `func AttachActions(spec *tabnas.GrammarSpec, actions ActionsMap) error`
+
+Binds user actions to a spec in place. A ref is `@rule:phase:mark`,
+where phase is `o` or `c`:
+
+```go
+err := bnf.AttachActions(spec, bnf.ActionsMap{
+    "@op:o:INC": {fn},
+})
+```
+
+Marks exist only when the spec was compiled with `Marks: true`. A ref
+that matches nothing is an error, not a silent no-op.
+
+Each call allocates fresh ref names past whatever the spec already
+holds, so a second call cannot overwrite the first call's functions.
+
+### `func AttachActionSlots(spec *tabnas.GrammarSpec, refNames []string) error`
+
+Declares slots by name without supplying functions, for a pure-data spec
+that cannot carry closures. Alternate actions only: a rule-phase ref is
+refused.
+
+### `func MarkListing(spec *tabnas.GrammarSpec) string`
+
+The compiler-assigned marks, one per line, as
+`rule  phase:mark  what`:
+
+```
+op  o:INC  s:#INC
+op  o:DEC  s:#DEC
+```
+
+A mark comes from the alternate's first element. Duplicates within a
+rule are suffixed `~2`, `~3` and so on. Removed rules contribute no
+lines.
+
+## Serialising
+
+### `func SpecToJSON(spec *tabnas.GrammarSpec, indent int) string`
+### `func SpecToData(spec *tabnas.GrammarSpec) map[string]any`
+
+JSON text, and the same content as a data tree. Both return an empty
+result on failure.
+
+### `func SpecToJSONErr(...) (string, error)`
+### `func SpecToDataErr(...) (map[string]any, error)`
+
+The same two with the failure surfaced. The signatures of the first pair
+are kept so existing callers do not break; prefer these anywhere the
+output is not immediately read by a person.
+
+### `func ToRecognitionSpec(spec *tabnas.GrammarSpec) (map[string]any, error)`
+
+Strips the tree and value builders, leaving a grammar that recognises
+and builds nothing. Refuses when control logic is still a closure, which
+means a grammar needing a probe dispatcher compiled without builtins.
+
+### `func ToPureSpec(spec *tabnas.GrammarSpec) (map[string]any, error)`
+
+Reduces a spec to pure, function-free data. Requires a `Builtins: true`
+compile, and says so when it does not get one:
+
+```
+demo: spec still contains closures; convert with `builtins: true` for
+pure-data output. Stray ref(s): @abnf_a0, @abnf_a1
+```
+
+### `func ToJsonic(value any, strict bool, indent int) string`
+
+Serialises a function-free value as jsonic text.
+
+## Helpers
+
+| Function | Returns |
 |---|---|
-| Struct literal | `map[string]any` |
-| Tuple / empty literal | `[]any` |
-| String, enum literal, char-as-string | `string` |
-| Number (any base, float, char-as-number) | `float64` |
-| Integer too large for an exact `float64` | `*big.Int` |
-| Boolean | `bool` |
-| Null | `nil` |
-| Tagged enum (`EnumTag` set) | `map[string]any{tag: name}` |
+| `BuiltinTokens() map[string]string` | The bareword-to-token map: `NR`, `ST`, `TX`, `VL` to `#NR`, `#ST`, `#TX`, `#VL`. |
+| `EscapeRegexp(s string) string` | The literal with regex metacharacters quoted: `a.b*c` gives `a\.b\*c`. |
+| `IsEffectivelyCaseSensitive(el *Element) bool` | Whether a literal's case actually matters. True when set explicitly, and true for a literal with no ASCII letter in it. |
+| `TermKey(el *Element) string` | A terminal's identity for token allocation: `cs:+`, `ci:if`. |
+| `RefsIn(alt Sequence, out map[string]bool)` | Collects the rule references in a sequence into `out`. |
+| `IsProseName(name string) bool` | Whether a prose text is a compiler directive, which means wrapped in angle brackets. |
 
-## ZON syntax
+### `const VERSION`
 
-ZON is **not** a superset of JSON. It uses Zig anonymous-struct
-syntax. The plugin disables the bare `{`, `[`, `]` openers and rebinds
-the key/value separator to `=`.
+This module's version. It must equal `ts/package.json` `"version"`; a
+drift test in each runtime enforces it.
 
-### Structs (maps)
+## Metadata on the emitted spec
 
-Open with `.{`, contain `.field = value` pairs separated by commas,
-close with `}`. Field names are identifiers
-(`[A-Za-z_][A-Za-z0-9_]*`); the leading dot is stripped from the key. A
-name that is not a legal identifier is written `.@"..."` — any string
-literal, with the same escapes — and a struct may not repeat a name.
-
-```
-.{ .a = 1, .b = 2 }       => map[string]any{"a": 1, "b": 2}
-.{ .a = .{ .b = 1 } }     => map[string]any{"a": map[string]any{"b": 1}}
-.{ .@"a b" = 1 }          => map[string]any{"a b": 1}
-.{ .a = 1, .a = 2 }       => error: duplicate struct field name
-```
-
-### Tuples (lists)
-
-Also open with `.{`, but contain bare values (no `.field =`), separated
-by commas, and close with `}`. Produces a `[]any`.
-
-```
-.{ 1, 2, 3 }              => []any{1, 2, 3}
-.{ .{ 1, 2 }, .{ 3, 4 } } => []any{[]any{1, 2}, []any{3, 4}}
-```
-
-The struct-vs-tuple decision is made at lex time by peeking past `.{`:
-if the next significant token is a field name (`.identifier` or
-`.@"..."`) followed by `=`, it is a struct; otherwise a tuple.
-
-### Empty literal
-
-An empty `.{}` parses as an **empty list** (`[]any{}`).
-
-```
-.{}                       => []any{}
-```
-
-### Trailing commas
-
-Allowed before `}` in both structs and tuples.
-
-```
-.{ .a = 1, }              => map[string]any{"a": 1}
-.{ 1, 2, 3, }             => []any{1, 2, 3}
-```
-
-### Scalars
-
-| Construct | Example | Result |
-|---|---|---|
-| Integer | `42` | `float64(42)` |
-| Float | `3.14` | `float64(3.14)` |
-| Hex | `0x2a` | `float64(42)` |
-| Octal | `0o52` | `float64(42)` |
-| Binary | `0b101010` | `float64(42)` |
-| Hex float | `0x1.8p1` | `float64(3)` |
-| Exponent | `1e5` | `float64(100000)` |
-| Digit separator | `1_000_000` | `float64(1000000)` |
-| Infinity / NaN | `inf`, `-inf`, `nan` | `math.Inf(1)`, `math.Inf(-1)`, `math.NaN()` |
-| Big integer | `36893488147419103231` | a `*big.Int` |
-| Boolean | `true`, `false` | `true`, `false` |
-| Null | `null` | `nil` |
-| String | `"hello"` | `"hello"` |
-| Enum literal | `.red`, `.@"a b"` | `"red"`, `"a b"` (or tagged map) |
-| Char literal | `'A'` | `"A"` (or `float64(65)`) |
-
-### Numbers are Zig numbers, not relaxed-JSON numbers
-
-The plugin replaces jsonic's number lexer with one that implements Zig's
-literal grammar exactly, so ZON's strictness is preserved:
-
-```
-+1      .5      5.      0123      00      -0
-1__0    1_      _1      0x_2A     0X2A    0O52
-0b12    0o18    1abc    1e        0b1.1   0.1.2
-```
-
-are all **rejected**, as the zig compiler rejects them. A leading `-` is a
-negation prefix and may be separated by space (`- 1`); `-nan` is not a
-literal. An integer whose exact value does not fit a `float64` is returned
-as a `*big.Int` rather than silently rounded.
-
-### Strings
-
-Double-quoted strings only (single quotes are char literals).
-Zig-flavoured escapes: `\n`, `\r`, `\t`, `\\`, `\"`, `\'`. Unknown
-escapes are an error.
-
-```
-"a\nb"                    => "a\nb"
-"a\\b"                    => "a\b"
-```
-
-### Multi-line strings
-
-Consecutive lines beginning with `\\` form one string. Each line
-contributes its text after the `\\`; lines join with `\n`. Zig lexes the
-whole run as one token and skips the whitespace between the lines, so
-**blank lines inside the run continue the literal** (contributing an empty
-line) rather than ending it.
-
-```
-\\hello
-\\world                   => "hello\nworld"
-```
-
-### Character literals
-
-Single-quoted Zig char literals: a single character, an escape (`'\n'`,
-`'\r'`, `'\t'`, `'\\'`, `'\''`, `'\"'`, `'\0'`), a hex escape `'\xNN'`,
-or a Unicode escape `'\u{...}'`. Default result is a one-character
-string; with `CharAsNumber` set, the numeric code point as `float64`.
-
-### Comments
-
-`//` line comments only; discarded. `//!` and `///` are Zig **doc**
-comments, which ZON rejects; `////` (four or more slashes) is an ordinary
-comment again. (Hash `#` and block `/* */` comments are disabled by the
-plugin.)
-
-```
-.{
-  // a comment
-  .name = "x", // trailing comment
-}                         => map[string]any{"name": "x"}
-```
-
-## Tokens
-
-| Token | Source | Meaning |
-|---|---|---|
-| `#OB` | `.{` | start of a struct (map) |
-| `#OS` | `.{` | start of a tuple (list) |
-| `#CB` | `}` | close of struct or tuple |
-| `#CL` | `=` | key/value separator |
-| `#TX` | `.ident`, `.@"..."` | field name (key) or enum literal (value) |
-| `VAL` | — | number, string, `true`/`false`/`null`, or `.enum` |
-
-`{`, `[`, `]` are not tokens — a bare `{` is a syntax error.
-
-## Grammar group tag
-
-Every grammar alternate the plugin adds carries the group tag `zon`.
-Callers can switch the ZON alts off (restoring plain jsonic) via
-`Options{Rule: &RuleOptions{Exclude: "zon"}}`:
-
-```go
-j := tabnasjsonic.Make()
-j.UseDefaults(tabnaszon.Zon, tabnaszon.Defaults)
-j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "zon"}})
-```
+`spec.Meta["provenance"]` is a `map[string]any` from each generated rule
+name to the author-written production it descends from. A compiled
+grammar carries an order of magnitude more rules than the author wrote,
+and every generated name reaches rule stacks, hover and completion, so a
+tool that shows a name to a person reads this first. It is on unless
+`ConvertOptions.Provenance` points at `false`.
 
 ## Errors
 
-`Parse` and `Jsonic.Parse` return an `error` rather than panicking. The
-error is jsonic's parse error, reporting an error code and the source
-location (row, column, position). Inputs that are valid jsonic but not
-valid ZON (such as a bare `{` opener) are errors. See the
-[differences section](concepts.md#differences-from-the-ts-version) for
-the few error-code divergences from TypeScript.
+| Type | Raised by | Carries |
+|---|---|---|
+| `*EmitError` | the five author-facing compile diagnostics | `Message`, `Rule`, `Sp`, `Cause` |
+| `*ParseError` | a grammar the IR cannot express | `Message`, `Line`, `Column`, `Cause` |
+| `*CompileError` | a grammar that cannot reduce to pure data | `Message`, `Rules` |
+| `*ActionError` | a malformed or unresolvable action ref | `Message` |
+
+All four implement `error`, and `EmitError` and `ParseError` implement
+`Unwrap`.
+
+Every message is prefixed with `ConvertOptions.Tag`, so a front-end's
+users see the notation they wrote:
+
+```
+demo: rule 'a' references unknown rule 'missing'
+```
+
+`EmitError.Sp` is populated only when the offending IR node carried a
+span, so reading it is a strict improvement on every path and a change
+of behaviour on none.
+
+A purely left-recursive production is an error return like any other:
+
+```
+demo: rule 'a' is purely left-recursive (no seed alternative); cannot
+eliminate
+```
+
+The pass that raises it panics internally with an `*EmitError` value,
+and `EmitGrammarSpec` recovers and returns it. Only `*EmitError` is
+converted that way: the other panics in this package say "internal", and
+those are compiler defects rather than bad input, so they keep
+panicking.
+
+The TypeScript reference for the same surface is in
+[`../../ts/README.md`](../../ts/README.md).
