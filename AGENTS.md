@@ -212,11 +212,14 @@ itself, atomically, *after* npm accepts the publish.
 
    ```bash
    V=x.y.z
+   GH=$(npm view @tabnas/bnf@$V gitHead)
+   [ -n "$GH" ] || { echo "npm records no gitHead for $V"; exit 1; }
    for T in "ts/v$V" "go/v$V"; do
      S=$(git ls-remote origin "refs/tags/$T" | cut -f1)
      [ -n "$S" ] || { echo "missing tag $T"; exit 1; }
-     [ "$S" = "$REL" ] || { echo "$T is $S, expected $REL"; exit 1; }
+     [ "$S" = "$GH" ] || { echo "$T is $S, but npm shipped $GH"; exit 1; }
    done
+   [ "$GH" = "$REL" ] || { echo "shipped $GH, not the $REL you cleared"; exit 1; }
    ```
 
    `git ls-remote --tags origin | grep v$V` is not a check. `grep` exits 0
@@ -229,33 +232,34 @@ itself, atomically, *after* npm accepts the publish.
    directly — `release.yml` uses `git tag "$T" "$ANCHOR"`, so they are
    lightweight and there is no `^{}` to peel.
 
-   A mismatch has three causes and `head_sha` does not tell them apart —
-   the run's **publish step** does. A run that published always tags its
-   own checkout, because an existing tag on another commit makes the tags
-   step refuse unless the version is already on npm, and when it is, the
-   publish step skips. So read both steps' logs:
+   `$REL` is deliberately not what the tags are measured against. It is
+   your record of what you meant to release, and a repair can make the
+   tags agree with it while npm serves something else: publish from A,
+   lose the atomic tag push, re-capture `main` at B, and the repair tags
+   B — so a `$REL`-only loop passes while the registry still serves A.
+   `gitHead` is npm's own record of the commit the tarball was built from,
+   so that is what the tags are checked against, and `$REL` is checked
+   separately, as the CI question it actually is.
 
-   - The publish step **published** — the tags are then at this run's
-     checkout, and `head_sha` differs from `$REL` because `main` advanced
-     between your capture and that checkout. The tags agree with what
-     shipped; what shipped is not the commit you cleared CI on.
-   - It **skipped** (`already on npm — skipping publish`) and the tags
-     step logged `repairing an earlier release: anchoring to …` — the
-     tags name the commit that release shipped from, and it is `$REL`
-     that is stale: you re-dispatched a version already released from an
-     older commit.
-   - It **skipped** with no such line — no tag survived to anchor the
-     repair, so the fallback took this run's `HEAD` and **both** tags now
-     name the repair checkout while npm still serves the original run's
-     build. This is the permanent Go-module corruption; recover the
-     original run's `head_sha` and fix the tags by hand.
+   When the script exits nonzero, the line that failed says what to do. A
+   tag that is not `$GH` is wrong, and the two are not equally
+   recoverable. A wrong `ts/v$V` simply moves: npm resolves from the
+   registry, so the tag is a signpost and nothing reads it. A wrong
+   `go/v$V` does not. `proxy.golang.org` caches a module version's content
+   immutably, so once anything has fetched `v$V` that content is what
+   consumers get for good, and a corrected tag only makes Git and the
+   proxy disagree — and you cannot find out whether it has been fetched
+   without causing it, because asking the proxy is itself a fetch. Leave
+   that tag where it is and release the next patch from the right commit,
+   carrying `retract v$V` in its `go/go.mod`: the cached content stays,
+   but `go get` stops selecting the bad version and reports it as
+   retracted.
 
-   So do **not** make `head_sha` the thing you compare the tags against.
-   It is what recovers a lost `$REL`, and — read with the publish step —
-   what tells you which case you are in; it is never what the tags are
-   measured against. In the third case they are written on this run's
-   `HEAD`, so they match it while npm still serves the original, which is
-   the one case this check exists to catch.
+   The last line is a different failure. The tags are honest and `$REL` is
+   the stale capture — `main` moved before the run checked out — but what
+   shipped is then a commit you never cleared CI on, and `release.yml`
+   runs no tests of its own. Confirm `$GH` is green on `main` before
+   calling the release good.
 
 ### The engine comes first
 
