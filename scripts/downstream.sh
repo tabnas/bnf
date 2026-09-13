@@ -23,6 +23,18 @@
 # normally does for that sibling, so a failure here is about this tree and
 # not about which parser happened to be linked in.
 #
+# WHAT THIS DOES NOT PROVE, on the Go side: that a sibling can RESOLVE
+# this package. A workspace takes the module from disk and never consults
+# go.sum, so a `require` naming a version that is missing, unpublished or
+# unsummed passes here and fails in CI with `missing go.sum entry`. It
+# did, on tabnas/ebnf#20 and tabnas/gbnf#25. Resolvability is a separate
+# check and needs the release to exist first:
+#
+#     (cd <sibling>/go && GOWORK=off go build ./...)
+#
+# which is why "Releasing" asks for GOWORK=off as well as this script,
+# and why a sibling bump lands AFTER the tag rather than beside it.
+#
 # Usage:
 #   scripts/downstream.sh              # abnf ebnf gbnf
 #   scripts/downstream.sh gbnf ebnf    # just those

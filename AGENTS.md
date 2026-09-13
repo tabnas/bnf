@@ -141,6 +141,14 @@ order of authority:
    A sibling that is not checked out fails the run rather than being
    skipped. Narrow it deliberately instead:
    `make downstream PEERS="gbnf ebnf"`.
+
+   **It does not prove a sibling can resolve this package.** Its Go half
+   runs under a workspace, which takes the module from disk and never
+   consults `go.sum` — so a sibling `require` naming a version that is
+   missing, unpublished or unsummed passes here and fails in CI with
+   `missing go.sum entry`. Behaviour and resolvability are separate
+   claims; only `GOWORK=off` in the sibling makes the second one, and
+   only after the tag exists.
 2. **Both of this repo's runtimes pass their own suites.** TypeScript is
    canonical; when TS and Go disagree, TS wins.
 3. **The version constants agree** — `VERSION` in `ts/src/bnf.ts` and
