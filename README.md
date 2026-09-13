@@ -6,7 +6,7 @@ The shared compiler behind the BNF-family grammar front-ends for the
 Docs, guides, the error reference and the playground: **[tabnas.dev](https://tabnas.dev)**.
 
 This package holds **no notation of its own**. It defines an intermediate
-representation — a `Grammar` of `Production`s over `Element`s — and
+representation (a `Grammar` of `Production`s over `Element`s) and
 compiles that IR into a tabnas `GrammarSpec`. Each front-end parses one
 concrete syntax into the IR:
 
@@ -24,7 +24,7 @@ Everything hard about that second arrow lives here, and is shared:
 
 - **desugaring** repetition (`*A`, `1*A`, `m*nA`, `[A]`) into helper rules;
 - **left-recursion elimination**, rewriting a left-recursive rule into
-  iterative form so it runs on a push-down engine — including the
+  iterative form so it runs on a push-down engine, including the
   recursion hidden behind nullable sugar (`A = ["x"] A "y"`), and the
   **suffix-debt counters** that stop the generated tail loop from eating
   a token the enclosing alternative still owes;
@@ -38,7 +38,7 @@ Everything hard about that second arrow lives here, and is shared:
   through synthetic `$stepN` continuation rules.
 
 Writing a new front-end therefore means writing a parser for your
-notation that produces `Production[]` — and nothing else.
+notation that produces `Production[]`, and nothing else.
 
 ## The IR
 
@@ -69,8 +69,8 @@ type Grammar = { productions: Production[] }
 `caseSensitive` exists because ABNF quoted strings are case-*insensitive*
 by default while GBNF's are case-sensitive: the front-end states the
 intent and the emitter lowers it (case-folding regex, or a plain fixed
-token). `regex` is how character classes arrive — GBNF's `[a-z]`,
-ABNF's `%x41-5A` — since the engine matches those with a lexer matcher
+token). `regex` is how character classes arrive (GBNF's `[a-z]`,
+ABNF's `%x41-5A`), since the engine matches those with a lexer matcher
 rather than a rule per character.
 
 ## Usage
@@ -95,7 +95,7 @@ Object.keys(spec.rule).includes('val')   // => true
 | Option | Effect |
 |---|---|
 | `start` | Start rule name (default: the first production). |
-| `tag` | Group tag stamped on every emitted alt (default `'bnf'`; front-ends pass their own, e.g. `'abnf'`). |
+| `tag` | Group tag stamped on every emitted alt (default `'bnf'`; front-ends pass their own, for example `'abnf'`). |
 | `builtins` | Emit probe dispatch and tree building as engine `$`-builtin refs instead of closures, keeping the spec function-free and serializable. |
 | `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
 | `wordKeywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. For tokenised, keyword-rich languages; leave off for char-level grammars. |
