@@ -52,7 +52,7 @@ spec, err := bnf.EmitGrammarSpec(&bnf.Grammar{
 ```
 
 A `Sequence` is a slice of `*Element`, and an element's `Kind` picks what
-it is — a rule reference, a lexer token, or a literal terminal.
+it is: a rule reference, a lexer token, or a literal terminal.
 
 Also exported: `EliminateLeftRecursion`, for a front-end that wants to
 inspect or test the rewritten IR on its own; `AttachActions` and
@@ -64,10 +64,10 @@ to list the alternate marks a grammar produced; and `SpecToJSON` /
 
 Full documentation follows the [Diátaxis](https://diataxis.fr) framework:
 
-- [Tutorial](doc/tutorial.md) — a guided first compile, start to finish.
-- [How-to guide](doc/guide.md) — short recipes for individual tasks.
-- [Reference](doc/reference.md) — the public API and every option.
-- [Concepts](doc/concepts.md) — the IR contract, the compiler passes, and
+- [Tutorial](doc/tutorial.md). A guided first compile, start to finish.
+- [How-to guide](doc/guide.md). Short recipes for individual tasks.
+- [Reference](doc/reference.md). The public API and every option.
+- [Concepts](doc/concepts.md). The IR contract, the compiler passes, and
   how the Go version differs from TypeScript.
 
 For the canonical TypeScript implementation, see
