@@ -38,6 +38,7 @@ are not:
 | `ts/src/spec.ts` | Spec-level transforms: recognition/pure lowering, jsonic serialisation, user-action attachment. Operates on an emitted `GrammarSpec`. |
 | `ts/src/bnf.ts` | Package entry; re-exports the public surface. |
 | `go/` | Go port (follows TS). |
+| `scripts/downstream.sh` | Runs the front-end suites against this working tree (`make downstream`). The gate CI here cannot be. |
 
 ## Provenance, and why the tests live downstream
 
@@ -52,6 +53,18 @@ recursion, round-trip rendering, and a conformance run over 68
 third-party `.abnf` files. After the split, all 300 of its tests passed
 unchanged. When you change something here, run that suite as well as
 this package's own; a green build here proves much less.
+
+**This repo's CI does not run any of it.** `deps:` in `.github/workflows/ci.yml`
+clones what this package builds *against*, never what builds against it, so
+every front-end suite is downstream of a green run here. tabnas/bnf#41 is
+what that costs: `0.1.12` emitted correctly, the front-ends discarded part
+of it, and 185 gbnf tests plus 1 ebnf test were red for two weeks while
+this repo stayed green throughout. `make downstream` is the local answer;
+closing it in CI needs a downstream step in
+`tabnas/.github`'s `polyglot-ci.yml` and a matching `with:` here, and
+**neither file is session-writable** — `.github/workflows/*` takes a
+maintainer running tabnas/admin `rollout/apply-ci-folders.sh`
+(admin DECISIONS.md ADR-8).
 
 ## Authority and alignment rules
 
@@ -92,6 +105,7 @@ unless stated:
 
 ```bash
 make build && make test      # both runtimes
+make downstream              # the front-end suites, against this tree
 ```
 
 Narrower, when iterating:
@@ -110,8 +124,23 @@ order of authority:
 
 1. **The downstream suites stay green.** `@tabnas/abnf`'s suite is the
    verification oracle for this compiler (see "Provenance" above), and
-   `gbnf` and `ebnf` sit on the same emit pipeline. Run those suites in
-   the sibling checkouts before considering an emit-pipeline change done.
+   `gbnf` and `ebnf` sit on the same emit pipeline. `make downstream`
+   runs all three against this working tree and is what "done" means for
+   an emit-pipeline change — CI here cannot do it for you, so nothing but
+   running it stands between a correct emitter and tabnas/bnf#41.
+
+   It hands each sibling this tree the way npm would deliver it
+   (`npm pack`, so only what `"files"` publishes) and points its Go module
+   at `go/` through a workspace file in a temp dir. Every checkout is left
+   exactly as found, failures included, and no `go.mod` is touched. Each
+   sibling is built before it is tested: abnf's `pretest` fetches its
+   conformance corpus rather than building, so `npm test` there otherwise
+   grades a stale `dist/` — which reads exactly like a failure in this
+   tree.
+
+   A sibling that is not checked out fails the run rather than being
+   skipped. Narrow it deliberately instead:
+   `make downstream PEERS="gbnf ebnf"`.
 2. **Both of this repo's runtimes pass their own suites.** TypeScript is
    canonical; when TS and Go disagree, TS wins.
 3. **The version constants agree** — `VERSION` in `ts/src/bnf.ts` and
@@ -141,8 +170,9 @@ itself, atomically, *after* npm accepts the publish.
    `go/bnf.go`. They are held equal by `ts/test/version.test.*` and
    `go/version_test.go`. (No generated registry here; that is parser's.)
 2. Verify: `(cd ts && npm run build && npm test)`,
-   `(cd go && GOWORK=off go test ./...)`, and **the downstream suite** — a green build here proves much less, per
-   "Provenance" above.
+   `(cd go && GOWORK=off go test ./...)`, and **`make downstream`** — a
+   green build here proves much less, per "Provenance" above. What you
+   are about to publish is immutable; the front-ends are where it shows.
 3. **Merge the bump through a reviewed PR.** That is the house convention
    and what `release.yml`'s own header describes. A direct push to `main`
    is a recovery path, not the normal one: CI still gates it, but nothing
