@@ -30,6 +30,14 @@
 # A sibling that is not checked out FAILS the run rather than being
 # skipped: a gate that passes because it found nothing to run is worse
 # than no gate.
+#
+# What each sibling is sitting on is printed, and a checkout behind its
+# own tracking ref is called out. Grading a feature branch is legitimate,
+# so that is a warning rather than a refusal -- but it must be VISIBLE.
+# A stale checkout does not fail, it grades the wrong tree: a `gbnf` left
+# on a pre-#23 commit reported 554/185, the exact signature of #41, from
+# a bnf tree that was fine. (Read from the tracking ref, so it is only as
+# fresh as the last fetch in that checkout.)
 
 set -euo pipefail
 
@@ -46,6 +54,19 @@ restore() {
   rm -rf "$WORK"
 }
 trap restore EXIT
+
+# What a sibling is sitting on, and whether that is behind what it last
+# fetched.
+state() {
+  local at behind
+  at="$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  at="$at $(git -C "$1" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  behind=$(git -C "$1" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || true)
+  if [ -n "$behind" ] && [ "$behind" != 0 ]; then
+    at="$at, $behind BEHIND $(git -C "$1" rev-parse --abbrev-ref '@{upstream}')"
+  fi
+  echo "[$at]"
+}
 
 missing=()
 for p in "${PEERS[@]}"; do
@@ -81,7 +102,7 @@ for p in "${PEERS[@]}"; do
   tar xzf "$TARBALL" --strip-components=1 -C "$dest"
 
   echo
-  echo "==> $p (ts)"
+  echo "==> $p (ts) $(state "$peer")"
   # Build explicitly. Most siblings rebuild in `pretest`, but abnf's
   # pretest fetches its conformance corpus instead, so `npm test` there
   # grades whatever dist/ was left lying around -- which looks exactly
