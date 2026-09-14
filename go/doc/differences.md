@@ -137,7 +137,7 @@ argument (`nested []bool`) in both ports, because it is read in exactly
 one place and threading it there is a two-argument change.
 
 Two tests pin this. `TestValueAnnotationConcurrentEmitsDoNotShareAPlan`
-runs two differently-annotated grammars through 200 concurrent emits and
+runs two differently annotated grammars through 200 concurrent emits and
 asserts each gets its own values; it also trips the race detector under
 `go test -race`. `TestConcurrentEmitsKeepTheirOwnDiagPrefix` asserts the
 user-visible symptom instead (each conversion's diagnostic names its own
