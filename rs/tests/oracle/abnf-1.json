@@ -1,0 +1,68 @@
+{
+ "name": "abnf-1",
+ "ir": {
+  "productions": [
+   {
+    "name": "pair",
+    "alts": [
+     [
+      {
+       "kind": "term",
+       "literal": "a",
+       "sp": {
+        "s": 7,
+        "e": 10,
+        "r": 1,
+        "c": 8
+       }
+      },
+      {
+       "kind": "term",
+       "literal": "b",
+       "sp": {
+        "s": 11,
+        "e": 14,
+        "r": 1,
+        "c": 12
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 0,
+     "e": 4,
+     "r": 1,
+     "c": 1
+    }
+   }
+  ]
+ },
+ "opts": {
+  "tag": "abnf"
+ },
+ "pure": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {}\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#A\": \"@~/^a/i\",\n        \"#B\": \"@~/^b/i\"\n      }\n    }\n  },\n  \"rule\": {\n    \"pair\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#A #B\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"pair\",\n              \"kind\": \"user\",\n              \"nterms\": 2\n            }\n          }\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"pair\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"a\": \"@bubble$\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"pair\"\n    }\n  }\n}",
+ "recognition": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {}\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#A\": \"@~/^a/i\",\n        \"#B\": \"@~/^b/i\"\n      }\n    }\n  },\n  \"rule\": {\n    \"pair\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#A #B\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"pair\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"pair\"\n    }\n  }\n}",
+ "recognitionError": null,
+ "cases": [
+  {
+   "source": "ab",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "ab",
+    "kids": []
+   }
+  },
+  {
+   "source": "a",
+   "accepted": false,
+   "code": "unexpected"
+  },
+  {
+   "source": "ba",
+   "accepted": false,
+   "code": "unexpected"
+  }
+ ],
+ "grammar": "pair = \"a\" \"b\""
+}

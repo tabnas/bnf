@@ -1,0 +1,23 @@
+[package]
+name = "tabnas-bnf"
+version = "0.1.16"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Shared compiler for BNF-family grammar front-ends on the tabnas parser: grammar IR in, tabnas GrammarSpec out"
+repository = "https://github.com/tabnas/bnf"
+
+[lib]
+name = "tabnas_bnf"
+path = "src/lib.rs"
+
+[dependencies]
+# The engine is consumed as a SIBLING CHECKOUT, the standard tabnas
+# development model: clone https://github.com/tabnas/parser next to this
+# repo. The `tabnas` crate is not published, so there is no registry
+# version to fall back on.
+tabnas = { path = "../../parser/rs" }
+indexmap = { version = "2.2", features = ["serde"] }
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }

@@ -1,0 +1,79 @@
+# PROPOSED workflow -- lives in ci/workflows/ for review; move to
+# .github/workflows/rust.yml to activate, per admin DECISIONS.md ADR-8.
+#
+# The Rust gate. Standalone rather than an arm of ci.yml, because ci.yml
+# calls the org-shared polyglot workflow and that takes no Rust input:
+# promoting this file needs no change in tabnas/.github.
+name: Rust
+
+# Runs on EVERY branch push, not just main, and the path lists are
+# written out twice.
+#
+# Both are deliberate, for the reasons docs.yml records: GitHub Actions
+# has no YAML anchors, so a version sharing one list between the two
+# triggers does not run at all; and restricting `push` to main while
+# leaning on `pull_request` leaves a gate that reaches a pull request
+# green because it never executed.
+on:
+  # `branches` is set explicitly. A `push` trigger that names neither
+  # branches nor tags also matches TAG pushes, and Actions does not
+  # evaluate `paths` for a tag ref -- so without this, release.yml
+  # pushing `ts/v…` and `go/v…` would run this whole gate once per tag,
+  # on a ref where the path filters mean nothing.
+  push:
+    branches: [ '**' ]
+    paths:
+      - 'rs/**'
+      - 'ts/src/**'
+      - 'ts/package.json'
+      - 'ci/rust/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'rs/**'
+      - 'ts/src/**'
+      - 'ts/package.json'
+      - 'ci/rust/**'
+      - '.github/workflows/rust.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      # Checked out into a NAMED directory. rs/Cargo.toml takes the
+      # engine as `path = "../../parser/rs"`, which resolves relative to
+      # rs/, so the engine has to sit beside this checkout rather than
+      # inside it. A bare `actions/checkout` into the workspace root
+      # leaves nowhere for the sibling to go.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          path: bnf
+
+      # Engine main, not a release: the crate is unpublished, so this is
+      # the only resolution there is. It is also the one CI already uses
+      # for Go, so both ports are measured against the same engine.
+      - name: Clone the sibling engine
+        run: git clone --depth 1 https://github.com/tabnas/parser.git parser
+
+      # Pinned to the MSRV in rs/Cargo.toml rather than to `stable`, so
+      # this fails on a change that needs a newer compiler instead of
+      # passing here and breaking for anyone honouring rust-version.
+      #
+      # NOTE for promotion: the other actions here are SHA-pinned, this
+      # one is not. It matches the form tabnas/parser's own staged
+      # ci/workflows/rust.yml uses; pin it to a SHA at promotion time if
+      # the org prefers that uniformly.
+      - name: Set up Rust MSRV
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+          components: rustfmt, clippy
+
+      # Everything lives in the script so this file and a contributor's
+      # local run cannot say different things.
+      - name: Rust gate
+        run: bnf/ci/rust/run.sh

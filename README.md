@@ -100,6 +100,14 @@ Object.keys(spec.rule).includes('val')   // => true
 | `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
 | `wordKeywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. For tokenised, keyword-rich languages; leave off for char-level grammars. |
 
+## Runtimes
+
+| Runtime | Where |
+|---|---|
+| TypeScript (canonical) | [`ts/`](ts/), the `@tabnas/bnf` package |
+| Go | [`go/`](go/), module `github.com/tabnas/bnf/go` |
+| Rust | [`rs/`](rs/), crate `tabnas-bnf` on the sibling `tabnas` crate; see [`rs/README.md`](rs/README.md) |
+
 ## Provenance
 
 This code was extracted from `@tabnas/abnf`, where it grew up alongside

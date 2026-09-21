@@ -1,0 +1,50 @@
+{
+ "name": "abnf-grammar-greet",
+ "ir": {
+  "productions": [
+   {
+    "name": "greet",
+    "alts": [
+     [
+      {
+       "kind": "term",
+       "literal": "hi",
+       "sp": {
+        "s": 64,
+        "e": 68,
+        "r": 2,
+        "c": 9
+       }
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "hello",
+       "sp": {
+        "s": 71,
+        "e": 78,
+        "r": 2,
+        "c": 16
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 56,
+     "e": 61,
+     "r": 2,
+     "c": 1
+    }
+   }
+  ]
+ },
+ "opts": {
+  "tag": "abnf"
+ },
+ "pure": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {}\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#HI\": \"@~/^hi/i\",\n        \"#HELLO\": \"@~/^hello/i\"\n      }\n    }\n  },\n  \"rule\": {\n    \"greet\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#HI\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"greet\",\n              \"kind\": \"user\",\n              \"nterms\": 1\n            }\n          }\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#HELLO\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"greet\",\n              \"kind\": \"user\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"greet\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"a\": \"@bubble$\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"greet\"\n    }\n  }\n}",
+ "recognition": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {}\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#HI\": \"@~/^hi/i\",\n        \"#HELLO\": \"@~/^hello/i\"\n      }\n    }\n  },\n  \"rule\": {\n    \"greet\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#HI\"\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#HELLO\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"greet\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"greet\"\n    }\n  }\n}",
+ "recognitionError": null,
+ "cases": [],
+ "grammar": "; Simple ABNF fixture: alternation of terminal strings.\ngreet = \"hi\" / \"hello\"\n"
+}

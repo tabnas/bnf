@@ -43,3 +43,6 @@ yarn.lock
 
 # Written by the counts script while measuring, removed after.
 .vale-counts.ini
+
+# --- Rust ---
+target/

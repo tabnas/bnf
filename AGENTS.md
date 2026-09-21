@@ -38,6 +38,8 @@ are not:
 | `ts/src/spec.ts` | Spec-level transforms: recognition/pure lowering, jsonic serialisation, user-action attachment. Operates on an emitted `GrammarSpec`. |
 | `ts/src/bnf.ts` | Package entry; re-exports the public surface. |
 | `go/` | Go port (follows TS). |
+| `rs/` | Rust port (follows TS): the `tabnas-bnf` crate. Depends on the engine's `tabnas` crate via a `path` dependency on the sibling checkout (`../../parser/rs`). Library only. Holds its emitter to the TypeScript compiler's serialised output byte for byte in `rs/tests/oracle_test.rs`. See `rs/AGENTS.md`. |
+| `ci/` | Workflows and scripts **staged** for promotion into `.github/workflows/` by someone whose credentials can write there: `ci/workflows/rust.yml` (the Rust gate), `ci/workflows/docs.yml` (the prose gate), `ci/rust/run.sh` (what the Rust gate runs). |
 | `scripts/downstream.sh` | Runs the front-end suites against this working tree (`make downstream`). The gate CI here cannot be. |
 
 ## Provenance, and why the tests live downstream
@@ -73,15 +75,26 @@ maintainer running tabnas/admin `rollout/apply-ci-folders.sh`
    downstream suites (`abnf`, `gbnf`, `ebnf`) before considering it done.
 3. The `tag` option defaults to `'bnf'`; each front-end passes its own so
    emitted alts stay attributable. Do not hard-code a notation's tag.
-4. `VERSION` in `ts/src/bnf.ts` and `go/bnf.go` MUST equal
-   `ts/package.json` "version".
+4. `VERSION` in `ts/src/bnf.ts`, `go/bnf.go` and `rs/src/lib.rs`, and
+   `version` in `rs/Cargo.toml`, MUST equal `ts/package.json` "version".
+   `rs/tests/version_test.rs` fails the build if the Rust sites drift;
+   `make version-rs V=x.y.z` bumps both of them.
 
 ## Build & test
 
 ```bash
 cd ts && npm install && npm run build && npm test
 cd go && go build ./... && go test ./...
+cd rs && cargo test --all-targets && cargo test --doc
 ```
+
+The Rust crate resolves the engine as a sibling checkout
+(`tabnas = { path = "../../parser/rs" }` in `rs/Cargo.toml`); the crate
+is unpublished, so there is no registry version to fall back on, which is
+why `ci/rust/run.sh` runs cargo **without** `--locked` and checks the
+lockfile by diffing it with the engine's version exempted. `make test-rs`
+is the fast loop; `ci/rust/run.sh` is the full gate (fmt, build, tests,
+doctests, clippy, lockfile).
 
 The repo-root `Makefile` also carries `publish-ts` and `publish-go`. Both
 **predate `release.yml` and are not the release path for anyone** — not an
@@ -104,7 +117,7 @@ The commands that prove a change is correct. Run them from the repo root
 unless stated:
 
 ```bash
-make build && make test      # both runtimes
+make build && make test      # all three runtimes
 make downstream              # the front-end suites, against this tree
 ```
 
@@ -149,12 +162,15 @@ order of authority:
    `missing go.sum entry`. Behaviour and resolvability are separate
    claims; only `GOWORK=off` in the sibling makes the second one, and
    only after the tag exists.
-2. **Both of this repo's runtimes pass their own suites.** TypeScript is
-   canonical; when TS and Go disagree, TS wins.
-3. **The version constants agree** — `VERSION` in `ts/src/bnf.ts` and
-   `go/bnf.go` MUST equal `ts/package.json` `"version"`.
-   `ts/test/bnf.test.js` and `go/version_test.go` fail the build if they
-   drift.
+2. **All of this repo's runtimes pass their own suites.** TypeScript is
+   canonical; when TS and Go or Rust disagree, TS wins. The Rust suite
+   additionally replays `rs/tests/oracle/*.json`, fixtures generated from
+   the TypeScript compiler, and fails on any byte of emitted difference.
+3. **The version constants agree** — `VERSION` in `ts/src/bnf.ts`,
+   `go/bnf.go` and `rs/src/lib.rs`, and `version` in `rs/Cargo.toml`,
+   MUST equal `ts/package.json` `"version"`. `ts/test/bnf.test.js`,
+   `go/version_test.go` and `rs/tests/version_test.rs` fail the build if
+   they drift.
 
 ## Releasing
 
@@ -173,10 +189,14 @@ agent can take: **a session's credentials cannot push tag refs —
 same credentials succeed. No loss, because the workflow creates both tags
 itself, atomically, *after* npm accepts the publish.
 
-1. Bump all **three** version sites — `ts/package.json`,
+1. Bump all **five** version sites — `ts/package.json`,
    `export const VERSION` in `ts/src/bnf.ts`, `const VERSION` in
-   `go/bnf.go`. They are held equal by `ts/test/version.test.*` and
-   `go/version_test.go`. (No generated registry here; that is parser's.)
+   `go/bnf.go`, `pub const VERSION` in `rs/src/lib.rs` and `version` in
+   `rs/Cargo.toml` (`make version-rs V=x.y.z` does the last two, and
+   `rs/Cargo.lock` follows on the next cargo command). They are held
+   equal by `ts/test/version.test.*`, `go/version_test.go` and
+   `rs/tests/version_test.rs`. (No generated registry here; that is
+   parser's.)
 2. Verify: `(cd ts && npm run build && npm test)`,
    `(cd go && GOWORK=off go test ./...)`, and **`make downstream`** — a
    green build here proves much less, per "Provenance" above. What you

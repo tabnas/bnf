@@ -15,7 +15,8 @@ const PAGES = [
   "go/doc/differences.md",
   "README.md",
   "ts/README.md",
-  "go/README.md"
+  "go/README.md",
+  "rs/README.md"
 ]
 
 const TUTORIALS = [

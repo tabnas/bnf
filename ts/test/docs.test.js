@@ -325,7 +325,7 @@ describe('docs-style', () => {
     const files = paths().map((p) => p.file)
     Assert.ok(0 < files.length, 'the gated set is not empty')
 
-    for (const r of ['README.md', 'ts/README.md', 'go/README.md']) {
+    for (const r of ['README.md', 'ts/README.md', 'go/README.md', 'rs/README.md']) {
       if (Fs.existsSync(Path.join(REPO, r))) {
         Assert.ok(files.includes(r), `${r} exists and is gated`)
       }
