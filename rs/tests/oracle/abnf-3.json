@@ -1,0 +1,164 @@
+{
+ "name": "abnf-3",
+ "ir": {
+  "productions": [
+   {
+    "name": "R",
+    "alts": [
+     [
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "group",
+        "alts": [
+         [
+          {
+           "kind": "ref",
+           "name": "A",
+           "sp": {
+            "s": 6,
+            "e": 7,
+            "r": 1,
+            "c": 7
+           }
+          },
+          {
+           "kind": "term",
+           "literal": "@",
+           "sp": {
+            "s": 8,
+            "e": 11,
+            "r": 1,
+            "c": 9
+           }
+          }
+         ]
+        ],
+        "sp": {
+         "s": 4,
+         "e": 13,
+         "r": 1,
+         "c": 5
+        }
+       },
+       "sp": {
+        "s": 4,
+        "e": 13,
+        "r": 1,
+        "c": 5
+       }
+      },
+      {
+       "kind": "ref",
+       "name": "A",
+       "sp": {
+        "s": 14,
+        "e": 15,
+        "r": 1,
+        "c": 15
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 0,
+     "e": 1,
+     "r": 1,
+     "c": 1
+    }
+   },
+   {
+    "name": "A",
+    "alts": [
+     [
+      {
+       "kind": "plus",
+       "inner": {
+        "kind": "ref",
+        "name": "ALPHA",
+        "sp": {
+         "s": 22,
+         "e": 27,
+         "r": 2,
+         "c": 7
+        }
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 16,
+     "e": 17,
+     "r": 2,
+     "c": 1
+    }
+   },
+   {
+    "name": "ALPHA",
+    "alts": [
+     [
+      {
+       "kind": "regex",
+       "pattern": "[\\u0041-\\u005a]",
+       "flags": ""
+      }
+     ],
+     [
+      {
+       "kind": "regex",
+       "pattern": "[\\u0061-\\u007a]",
+       "flags": ""
+      }
+     ]
+    ],
+    "nodeKind": "core"
+   }
+  ]
+ },
+ "opts": {
+  "tag": "abnf"
+ },
+ "pure": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#T\": \"@\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#RX___U0041__U005A\": \"@~/^[\\\\u0041-\\\\u005a]/\",\n        \"#RX___U0061__U007A\": \"@~/^[\\\\u0061-\\\\u007a]/\"\n      }\n    }\n  },\n  \"rule\": {\n    \"R\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"R$pd0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"R\",\n              \"kind\": \"user\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"R\",\n              \"kind\": \"user\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"A\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"_gen1_plus_ALPHA\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"A\",\n              \"kind\": \"user\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"A\",\n              \"kind\": \"user\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"ALPHA\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U0041__U005A\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"ALPHA\",\n              \"kind\": \"core\",\n              \"nterms\": 1\n            }\n          }\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U0061__U007A\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"ALPHA\",\n              \"kind\": \"core\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"R$pd0$probe\": {\n      \"open\": [\n        {\n          \"s\": \"#RX___U0041__U005A\",\n          \"r\": \"R$pd0$probe\",\n          \"g\": \"abnf\"\n        },\n        {\n          \"s\": \"#RX___U0061__U007A\",\n          \"r\": \"R$pd0$probe\",\n          \"g\": \"abnf\"\n        },\n        {\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"R$pd0$with\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"A\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"R$pd0$with\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"R$pd0$with$step1\",\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"R$pd0$with\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"R$pd0$with$step1\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#T\",\n          \"p\": \"A\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": false,\n              \"rule\": \"R$pd0$with$step1\",\n              \"kind\": \"helper\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"R$pd0$with$step1\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"R$pd0$no\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"A\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"R$pd0$no\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"R$pd0$no\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"R$pd0\": {\n      \"open\": [\n        {\n          \"c\": \"@probePhase0$\",\n          \"a\": \"@probeInit$\",\n          \"p\": \"R$pd0$probe\",\n          \"k\": {\n            \"pd_d\": \"#T\"\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"c\": \"@probePhase1$\",\n          \"p\": \"R$pd0$with\",\n          \"g\": \"abnf\"\n        },\n        {\n          \"c\": \"@probePhase2$\",\n          \"p\": \"R$pd0$no\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"c\": \"@probePhase0$\",\n          \"a\": \"@probeDecide$\",\n          \"r\": \"R$pd0\",\n          \"g\": \"abnf\"\n        },\n        {\n          \"a\": \"@bubble$\",\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"_gen1_star_ALPHA$alt0\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"ALPHA\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA$alt0\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen1_star_ALPHA$alt0$step1\",\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"_gen1_star_ALPHA$alt0\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"_gen1_star_ALPHA$alt0$step1\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"_gen1_star_ALPHA\"\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"_gen1_star_ALPHA$alt0$step1\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"_gen1_star_ALPHA\": {\n      \"open\": [\n        {\n          \"s\": \"#RX___U0041__U005A #RX___U0041__U005A\",\n          \"b\": 2,\n          \"p\": \"_gen1_star_ALPHA$alt0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"s\": \"#RX___U0041__U005A #RX___U0061__U007A\",\n          \"b\": 2,\n          \"p\": \"_gen1_star_ALPHA$alt0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"s\": \"#RX___U0041__U005A\",\n          \"b\": 1,\n          \"p\": \"_gen1_star_ALPHA$alt0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"s\": \"#RX___U0061__U007A #RX___U0041__U005A\",\n          \"b\": 2,\n          \"p\": \"_gen1_star_ALPHA$alt0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"s\": \"#RX___U0061__U007A #RX___U0061__U007A\",\n          \"b\": 2,\n          \"p\": \"_gen1_star_ALPHA$alt0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"s\": \"#RX___U0061__U007A\",\n          \"b\": 1,\n          \"p\": \"_gen1_star_ALPHA$alt0\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        },\n        {\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\",\n          \"s\": \"#T\",\n          \"b\": 1\n        },\n        {\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"_gen1_star_ALPHA\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"_gen1_plus_ALPHA\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"ALPHA\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen1_plus_ALPHA\",\n              \"kind\": \"helper\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen1_plus_ALPHA$step1\",\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"_gen1_plus_ALPHA\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"_gen1_plus_ALPHA$step1\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"_gen1_star_ALPHA\"\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"_gen1_plus_ALPHA$step1\",\n              \"kind\": \"helper\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"R\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"a\": \"@bubble$\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"R$pd0\": \"R\",\n      \"R$pd0$no\": \"R\",\n      \"R$pd0$probe\": \"R\",\n      \"R$pd0$with\": \"R\",\n      \"R$pd0$with$step1\": \"R\",\n      \"__start__\": \"R\",\n      \"_gen1_plus_ALPHA\": \"A\",\n      \"_gen1_plus_ALPHA$step1\": \"A\",\n      \"_gen1_star_ALPHA\": \"A\",\n      \"_gen1_star_ALPHA$alt0\": \"A\",\n      \"_gen1_star_ALPHA$alt0$step1\": \"A\"\n    }\n  }\n}",
+ "recognition": null,
+ "recognitionError": "abnf: grammar needs control functions (probe / unbounded lookahead) and cannot be emitted as a pure recognition grammar; recompile with `builtins: true`. Offending rule(s): R$pd0",
+ "cases": [
+  {
+   "source": "ab",
+   "accepted": true,
+   "value": {
+    "rule": "R",
+    "src": "",
+    "kids": []
+   }
+  },
+  {
+   "source": "a@b",
+   "accepted": true,
+   "value": {
+    "rule": "R",
+    "src": "",
+    "kids": []
+   }
+  },
+  {
+   "source": "a",
+   "accepted": true,
+   "value": {
+    "rule": "R",
+    "src": "",
+    "kids": []
+   }
+  },
+  {
+   "source": "a@",
+   "accepted": false,
+   "code": "unexpected"
+  },
+  {
+   "source": "@",
+   "accepted": false,
+   "code": "unexpected"
+  }
+ ],
+ "grammar": "R = [ A \"@\" ] A\nA = 1*ALPHA"
+}

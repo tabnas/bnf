@@ -1,0 +1,60 @@
+{
+ "name": "ir-annotation-member-count",
+ "ir": {
+  "productions": [
+   {
+    "name": "doc",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "a"
+      },
+      {
+       "kind": "ref",
+       "name": "b"
+      }
+     ]
+    ],
+    "value": {
+     "kind": "object",
+     "members": [
+      "a"
+     ]
+    }
+   },
+   {
+    "name": "a",
+    "alts": [
+     [
+      {
+       "kind": "term",
+       "literal": "a",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "b",
+    "alts": [
+     [
+      {
+       "kind": "term",
+       "literal": "b",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   }
+  ]
+ },
+ "opts": {
+  "tag": "demo"
+ },
+ "pure": null,
+ "pureError": "demo: rule 'doc' names 1 member but has 2 parts that produce a value. A value annotation names one member per part that produces a value; a literal produces no value and is not a member.",
+ "recognition": null,
+ "recognitionError": null,
+ "cases": []
+}

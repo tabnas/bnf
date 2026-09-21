@@ -5,16 +5,15 @@
 // ebnf). It compiles a grammar IR into a tabnas GrammarSpec and parses
 // no syntax itself.
 //
-// PORT STATUS: not yet implemented. The TypeScript implementation is
-// canonical and lands first by design; this package currently exposes
-// only VERSION so the module builds and the release tooling has
-// something to check. The compiler itself — desugaring, left-recursion
-// elimination, tail repeats, probe dispatch, literal lifting, token
-// allocation, first sets and chain emission — is ported in a later
-// change, mirroring ts/src/compiler.ts.
+// Lower your notation into a *Grammar, then call EmitGrammarSpec. That
+// is the whole surface a front-end needs. Behind it the pipeline mirrors
+// ts/src/compiler.ts: desugaring, left-recursion elimination, tail
+// repeats, probe dispatch, literal lifting, token allocation, first sets
+// and chain emission.
 //
-// Until then, use github.com/tabnas/abnf/go, which still carries its own
-// copy of that pipeline.
+// The TypeScript implementation stays canonical. Where the two disagree,
+// TypeScript wins, and DIVERGENCE.md records what cannot be repaired
+// yet.
 package bnf
 
 // VERSION is this module's version. It MUST equal ts/package.json

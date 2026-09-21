@@ -1,0 +1,149 @@
+{
+ "name": "abnf-grammar-addition",
+ "ir": {
+  "productions": [
+   {
+    "name": "val",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "add",
+       "sp": {
+        "s": 955,
+        "e": 958,
+        "r": 20,
+        "c": 7
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 949,
+     "e": 952,
+     "r": 20,
+     "c": 1
+    }
+   },
+   {
+    "name": "add",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "NR",
+       "sp": {
+        "s": 965,
+        "e": 967,
+        "r": 21,
+        "c": 7
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "group",
+        "alts": [
+         [
+          {
+           "kind": "ref",
+           "name": "PL",
+           "sp": {
+            "s": 970,
+            "e": 972,
+            "r": 21,
+            "c": 12
+           }
+          },
+          {
+           "kind": "ref",
+           "name": "add",
+           "sp": {
+            "s": 973,
+            "e": 976,
+            "r": 21,
+            "c": 15
+           }
+          }
+         ]
+        ],
+        "sp": {
+         "s": 968,
+         "e": 978,
+         "r": 21,
+         "c": 10
+        }
+       },
+       "sp": {
+        "s": 968,
+        "e": 978,
+        "r": 21,
+        "c": 10
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 959,
+     "e": 962,
+     "r": 21,
+     "c": 1
+    }
+   },
+   {
+    "name": "NR",
+    "alts": [
+     [
+      {
+       "kind": "prose",
+       "text": "number",
+       "sp": {
+        "s": 985,
+        "e": 993,
+        "r": 23,
+        "c": 6
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 980,
+     "e": 982,
+     "r": 23,
+     "c": 1
+    }
+   },
+   {
+    "name": "PL",
+    "alts": [
+     [
+      {
+       "kind": "term",
+       "literal": "+",
+       "sp": {
+        "s": 999,
+        "e": 1002,
+        "r": 24,
+        "c": 6
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 994,
+     "e": 996,
+     "r": 24,
+     "c": 1
+    }
+   }
+  ]
+ },
+ "opts": {
+  "tag": "abnf"
+ },
+ "pure": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#PL\": \"+\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    }\n  },\n  \"rule\": {\n    \"val\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"add\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"val\",\n              \"kind\": \"user\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"val\",\n              \"kind\": \"user\"\n            }\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"add\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#NR\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"add\",\n              \"kind\": \"user\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#PL\",\n          \"r\": \"add\",\n          \"a\": \"@fold$\",\n          \"k\": {\n            \"fold$\": {\n              \"cN\": 1\n            }\n          },\n          \"g\": \"abnf,comma\"\n        },\n        {\n          \"a\": \"@fold$\",\n          \"k\": {\n            \"fold$\": {}\n          },\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"val\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"a\": \"@bubble$\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"val\"\n    }\n  }\n}",
+ "recognition": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#PL\": \"+\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    }\n  },\n  \"rule\": {\n    \"val\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"p\": \"add\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"add\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#NR\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#PL\",\n          \"r\": \"add\",\n          \"g\": \"abnf,comma\"\n        },\n        {\n          \"g\": \"abnf\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"val\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"val\"\n    }\n  }\n}",
+ "recognitionError": null,
+ "cases": [],
+ "grammar": "; Integer addition — the grammar shared with the @tabnas/parser README,\n; where it is also built by hand directly against the engine.\n;\n; Exercises two dialect features whose whole point is that this grammar\n; renders back out of a live engine exactly as written (see\n; test/roundtrip.test.js):\n;\n;   - `NR = <number>` is RFC 5234 prose-val. Prose describes a terminal\n;     rather than defining one, which for a built-in lexer token is\n;     exactly right: the lexer already supplies `NR`, so the line\n;     documents the terminal and compiles to nothing.\n;\n;   - `PL = \"+\"` is a production whose whole body is one literal, i.e. a\n;     lexical definition. It compiles to the named fixed token `#PL`\n;     rather than to a rule, matching the hand-written grammar's\n;     `fixed: { token: { '#PL': '+' } }`.\n;\n; `val` is a pure alias for `add`; it survives compilation rather than\n; being inlined away, so it is still a rule (and an AST node) here.\nval = add\nadd = NR [ PL add ]\n\nNR = <number>\nPL = \"+\"\n"
+}

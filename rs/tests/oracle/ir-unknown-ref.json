@@ -1,0 +1,26 @@
+{
+ "name": "ir-unknown-ref",
+ "ir": {
+  "productions": [
+   {
+    "name": "doc",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "nope"
+      }
+     ]
+    ]
+   }
+  ]
+ },
+ "opts": {
+  "tag": "demo"
+ },
+ "pure": null,
+ "pureError": "demo: rule 'doc' references unknown rule 'nope'",
+ "recognition": null,
+ "recognitionError": null,
+ "cases": []
+}
