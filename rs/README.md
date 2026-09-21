@@ -143,6 +143,11 @@ not the grammar:
   `GrammarSpec::install` (or `bind`) registers them on an engine by name.
   User actions are `Arc` closures in an `ActionsMap`, a list in
   attachment order.
+- **Element nesting is refused past 128 levels.** A grammar is untrusted
+  input and the passes over an element are recursive, so a grammar that
+  nests one element deeper than that is an error return naming the rule.
+  TypeScript keeps going several hundred levels further before raising a
+  catchable `RangeError`. No grammar an author writes comes close.
 - **Diagnostics are prefixed per thread.** The tag of the most recent
   emit on the current thread prefixes every diagnostic, so two threads
   compiling two notations never see each other's prefix.
@@ -158,13 +163,15 @@ cargo test --doc
 ```
 
 Or, from the repository root, `make test-rs`. For what CI would say,
-including formatting and the lockfile check, run `ci/rust/run.sh`.
+including formatting and the `Cargo.lock` check, run `ci/rust/run.sh`.
 
 The suite ports the TypeScript and Go tests that pin behaviour through
 the IR, and holds the emitter to the canonical compiler with the oracle
-fixtures under `tests/oracle/`: each one is an IR exactly as a front-end
-handed it over, the strict-jsonic text TypeScript emitted for it, and the
-engine's verdict on a few sources.
+fixtures under `tests/oracle/`: each one is an IR, either exactly as a
+front-end handed it over or written by hand for a shape no front-end
+emits, together with the strict-jsonic text TypeScript emitted for it (or
+the message TypeScript refused it with) and the engine's verdict on a few
+sources.
 
 ## License
 

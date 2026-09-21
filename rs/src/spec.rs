@@ -744,6 +744,85 @@ fn is_ident(k: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
+/// The largest magnitude an integer can have and still be exactly a
+/// JavaScript number: 2^53 - 1.
+const JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// JavaScript's `String(n)` for an `f64`, i.e. ECMAScript
+/// `Number::toString` with radix 10.
+///
+/// The canonical serialiser is `String(v)` (`ts/src/spec.ts`), so the
+/// emitted text only equals TypeScript's when this reproduces it. A
+/// narrowing `as i64` does not: it saturates every magnitude above
+/// `i64::MAX` to `9223372036854775807`, and it cannot express the
+/// switch to exponent form that JavaScript makes at `1e21`.
+///
+/// The shape is the spec's: take the shortest decimal digit string `s`
+/// (`k` digits) that reads back as the same `f64`, with `n` the
+/// position of the decimal point, then print plain decimal while `n`
+/// stays inside `(-6, 21]` and exponent form outside it.
+fn js_number(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    // Covers -0.0, which JavaScript prints as "0".
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    let magnitude = f.abs();
+    // The spec's `s` and `n`: the fewest digits that read back as this
+    // same `f64`, correctly rounded. Rust's fixed-precision `{:e}` is
+    // correctly rounded and breaks ties to even, which is the rule the
+    // spec states for the case two digit strings are equally close, so
+    // the first width that round-trips gives the spec's digits. Plain
+    // `{:e}` (shortest) is NOT a substitute: it breaks those ties the
+    // other way, and prints 137839762462415.63 where JavaScript prints
+    // 137839762462415.62. Seventeen digits always suffice for an `f64`.
+    let (digits, exponent) = (0..17u32)
+        .map(|p| format!("{magnitude:.*e}", p as usize))
+        .find(|text| text.parse::<f64>() == Ok(magnitude))
+        .map(|text| {
+            let (mantissa, exponent) = text.split_once('e').expect("{:e} emits an exponent");
+            (
+                mantissa.chars().filter(|c| *c != '.').collect::<String>(),
+                exponent
+                    .parse::<i32>()
+                    .expect("{:e} emits an integer exponent"),
+            )
+        })
+        .expect("17 significant digits round-trip every finite f64");
+    let k = digits.len() as i32;
+    let n = exponent + 1;
+
+    let body = if k <= n && n <= 21 {
+        // 12 -> "12", 1e19 -> "10000000000000000000"
+        format!("{}{}", digits, "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        // 1.5 -> "1.5"
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        // 1e-6 -> "0.000001"
+        format!("0.{}{}", "0".repeat(-n as usize), digits)
+    } else {
+        // 1e21 -> "1e+21", 1e-7 -> "1e-7"
+        let e = n - 1;
+        let head = if k == 1 {
+            digits.clone()
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        format!("{}e{}{}", head, if e < 0 { '-' } else { '+' }, e.abs())
+    };
+    if f < 0.0 {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
 /// Serialise a (function-free) value as jsonic text. Regular expressions
 /// are already `@/pattern/flags` strings in the data.
 pub fn to_jsonic(value: &Value, opts: JsonicOptions) -> String {
@@ -792,18 +871,23 @@ pub fn to_jsonic(value: &Value, opts: JsonicOptions) -> String {
     };
 
     fn number(n: &serde_json::Number) -> String {
+        // An integer small enough to be a JavaScript number exactly
+        // prints the same either way, so keep the exact form. Beyond
+        // 2^53 the canonical compiler never HAD the exact value — its
+        // number is an `f64` — so round the way it did before printing.
         if let Some(i) = n.as_i64() {
-            return i.to_string();
+            if i.unsigned_abs() <= JS_SAFE_INTEGER {
+                return i.to_string();
+            }
+            return js_number(i as f64);
         }
         if let Some(u) = n.as_u64() {
-            return u.to_string();
+            if u <= JS_SAFE_INTEGER {
+                return u.to_string();
+            }
+            return js_number(u as f64);
         }
-        let f = n.as_f64().unwrap_or(0.0);
-        if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e21 {
-            format!("{}", f as i64)
-        } else {
-            f.to_string()
-        }
+        js_number(n.as_f64().unwrap_or(0.0))
     }
 
     fn ser(

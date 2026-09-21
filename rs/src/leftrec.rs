@@ -193,51 +193,94 @@ pub(crate) fn find_leading_ref_cycle_members(prods: &[Production]) -> IndexSet<S
         by_name: &'a IndexMap<&'a str, &'a Production>,
     }
 
-    fn strong_connect(
+    // Tarjan's algorithm, with the depth-first search carried on an
+    // explicit stack rather than the call stack. A grammar is untrusted
+    // input and its reference graph is as deep as the author made it: a
+    // chain of a few thousand rules is enough to overflow a recursive
+    // walk, and a Rust stack that runs out aborts the process. The order
+    // of visits, of the lowlink updates and of the popped components is
+    // exactly the recursive one.
+    struct Frame {
+        name: String,
+        targets: Vec<String>,
+        next: usize,
+    }
+
+    fn open_frame(
         name: &str,
         st: &mut State<'_>,
         leading_refs: &dyn Fn(&Production) -> Vec<String>,
-    ) {
+    ) -> Frame {
         st.indices.insert(name.to_string(), st.index);
         st.lowlinks.insert(name.to_string(), st.index);
         st.index += 1;
         st.stack.push(name.to_string());
         st.on_stack.insert(name.to_string());
-
-        if let Some(prod) = st.by_name.get(name) {
-            for target in leading_refs(prod) {
-                if !st.indices.contains_key(&target) {
-                    strong_connect(&target, st, leading_refs);
-                    let low = st.lowlinks[name].min(st.lowlinks[&target]);
-                    st.lowlinks.insert(name.to_string(), low);
-                } else if st.on_stack.contains(&target) {
-                    let low = st.lowlinks[name].min(st.indices[&target]);
-                    st.lowlinks.insert(name.to_string(), low);
-                }
-            }
+        let targets = st
+            .by_name
+            .get(name)
+            .map(|prod| leading_refs(prod))
+            .unwrap_or_default();
+        Frame {
+            name: name.to_string(),
+            targets,
+            next: 0,
         }
+    }
 
-        if st.lowlinks[name] == st.indices[name] {
-            let mut scc = Vec::new();
-            loop {
-                let w = st.stack.pop().expect("the SCC root is on the stack");
-                st.on_stack.shift_remove(&w);
-                let done = w == name;
-                scc.push(w);
-                if done {
-                    break;
+    fn strong_connect(
+        root: &str,
+        st: &mut State<'_>,
+        leading_refs: &dyn Fn(&Production) -> Vec<String>,
+    ) {
+        let mut frames: Vec<Frame> = vec![open_frame(root, st, leading_refs)];
+        while let Some(frame) = frames.last_mut() {
+            if frame.next < frame.targets.len() {
+                let target = frame.targets[frame.next].clone();
+                frame.next += 1;
+                if !st.indices.contains_key(&target) {
+                    let child = open_frame(&target, st, leading_refs);
+                    frames.push(child);
+                } else if st.on_stack.contains(&target) {
+                    let name = frame.name.clone();
+                    let low = st.lowlinks[&name].min(st.indices[&target]);
+                    st.lowlinks.insert(name, low);
+                }
+                continue;
+            }
+
+            let name = frames
+                .pop()
+                .expect("the frame just read is still there")
+                .name;
+            if st.lowlinks[&name] == st.indices[&name] {
+                let mut scc = Vec::new();
+                loop {
+                    let w = st.stack.pop().expect("the SCC root is on the stack");
+                    st.on_stack.shift_remove(&w);
+                    let done = w == name;
+                    scc.push(w);
+                    if done {
+                        break;
+                    }
+                }
+                let is_cycle = scc.len() > 1
+                    || (scc.len() == 1
+                        && st
+                            .by_name
+                            .get(scc[0].as_str())
+                            .is_some_and(|p| leading_refs(p).contains(&scc[0])));
+                if is_cycle {
+                    for n in scc {
+                        st.cyclic.insert(n);
+                    }
                 }
             }
-            let is_cycle = scc.len() > 1
-                || (scc.len() == 1
-                    && st
-                        .by_name
-                        .get(scc[0].as_str())
-                        .is_some_and(|p| leading_refs(p).contains(&scc[0])));
-            if is_cycle {
-                for n in scc {
-                    st.cyclic.insert(n);
-                }
+            // What the recursive call did on return: carry the child's
+            // lowlink up to the parent that pushed it.
+            if let Some(parent) = frames.last() {
+                let low = st.lowlinks[&parent.name].min(st.lowlinks[&name]);
+                st.lowlinks.insert(parent.name.clone(), low);
             }
         }
     }
@@ -269,36 +312,55 @@ fn topo_order_for_paull(prods: Vec<Production>) -> Vec<Production> {
     let mut colour: IndexMap<String, u8> = IndexMap::new(); // 0 unseen, 1 in progress, 2 done
     let mut order: Vec<Production> = Vec::new();
 
+    // Depth first, on an explicit stack for the same reason Tarjan above
+    // uses one: the graph's depth is the grammar author's choice. `Exit`
+    // is what the recursive call did after its children returned, so the
+    // post-order is unchanged.
+    enum Step {
+        Enter(String),
+        Exit(String),
+    }
+
     fn visit(
-        name: &str,
+        root: &str,
         by_name: &mut IndexMap<String, Production>,
         colour: &mut IndexMap<String, u8>,
         order: &mut Vec<Production>,
     ) {
-        if colour.get(name).copied().unwrap_or(0) != 0 {
-            return;
-        }
-        colour.insert(name.to_string(), 1);
-        let leading: Option<Vec<String>> = by_name.get(name).map(|p| {
-            p.alts
-                .iter()
-                .filter_map(|alt| alt.first().and_then(|el| el.ref_name()))
-                .filter(|n| by_name.contains_key(*n))
-                .map(str::to_string)
-                .collect()
-        });
-        match leading {
-            Some(targets) => {
-                for target in targets {
-                    visit(&target, by_name, colour, order);
+        let mut steps: Vec<Step> = vec![Step::Enter(root.to_string())];
+        while let Some(step) = steps.pop() {
+            match step {
+                Step::Enter(name) => {
+                    if colour.get(&name).copied().unwrap_or(0) != 0 {
+                        continue;
+                    }
+                    colour.insert(name.clone(), 1);
+                    let leading: Option<Vec<String>> = by_name.get(&name).map(|p| {
+                        p.alts
+                            .iter()
+                            .filter_map(|alt| alt.first().and_then(|el| el.ref_name()))
+                            .filter(|n| by_name.contains_key(*n))
+                            .map(str::to_string)
+                            .collect()
+                    });
+                    match leading {
+                        Some(targets) => {
+                            steps.push(Step::Exit(name));
+                            for target in targets.into_iter().rev() {
+                                steps.push(Step::Enter(target));
+                            }
+                        }
+                        None => {
+                            colour.insert(name, 2);
+                        }
+                    }
                 }
-                colour.insert(name.to_string(), 2);
-                if let Some(p) = by_name.get(name) {
-                    order.push(p.clone());
+                Step::Exit(name) => {
+                    colour.insert(name.clone(), 2);
+                    if let Some(p) = by_name.get(&name) {
+                        order.push(p.clone());
+                    }
                 }
-            }
-            None => {
-                colour.insert(name.to_string(), 2);
             }
         }
     }

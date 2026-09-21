@@ -640,6 +640,73 @@ pub(crate) fn set_diag_name(tag: &str) {
     DIAG_NAME.with(|name| *name.borrow_mut() = tag.to_string());
 }
 
+/// How deeply one element of the IR may nest before `emit_grammar_spec`
+/// refuses the grammar.
+///
+/// The passes over an element (desugaring, FIRST sets, factoring, the
+/// emitter itself) are written as the canonical TypeScript writes them,
+/// one recursive call per level, and a Rust stack that runs out aborts
+/// the process rather than unwinding. A grammar is untrusted input, so
+/// nesting that deep has to become an error return instead. The limit is
+/// the same one `serde_json` applies by default to a nested document, so
+/// an IR that arrives as JSON is already held to it, and it is an order
+/// of magnitude past anything a grammar author writes: the deepest
+/// nesting in the ABNF conformance corpus is in single figures.
+///
+/// TypeScript raises a catchable `RangeError` instead, several hundred
+/// levels later; `DIVERGENCE.md` records the difference.
+pub const MAX_ELEMENT_DEPTH: usize = 128;
+
+/// Refuse a grammar whose element nesting would overflow the stack of a
+/// pass that walks it. Measured with an explicit stack: finding the depth
+/// must not be able to overflow either.
+pub(crate) fn check_element_depth(grammar: &Grammar) -> Result<(), EmitError> {
+    for prod in &grammar.productions {
+        let mut roots: Vec<&Element> = Vec::new();
+        for alt in &prod.alts {
+            roots.extend(alt.iter());
+        }
+        if let Some(tail) = &prod.tail_repeat {
+            roots.extend(tail.sep.iter());
+        }
+        if let Some(helper) = &prod.probe_helper {
+            roots.extend(helper.vocab_elements.iter());
+        }
+        let mut stack: Vec<(&Element, usize)> = roots.into_iter().map(|el| (el, 1)).collect();
+        while let Some((el, depth)) = stack.pop() {
+            if depth > MAX_ELEMENT_DEPTH {
+                return Err(EmitError::at(
+                    format!(
+                        "{}: rule '{}' nests elements more than {} deep, which is \
+                         past what this compiler will walk. Split the \
+                         rule into named rules.",
+                        diag_name(),
+                        prod.name,
+                        MAX_ELEMENT_DEPTH
+                    ),
+                    &prod.name,
+                    prod.sp,
+                ));
+            }
+            match &el.kind {
+                Kind::Opt { inner }
+                | Kind::Star { inner, .. }
+                | Kind::Plus { inner }
+                | Kind::Rep { inner, .. } => stack.push((inner, depth + 1)),
+                Kind::Group { alts } => {
+                    for alt in alts {
+                        for inner in alt.iter() {
+                            stack.push((inner, depth + 1));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Built-in engine lexer tokens that a rule may reference by a bare
 /// uppercase name, mapping the name to the token the lexer emits. A user
 /// (or core) rule of the same name always wins.

@@ -82,7 +82,16 @@ function restoreInfinity(v) {
 
 function fixtureFor(name, ir, opts, sources) {
   ir = restoreInfinity(ir)
-  const live = origEmit(ir, { ...opts, builtins: true })
+  // An IR the compiler REFUSES is a fixture too: the refusal message is
+  // what a front-end shows the author, so it is graded like the text.
+  let live
+  try {
+    live = origEmit(ir, { ...opts, builtins: true })
+  }
+  catch (e) {
+    return { name, ir, opts, pure: null, pureError: String(e.message),
+      recognition: null, recognitionError: null, cases: [] }
+  }
   const pure = bnf.toJsonic(bnf.toPureSpec(live), { strict: true })
   const closure = origEmit(ir, { ...opts, builtins: false })
   let recognition = null
@@ -109,7 +118,7 @@ function fixtureFor(name, ir, opts, sources) {
       cases.push({ source, accepted: false, code: String(e.code) })
     }
   }
-  return { name, ir, opts, pure, recognition, recognitionError, cases }
+  return { name, ir, opts, pure, pureError: null, recognition, recognitionError, cases }
 }
 
 // The grammars the parser repository's ci/rust/notation-corpus.js proves
@@ -176,10 +185,26 @@ function file(grammarFile, out) {
   Fs.writeFileSync(out, JSON.stringify(fx, null, 1))
 }
 
+// Regenerate a fixture from its own IR. A fixture built from hand-written
+// IR (the `ir-*` ones, which pin shapes no front-end emits) has no grammar
+// text to go back to, so the fixture itself is the input: its `ir`, `opts`
+// and the sources of its `cases` are replayed through TypeScript again.
+// Needs no front-end, only this repository's ts/ and the engine.
+function regen(fixtureFile) {
+  const fx = JSON.parse(Fs.readFileSync(fixtureFile, 'utf8'))
+  const sources = (fx.cases || []).map((c) => c.source)
+  const out = fixtureFor(fx.name, fx.ir, fx.opts || {}, sources)
+  if (null != fx.grammar) out.grammar = fx.grammar
+  Fs.writeFileSync(fixtureFile, JSON.stringify(out, null, 1))
+  console.log(`regenerated ${fixtureFile}`)
+}
+
 const [mode, arg, arg2] = process.argv.slice(2)
 if (mode === 'corpus') corpus(arg)
 else if (mode === 'file') file(arg, arg2)
+else if (mode === 'regen') regen(arg)
 else {
-  console.error('usage: generate.cjs corpus <outdir> | file <grammar.abnf> <out.json>')
+  console.error('usage: generate.cjs corpus <outdir> | file <grammar.abnf> <out.json>' +
+    ' | regen <fixture.json>')
   process.exit(2)
 }

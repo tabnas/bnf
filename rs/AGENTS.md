@@ -26,6 +26,7 @@ this crate.
 | `tests/value_annotation_test.rs` | `go/value_annotation_test.go` |
 | `tests/class_partition_test.rs`, `tests/empty_input_test.rs` | their Go and TypeScript twins |
 | `tests/options_data_test.rs` | `go/options_data_test.go`: a front-end's options survive the reductions, strict serialisation and the engine's loader (here they are data by construction, so nothing is refused) |
+| `tests/regex_flags_test.rs` | no twin: the `RegExp` constructor's own rules on an `Element::regex` flag string, which TypeScript gets from the constructor for free and this port has to state — the flags it knows, no repeats, `u` and `v` never together, and the fixed order `RegExp.prototype.flags` reports |
 | `tests/doc_examples_test.rs` | `go/doc_examples_test.go`: the claims the crate documentation makes |
 | `tests/version_test.rs` | the version sites must agree |
 | `README.md` | the crate front page; its `rust` fences run as doctests |
@@ -59,12 +60,13 @@ cd ../../abnf/ts && npm install && npm run build
 node rs/tests/oracle/generate.cjs corpus rs/tests/oracle      # from the repo root
 ```
 
-The committed set is the ten notation-corpus cases plus the
-`abnf-grammar-*` fixtures, made with the `file` mode from abnf's own
+The committed set is the ten notation-corpus cases, the
+`abnf-grammar-*` fixtures made with the `file` mode from abnf's own
 `ts/test/grammar/*.abnf` (the two largest, `json-subset` and
-`rfc3986-uri`, are left out for size). Nothing from the third-party abnf
-conformance corpus is committed: those grammars are separately licensed
-and abnf itself never vendors them.
+`rfc3986-uri`, are left out for size), and the hand-written `ir-*` ones
+below. Nothing from the third-party abnf conformance corpus is
+committed: those grammars are separately licensed and abnf itself never
+vendors them.
 
 `ORACLE_DIR=<dir> cargo test --test oracle_test` grades any directory of
 fixtures, which is how that corpus (68 `.abnf` files, fetched by
@@ -89,6 +91,42 @@ TypeScript engine returns `R` with an empty `src` and no kids and this
 engine the full tree; the parser repository's own
 `ci/rust/notation-corpus.js` reports the same difference. It is the
 engine's, not this compiler's.
+
+A second register, `ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS`, holds the
+cases the TypeScript engine accepts and this engine rejects from the
+same document. The one entry today is `ir-nullable-suffix`
+(`A = [ "x" ] A [ "y" ] / "z"`), asserted both ways as well.
+
+Fixtures named `ir-*` are built from hand-written IR rather than from a
+front-end, so there is no grammar text to go back to: the fixture is its
+own input, and `node tests/oracle/generate.cjs regen <fixture.json>`
+replays its `ir`, `opts` and case sources through TypeScript again.
+Those need only this repository's `ts/` and the engine, no front-end. A
+fixture whose `pureError` is set records an IR TypeScript REFUSED, and
+that refusal message is graded byte for byte like the emitted text.
+
+## Untrusted IR, and where the stack still runs out
+
+`emit_grammar_spec` measures element nesting before anything walks it
+and refuses past `MAX_ELEMENT_DEPTH` (see `src/ir.rs`), because the
+passes are recursive and a Rust stack that runs out aborts the process
+rather than unwinding. The walks over the REFERENCE graph (Tarjan's
+components and Paull's ordering in `src/leftrec.rs`) carry their own
+explicit stack for the same reason: a chain of a few thousand rules
+overflowed them when they recursed. Keep both properties when editing
+either file.
+
+What is left, and is the caller's: DROPPING a deeply nested `Element`
+recurses through the `Box` chain, so a tree the compiler refused still
+overflows the stack when it goes out of scope, measured between 10000
+and 30000 levels. Reaching that needs a front-end that can itself build
+a tree that deep; an IR that arrives as JSON cannot, since `serde_json`
+stops at 128.
+
+A bounded repetition expands into roughly two rules per count, in this
+port and in TypeScript alike, so `0*1000000a` exhausts memory in either
+runtime. That is the compiler's design, not a difference between the
+ports.
 
 ## Things that look like bugs and are not
 

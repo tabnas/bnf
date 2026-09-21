@@ -1422,3 +1422,60 @@ fn a_spec_installs_on_another_thread() {
     let handle = std::thread::spawn(move || parse_with(&spec, "7").expect("parse"));
     assert_eq!(handle.join().unwrap()["src"], "7");
 }
+
+// ---- untrusted IR shapes ------------------------------------------
+
+// A grammar is untrusted input, and the passes over an element are
+// recursive. Nesting past the budget is an ERROR RETURN: a Rust stack
+// that runs out aborts the process, which is not a failure mode a
+// compiler may offer a grammar author. TypeScript raises a catchable
+// RangeError several hundred levels later instead; DIVERGENCE.md
+// records that difference.
+#[test]
+fn nesting_past_the_budget_is_refused_not_a_stack_overflow() {
+    let mut el = term("a");
+    for _ in 0..200 {
+        el = opt(el);
+    }
+    let err = emit_grammar_spec(&Grammar::new(vec![prod("doc", vec![vec![el]])]), &demo())
+        .expect_err("deeply nested elements are refused");
+    assert!(
+        err.message.contains("nests elements more than 128 deep"),
+        "message was: {}",
+        err.message
+    );
+    assert_eq!(err.rule.as_deref(), Some("doc"));
+
+    // The same for a group, which nests through its alternatives.
+    let mut el = term("a");
+    for _ in 0..200 {
+        el = group(vec![vec![el]]);
+    }
+    assert!(emit_grammar_spec(&Grammar::new(vec![prod("doc", vec![vec![el]])]), &demo()).is_err());
+
+    // Just inside the budget still compiles.
+    let mut el = term("a");
+    for _ in 0..100 {
+        el = opt(el);
+    }
+    assert!(emit_grammar_spec(&Grammar::new(vec![prod("doc", vec![vec![el]])]), &demo()).is_ok());
+}
+
+// The reference graph is as deep as the grammar author made it, so the
+// walks over it (Tarjan's components, Paull's ordering) carry their own
+// stack. A chain of a few thousand rules overflowed a recursive walk.
+#[test]
+fn a_long_reference_chain_compiles() {
+    const N: usize = 3000;
+    let mut prods: Vec<Production> = (0..N)
+        .map(|i| {
+            prod(
+                &format!("r{i}"),
+                vec![vec![reference(&format!("r{}", i + 1))]],
+            )
+        })
+        .collect();
+    prods.push(prod(&format!("r{N}"), vec![vec![term("a")]]));
+    let spec = emit_grammar_spec(&Grammar::new(prods), &demo()).expect("a long chain compiles");
+    assert!(spec.rule.contains_key("r0"));
+}

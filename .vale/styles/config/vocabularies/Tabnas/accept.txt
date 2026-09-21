@@ -9,6 +9,7 @@
 # other as a misspelling.
 
 [Aa]BNF
+[Bb]ackreferences
 [Bb]areword
 [Bb]nf
 [Bb]uiltins
@@ -22,6 +23,7 @@
 [Ll]exes
 [Ll]exing
 [Ll]ookahead
+[Ll]ookaround
 [Mm]atchers
 [Mm]etacharacters
 [Nn]ullable
@@ -31,6 +33,7 @@
 [Rr]epo
 [Rr]untimes
 [Ss]cannerless
+[Ss]erde
 [Ss]erializable
 [Ss]uperset
 [Tt]abnas

@@ -27,6 +27,30 @@ JavaScript accepts and the `regex` crate does not (lookaround,
 backreferences) is refused by the Rust port with the token named, where
 TypeScript emits it and the Rust engine refuses it at install.
 
+The FLAGS are checked in both, at the same points and against the same
+rules — `d g i m s u v y`, no repeats, `u` and `v` never together —
+because TypeScript gets them from the `RegExp` constructor and the Rust
+port states them (`canonical_regex_flags` in `src/emit.rs`). Only the
+wording of the refusal differs, as it does for the pattern above. The
+constructor also REPORTS the flags in that fixed order rather than the
+order they were written, and the canonical compiler serialises what it
+reports, so the Rust port emits them in the same order. `v` is emitted
+by both and the Rust engine alone refuses it at install; that is the
+engine's limit, not this compiler's.
+
+### Element nesting is refused past 128 levels
+
+The passes over an element walk it recursively, as the canonical
+compiler does. A Rust stack that runs out aborts the process instead of
+unwinding, and a grammar is untrusted input, so `emit_grammar_spec`
+measures the nesting first (iteratively) and refuses a grammar that
+nests one element more than `MAX_ELEMENT_DEPTH` deep, naming the rule.
+TypeScript keeps going several hundred levels further and then raises a
+catchable `RangeError`. The limit is `serde_json`'s own default for a
+nested document, so an IR that arrives as JSON is already held to it,
+and it is far past anything an author writes: the deepest nesting in the
+ABNF conformance corpus is in single figures.
+
 ## Engine, observed through this compiler
 
 `R = [ A "@" ] A` with `A = 1*ALPHA` (a probe dispatcher) compiles to
@@ -36,6 +60,22 @@ full tree. This is the parser's difference, not this compiler's: the
 parser repository's `ci/rust/notation-corpus.js` reports it for the
 identical case. `rs/tests/oracle_test.rs` registers it in
 `ENGINE_VALUE_DIVERGENCES` so it cannot pass or regress silently.
+
+### A nullable suffix around hidden left recursion is not recognised
+
+`A = [ "x" ] A [ "y" ] / "z"` compiles to the same document in both
+runtimes: the suffix is nullable, so no suffix debt is owed and the tail
+loop stays greedy. On the TypeScript engine the document recognises
+`x* z y*` (`z`, `xz`, `zy`, `xzy` all parse, with `undefined` as the
+value rather than a node); on the Rust engine every one of them is
+rejected with `unexpected`, while the sources outside the language are
+rejected by both. This is the parser's difference, not this compiler's:
+the emitted text is byte identical, and the TypeScript compiler's own
+spec installed on the Rust engine is rejected in exactly the same way.
+`rs/tests/oracle/ir-nullable-suffix.json` holds the case and
+`rs/tests/oracle_test.rs` registers it in
+`ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS`, asserted both ways, so it
+cannot pass or regress silently.
 
 ## Go
 

@@ -154,3 +154,83 @@ fn compiler_options_alone_are_the_compiler_block() {
     let keys: Vec<&String> = spec.options.keys().collect();
     assert_eq!(keys, vec!["fixed", "rule", "lex"]);
 }
+
+// A front-end option is a NUMBER, and the canonical serialiser is
+// `String(v)` on a JavaScript number. Anything else changes the option
+// rather than carrying it: the narrowing `as i64` this replaced clamped
+// every magnitude above `i64::MAX` to 9223372036854775807, so `1e19`
+// left as 9223372036854775807 and `1e21` as a 22-digit integer where
+// JavaScript writes `1e+21`. Each expectation below is what
+// `String(v)` prints in node.
+#[test]
+fn option_numbers_serialise_as_javascript_prints_them() {
+    let cases: Vec<(Value, &str)> = vec![
+        // Integral, but far past what an i64 holds.
+        (json!(1e19), "10000000000000000000"),
+        (json!(1e20), "100000000000000000000"),
+        (json!(2f64.powi(63)), "9223372036854776000"),
+        (json!(2f64.powi(64)), "18446744073709552000"),
+        (json!(-1e19), "-10000000000000000000"),
+        // The switch to exponent form, which happens at 1e21 and not at
+        // the width of any integer type.
+        (json!(1e21), "1e+21"),
+        (json!(1e22), "1e+22"),
+        (json!(1.5e300), "1.5e+300"),
+        (json!(f64::MAX), "1.7976931348623157e+308"),
+        // Integral and below the switch: plain digits, no exponent.
+        (json!(1e16), "10000000000000000"),
+        (json!(100.0), "100"),
+        (json!(-0.0), "0"),
+        // The small end switches at 1e-7, not at 1e-6.
+        (json!(1e-6), "0.000001"),
+        (json!(1e-7), "1e-7"),
+        (json!(5e-324), "5e-324"),
+        (json!(0.1), "0.1"),
+        (json!(1.0 / 3.0), "0.3333333333333333"),
+        // This f64 is exactly 137839762462415.625, so .62 and .63 are
+        // equally close and equally short. The spec takes the even one,
+        // and Rust's own shortest formatter takes the other. Written
+        // from bits because the decimal literal is more digits than
+        // Rust will let a f64 literal carry.
+        (
+            json!(f64::from_bits(4818666146829284328)),
+            "137839762462415.62",
+        ),
+        // Integers serde holds exactly that JavaScript never could.
+        (json!(9007199254740993u64), "9007199254740992"),
+        (json!(18446744073709551615u64), "18446744073709552000"),
+        (json!(-9007199254740993i64), "-9007199254740992"),
+        // Integers small enough to be exact stay exact.
+        (json!(9007199254740991u64), "9007199254740991"),
+        (json!(0), "0"),
+        (json!(-42), "-42"),
+    ];
+
+    for (value, want) in &cases {
+        let mut options = exact_lexing();
+        options.insert("tst".into(), json!({ "limit": value }));
+        let spec = spec_with(options);
+        let text = to_jsonic(
+            &to_pure_spec(&spec).unwrap(),
+            JsonicOptions {
+                strict: true,
+                indent: None,
+            },
+        );
+        assert!(
+            text.contains(&format!("\"limit\": {want}")),
+            "option {value} should serialise as {want}; emitted:\n{}",
+            text.lines()
+                .find(|l| l.contains("\"limit\""))
+                .unwrap_or("<no limit line>")
+        );
+        // Strict output promises valid JSON, and a number that does not
+        // read back as itself has been corrupted just as surely.
+        let back: Value = serde_json::from_str(&text).expect("strict output must be JSON");
+        assert_eq!(
+            back["options"]["tst"]["limit"].as_f64(),
+            value.as_f64(),
+            "option {value} did not survive the round trip"
+        );
+    }
+}

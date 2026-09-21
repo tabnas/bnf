@@ -29,9 +29,9 @@ use crate::annotate::{plan_array_helpers, plan_value_annotations};
 use crate::desugar::desugar;
 use crate::factor::{left_factor, seq_token_span, LOOKAHEAD_K};
 use crate::ir::{
-    builtin_token, diag_name, escape_regexp, is_effectively_case_sensitive, origin_of, regex_key,
-    set_diag_name, term_key_of, ConvertOptions, Element, EmitError, Grammar, Kind, NodeKind,
-    Production, Sequence, SrcSpan, ValueAnnotation,
+    builtin_token, check_element_depth, diag_name, escape_regexp, is_effectively_case_sensitive,
+    origin_of, regex_key, set_diag_name, term_key_of, ConvertOptions, Element, EmitError, Grammar,
+    Kind, NodeKind, Production, Sequence, SrcSpan, ValueAnnotation,
 };
 use crate::leftrec::{eliminate_left_recursion, rewrite_tail_repeats};
 use crate::probe::rewrite_probe_dispatches;
@@ -419,12 +419,16 @@ pub fn emit_grammar_spec(
     grammar: &Grammar,
     opts: &ConvertOptions,
 ) -> Result<GrammarSpec, EmitError> {
-    let mut grammar = grammar.clone();
-
     // Diagnostics name the notation the grammar was written in, not this
     // package. Set BEFORE any pass that can raise one.
     let tag = opts.tag.clone().unwrap_or_else(|| "bnf".to_string());
     set_diag_name(&tag);
+
+    // Before the grammar is even copied: cloning it recurses through the
+    // element tree too, so the shape has to be refused first.
+    check_element_depth(grammar)?;
+
+    let mut grammar = grammar.clone();
 
     // Before ANY rewrite: annotations describe the grammar the AUTHOR
     // wrote, and the passes below are what make that shape unrecoverable.
@@ -782,32 +786,78 @@ fn emit_literal_token(
     // the current rule's token column does not list its tin.
     let flags = if sensitive { "" } else { "i" };
     let source = js_regex_source(&format!("^{}{}", escape_regexp(literal), boundary));
-    check_regex(&source, flags, name)?;
+    let flags = check_regex(&source, flags, name)?;
     match_tokens.insert(
         name.to_string(),
         MatchToken {
             source,
-            flags: flags.to_string(),
+            flags,
             eager: true,
         },
     );
     Ok(())
 }
 
+/// The flags `new RegExp` accepts, in the order `RegExp.prototype.flags`
+/// reports them back.
+const REGEX_FLAGS: &str = "dgimsuvy";
+
+/// Check a flag string the way the canonical `RegExp` constructor does —
+/// every character a flag it knows, none of them repeated, `u` and `v`
+/// never together — and return it in the order that constructor reports,
+/// which is the order the canonical compiler serialises rather than the
+/// order the front-end wrote (`new RegExp('a', 'yu').flags` is `uy`).
+///
+/// Flags the engine's `regex` crate does not act on are still accepted:
+/// `d`, `g` and `y` change nothing about what the emitted matcher
+/// matches, and refusing them would reject IR TypeScript emits happily.
+/// `v` is accepted for the same reason, though the Rust engine refuses
+/// it when the spec is installed; that refusal is the engine's, and
+/// `DIVERGENCE.md` records it.
+fn canonical_regex_flags(flags: &str, name: &str) -> Result<String, EmitError> {
+    let refuse = |detail: String| {
+        EmitError::new(format!(
+            "{}: invalid regular expression flags for token {}: {}",
+            diag_name(),
+            name,
+            detail
+        ))
+    };
+    let mut seen = String::new();
+    for flag in flags.chars() {
+        if !REGEX_FLAGS.contains(flag) {
+            return Err(refuse(format!("unknown flag '{flag}' in \"{flags}\"")));
+        }
+        if seen.contains(flag) {
+            return Err(refuse(format!("duplicate flag '{flag}' in \"{flags}\"")));
+        }
+        seen.push(flag);
+    }
+    if seen.contains('u') && seen.contains('v') {
+        return Err(refuse(format!("flags \"{flags}\" set both u and v")));
+    }
+    Ok(REGEX_FLAGS.chars().filter(|f| seen.contains(*f)).collect())
+}
+
 /// The matcher must compile in the engine's regex dialect: refuse at
 /// emit time with the token named, rather than at install time with a
-/// grammar the author did not write.
-fn check_regex(source: &str, flags: &str, name: &str) -> Result<(), EmitError> {
+/// grammar the author did not write. Returns the flags to emit, in the
+/// canonical order. The flag string is checked FIRST, as `new RegExp`
+/// checks it, so a grammar wrong in both ways is refused for the same
+/// reason in either runtime.
+fn check_regex(source: &str, flags: &str, name: &str) -> Result<String, EmitError> {
+    let flags = canonical_regex_flags(flags, name)?;
     let mut builder = regex::RegexBuilder::new(source);
     builder.case_insensitive(flags.contains('i'));
-    builder.build().map(|_| ()).map_err(|err| {
+    builder.build().map_err(|err| {
         EmitError::new(format!(
             "{}: invalid regular expression for token {}: {}",
             diag_name(),
             name,
             err
         ))
-    })
+    })?;
+    Ok(flags)
 }
 
 /// Allocate the lexer token(s) for one character class, at the point the
@@ -834,10 +884,10 @@ fn emit_class_token(
     // the runtimes accept the same strings.
     let eager = |pattern: &str, flags: &str, name: &str| -> Result<MatchToken, EmitError> {
         let source = js_regex_source(&format!("^{}", anchorable(pattern)));
-        check_regex(&source, flags, name)?;
+        let flags = check_regex(&source, flags, name)?;
         Ok(MatchToken {
             source,
-            flags: flags.to_string(),
+            flags,
             eager: true,
         })
     };

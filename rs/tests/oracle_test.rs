@@ -106,6 +106,14 @@ fn first_difference(a: &str, b: &str) -> String {
     format!("lengths differ: got {} lines, want {}", la.len(), lb.len())
 }
 
+/// A fixture whose `pureError` is set records an IR the TypeScript
+/// compiler REFUSED, and the message it refused it with. The refusal is
+/// as much of the contract as the emitted text: a front-end shows it to
+/// the author of the grammar.
+fn refusal_of(fx: &Value) -> Option<&str> {
+    fx["pureError"].as_str()
+}
+
 #[test]
 fn emits_the_same_pure_data_spec_as_typescript() {
     let mut failures = Vec::new();
@@ -114,6 +122,20 @@ fn emits_the_same_pure_data_spec_as_typescript() {
         let grammar: Grammar = serde_json::from_value(fx["ir"].clone())
             .unwrap_or_else(|e| panic!("{name}: IR does not deserialize: {e}"));
         let opts = options_of(&fx["opts"], true);
+        if let Some(want_err) = refusal_of(&fx) {
+            checked += 1;
+            match emit_grammar_spec(&grammar, &opts) {
+                Ok(_) => failures.push(format!(
+                    "{name}: TypeScript refused the IR ({want_err}) but the port emitted a spec"
+                )),
+                Err(e) if e.message != want_err => failures.push(format!(
+                    "{name}: refusal message differs:\n  got:  {}\n  want: {want_err}",
+                    e.message
+                )),
+                Err(_) => {}
+            }
+            continue;
+        }
         let want = fx["pure"].as_str().expect("pure text");
         match emit_grammar_spec(&grammar, &opts) {
             Err(e) => failures.push(format!("{name}: emit failed: {e}")),
@@ -147,6 +169,11 @@ fn emits_the_same_pure_data_spec_as_typescript() {
 fn emits_the_same_recognition_spec_as_typescript() {
     let mut failures = Vec::new();
     for (name, fx) in fixtures() {
+        // A refused IR has no recognition text; the pure test grades the
+        // refusal message.
+        if refusal_of(&fx).is_some() {
+            continue;
+        }
         let grammar: Grammar = serde_json::from_value(fx["ir"].clone()).expect("IR");
         let opts = options_of(&fx["opts"], false);
         let spec = match emit_grammar_spec(&grammar, &opts) {
@@ -214,6 +241,24 @@ fn emits_the_same_recognition_spec_as_typescript() {
 const ENGINE_VALUE_DIVERGENCES: &[(&str, &str)] =
     &[("abnf-3", "ab"), ("abnf-3", "a@b"), ("abnf-3", "a")];
 
+/// Cases the TypeScript ENGINE accepts and this engine rejects, from the
+/// same serialized document. Like the value register above these are the
+/// parser's, not this compiler's: the text both compilers emit for the
+/// fixture is byte identical, so there is nothing here to repair.
+///
+/// `ir-nullable-suffix` is `A = [ "x" ] A [ "y" ] / "z"`, hidden left
+/// recursion whose suffix is nullable, so no suffix debt is owed and the
+/// tail loop stays greedy. The TypeScript engine recognises `x* z y*`
+/// (and returns `undefined` rather than a node for it); this engine
+/// rejects every one of those sources with `unexpected`. Read
+/// `DIVERGENCE.md`.
+const ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS: &[(&str, &str)] = &[
+    ("ir-nullable-suffix", "z"),
+    ("ir-nullable-suffix", "xz"),
+    ("ir-nullable-suffix", "xzy"),
+    ("ir-nullable-suffix", "zy"),
+];
+
 fn install(pure: Value) -> tabnas::Tabnas {
     let engine = tabnas::GrammarSpec::from_value(pure).expect("the engine loads the document");
     let mut parser = tabnas::Tabnas::new();
@@ -226,6 +271,7 @@ fn the_engine_reaches_the_same_verdicts_as_typescript() {
     let mut failures = Vec::new();
     let mut checked = 0;
     let mut diverged: Vec<(String, String)> = Vec::new();
+    let mut rejected: Vec<(String, String)> = Vec::new();
     let mut graded: Vec<String> = Vec::new();
     for (name, fx) in fixtures() {
         let Some(cases) = fx["cases"].as_array() else {
@@ -269,10 +315,17 @@ fn the_engine_reaches_the_same_verdicts_as_typescript() {
                 }
                 Err(e) => {
                     if want_accepted {
-                        failures.push(format!(
-                            "{name}: {source:?} rejected with {}, TypeScript accepted",
-                            e.code
-                        ));
+                        if ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS
+                            .iter()
+                            .any(|(f, sc)| *f == name && *sc == source)
+                        {
+                            rejected.push((name.clone(), source.to_string()));
+                        } else {
+                            failures.push(format!(
+                                "{name}: {source:?} rejected with {}, TypeScript accepted",
+                                e.code
+                            ));
+                        }
                     } else if Some(e.code.as_str()) != case["code"].as_str() {
                         failures.push(format!(
                             "{name}: {source:?} code {} differs from TypeScript's {}",
@@ -299,6 +352,16 @@ fn the_engine_reaches_the_same_verdicts_as_typescript() {
         if !diverged.iter().any(|(f, s)| f == fixture && s == source) {
             failures.push(format!(
                 "{fixture}: {source:?} is registered as an engine value divergence but now agrees; remove it from ENGINE_VALUE_DIVERGENCES"
+            ));
+        }
+    }
+    for (fixture, source) in ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS {
+        if !graded.iter().any(|g| g == fixture) {
+            continue;
+        }
+        if !rejected.iter().any(|(f, s)| f == fixture && s == source) {
+            failures.push(format!(
+                "{fixture}: {source:?} is registered as rejected here and accepted by the TypeScript engine, but this engine now accepts it; remove it from ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS"
             ));
         }
     }
