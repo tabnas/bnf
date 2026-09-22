@@ -69,7 +69,7 @@ type ConvertOptions struct {
 | Field | Default | Effect |
 |---|---|---|
 | `Start` | none | The production the engine begins at. The compile wraps it as `__start__`. |
-| `Tag` | `"bnf"` | Stamped on every emitted alternate, and the prefix on every diagnostic. Pass the notation's own name. |
+| `Tag` | `"bnf"` | Stamped on every emitted alternate, and the prefix on every diagnostic this compiler raises. Pass the notation's own name. A front-end's parse error on the grammar source is raised before these options apply and keeps that front-end's own fixed prefix. |
 | `Builtins` | `false` | Emit actions as `@name$` strings rather than closures. Required by `ToPureSpec`. |
 | `Marks` | `false` | Record a mark on each user alternate, so semantic actions can bind to it. |
 | `WordKeywords` | `false` | Append a `\b` guard to a literal ending in a word character, so `option` does not match inside `optional`. |

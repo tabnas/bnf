@@ -36,7 +36,9 @@ Always pass `Tag`. It is stamped on every emitted alternate, and it is
 also the prefix on every diagnostic this compiler raises, so a compile
 failure reads `demo: ...` rather than naming a package the author has
 never used. Omitting it defaults the tag to `bnf`, which asserts nothing
-true about the syntax.
+true about the syntax. It reaches only what this compiler raises: a
+front-end's parse error on the grammar source comes before `Tag` is
+applied and keeps that front-end's own fixed prefix.
 
 ## Attach a semantic action to an alternate
 
