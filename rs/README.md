@@ -97,7 +97,7 @@ assigned.
 | Option | Effect |
 |---|---|
 | `start` | Start rule name (default: the first production). |
-| `tag` | Group tag stamped on every emitted alt, and the prefix of every diagnostic (default `bnf`; a front-end passes its own). |
+| `tag` | Group tag stamped on every emitted alt, and the prefix the shared compiler's own diagnostics carry (default `bnf`; a front-end passes its own). A front-end's parse error on the grammar source is raised before these options apply, so it keeps that front-end's own fixed prefix. |
 | `builtins` | Emit probe dispatch and tree building as engine `$`-builtin refs instead of closures, keeping the spec function-free and serializable. |
 | `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
 | `word_keywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. |
@@ -149,8 +149,9 @@ not the grammar:
   TypeScript keeps going several hundred levels further before raising a
   catchable `RangeError`. No grammar an author writes comes close.
 - **Diagnostics are prefixed per thread.** The tag of the most recent
-  emit on the current thread prefixes every diagnostic, so two threads
-  compiling two notations never see each other's prefix.
+  emit on the current thread prefixes every diagnostic this compiler
+  raises, so two threads compiling two notations never see each other's
+  prefix.
 
 ## Build and test
 

@@ -14,9 +14,9 @@ use std::sync::Arc;
 use common::{parse_with, prod, reference, star, term, tok};
 use serde_json::json;
 use tabnas_bnf::{
-    attach_action_slots, attach_actions, builtin_token, emit_grammar_spec, escape_regexp,
-    is_effectively_case_sensitive, is_prose_name, mark_listing, refs_in, term_key, to_jsonic,
-    to_pure_spec, to_recognition_spec, ActionFn, ConvertOptions, Grammar, JsonicOptions,
+    attach_action_slots, attach_actions, builtin_token, diag_name, emit_grammar_spec,
+    escape_regexp, is_effectively_case_sensitive, is_prose_name, mark_listing, refs_in, term_key,
+    to_jsonic, to_pure_spec, to_recognition_spec, ActionFn, ConvertOptions, Grammar, JsonicOptions,
     Production, BUILTIN_TOKENS,
 };
 
@@ -62,6 +62,38 @@ fn unknown_rule_error() {
         "demo: rule 'a' references unknown rule 'missing'"
     );
     assert_eq!(err.rule.as_deref(), Some("a"));
+}
+
+// The tag reaches a diagnostic only once an emit has applied the options
+// it came in on, which is the half of the `tag` documentation a front-end
+// notices: a parse error on the grammar source is raised before that and
+// carries the front-end's own fixed prefix instead. There is no parser in
+// this crate to raise one, so the boundary itself is what gets pinned, on
+// a thread that has run no emit.
+#[test]
+fn the_tag_prefixes_only_what_an_emit_raises() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            diag_name(),
+            "bnf",
+            "a thread that has run no emit carries the default prefix, \
+             so anything raised before the options apply cannot be tagged"
+        );
+
+        let err = emit_grammar_spec(
+            &Grammar::new(vec![prod("a", vec![vec![reference("missing")]])]),
+            &ConvertOptions::tag("xyz"),
+        )
+        .expect_err("a refusal");
+        assert_eq!(
+            err.to_string(),
+            "xyz: rule 'a' references unknown rule 'missing'",
+            "the compiler's own diagnostic is tagged, and is not restamped"
+        );
+        assert_eq!(diag_name(), "xyz");
+    })
+    .join()
+    .expect("the assertions above");
 }
 
 // A purely left-recursive rule RETURNS an error.

@@ -513,8 +513,12 @@ impl Grammar {
 pub struct ConvertOptions {
     /// Start rule name (default: the first production).
     pub start: Option<String>,
-    /// Group tag stamped on every emitted alt, and the prefix of every
-    /// diagnostic (default `bnf`; a front-end passes its own).
+    /// Group tag stamped on every emitted alt, and the prefix the shared
+    /// compiler's own diagnostics carry (default `bnf`; a front-end
+    /// passes its own). It reaches a diagnostic only from the moment
+    /// [`emit_grammar_spec`](crate::emit_grammar_spec) applies these
+    /// options, so a front-end's parse error on the grammar source is
+    /// raised earlier and keeps that front-end's own fixed prefix.
     pub tag: Option<String>,
     /// Emit the probe/phase-retry dispatcher and the tree builders as
     /// engine `$`-builtin refs plus `k` config instead of registered
@@ -630,8 +634,12 @@ thread_local! {
     static DIAG_NAME: RefCell<String> = RefCell::new("bnf".to_string());
 }
 
-/// The prefix every diagnostic carries: the tag of the most recent emit
-/// on this thread, or `bnf`.
+/// The prefix the shared compiler's own diagnostics carry: the tag of the
+/// most recent emit on this thread, or `bnf` when no emit has run on it.
+///
+/// A diagnostic raised before an emit applies its options, a front-end's
+/// parse error on the grammar source being the usual one, is outside this
+/// and carries that front-end's own fixed prefix.
 pub fn diag_name() -> String {
     DIAG_NAME.with(|name| name.borrow().clone())
 }
