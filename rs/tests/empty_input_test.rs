@@ -77,6 +77,22 @@ fn empty_input_from_the_grammar() {
     }
 }
 
+// Every engine token OTHER than the two zero-width ones consumes.
+// Mirrors ts/test/empty-input.test.js, which lists them one by one: a
+// token read as zero-width makes the whole grammar accept an empty
+// source, which is the direction that rejects nothing and hides the
+// mistake. The case above covers `#ZZ` and `#AA`, the two that do derive
+// empty.
+#[test]
+fn every_other_engine_token_matches_real_input() {
+    for name in ["#TX", "#NR", "#ST", "#VL", "#SP", "#LN", "#CM"] {
+        assert!(
+            !empty_of(one_alt(vec![tok(name)]), None),
+            "{name} was read as zero-width"
+        );
+    }
+}
+
 // Nullability is a least fixed point over the rules, not a property of
 // one production read alone. Each of these needs more than one pass.
 #[test]
