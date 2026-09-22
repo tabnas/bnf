@@ -70,7 +70,9 @@ maintainer running tabnas/admin `rollout/apply-ci-folders.sh`
 
 ## Authority and alignment rules
 
-1. **TypeScript is canonical.** When TS and Go disagree, TS wins.
+1. **TypeScript is canonical.** When TS and a port disagree, TS wins.
+   There are two ports now, Go and Rust, and the rule is the same for
+   each.
 2. A change to the emit pipeline affects every front-end. Run the
    downstream suites (`abnf`, `gbnf`, `ebnf`) before considering it done.
 3. The `tag` option defaults to `'bnf'`; each front-end passes its own so
@@ -348,10 +350,12 @@ new breakage hides inside the expected failure.
 ## Error codes
 
 This package declares **no** error codes: there is no `error`/`hint`
-catalogue in either runtime, and nothing here exercises one. There are no
-`test/spec` fixtures in this repo at all (`test/` holds only an agents
-guide), so no `ERROR` rows of any kind — code-pinning, message-pinning or
-bare — exist here. Compiler diagnostics are thrown errors with prose
+catalogue in any of the three runtimes, and nothing here exercises one.
+There is no `test/` directory in this repository and no `test/spec`
+fixtures anywhere in it, so no `ERROR` rows of any kind — code-pinning,
+message-pinning or bare — exist here. The cross-runtime parity contract
+is carried instead by `rs/tests/oracle/*.json`, which hold the
+TypeScript compiler's own emitted text. Compiler diagnostics are thrown errors with prose
 messages, not coded parse errors; the front-ends own the wording their own
 tests pin.
 

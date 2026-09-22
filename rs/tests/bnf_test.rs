@@ -1159,6 +1159,118 @@ fn sync_tags_on_the_only_two_token_naming_close_alts() {
     }
 }
 
+// The sync tags above have to EARN their place: strip them back off and
+// recovery must get measurably worse, or they are decoration and the
+// assertions on them prove nothing. Mirrors
+// ts/test/bnf.test.js, "keeps the rest of a list when embedded in a
+// tagged host grammar".
+//
+// The host rule stands in for the grammar this one gets embedded in. Its
+// single tag is what disables the structural fallback the generated
+// rules would otherwise have relied on, so the emitted sync tags are the
+// only resynchronisation left.
+const SYNC_GROUPS: [&str; 3] = ["close", "comma", "end"];
+
+/// The list grammar as pure data, which is the shape a host embeds.
+/// `builtins` is what makes it function-free; marks are off, so there is
+/// nothing for `to_pure_spec` to strip on top of that.
+fn list_spec() -> GrammarSpec {
+    emit(list_grammar(), demo().start("doc").builtins(true))
+}
+
+/// Wrap a spec in a host rule carrying its own tag, and start there.
+fn under_host(spec: &GrammarSpec) -> GrammarSpec {
+    let mut spec = spec.clone();
+    let mut open = AltSpec::new();
+    open.set("p", "doc").set("g", "host");
+    let mut close = AltSpec::new();
+    close
+        .set("s", "#ZZ")
+        .set("a", "@bubble$")
+        .set("g", "host,end");
+    spec.rule.insert(
+        "host".to_string(),
+        Some(RuleSpec {
+            open: vec![open],
+            close: Some(vec![close]),
+        }),
+    );
+    let rule = spec
+        .options
+        .entry("rule")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("options.rule is an object");
+    rule.insert("start".into(), json!("host"));
+    spec
+}
+
+/// The same spec with every sync tag taken back off.
+fn without_sync_tags(spec: &GrammarSpec) -> GrammarSpec {
+    let mut spec = spec.clone();
+    for rule in spec.rule.values_mut().flatten() {
+        for alt in rule.close.iter_mut().flatten() {
+            let Some(tags) = alt.g() else { continue };
+            let kept: Vec<&str> = tags
+                .split(',')
+                .filter(|t| !SYNC_GROUPS.contains(t))
+                .collect();
+            alt.set("g", kept.join(","));
+        }
+    }
+    spec
+}
+
+/// Parse with recovery on, returning the error count and the recovered
+/// source text.
+fn recover(spec: &GrammarSpec, src: &str) -> (usize, String) {
+    let mut spec = spec.clone();
+    spec.options
+        .insert("parse".into(), json!({ "recover": { "enabled": true } }));
+    let mut parser = tabnas::Tabnas::new();
+    spec.install(&mut parser).expect("install");
+    let out = parser.parse_recover(src);
+    let text = out
+        .value
+        .as_ref()
+        .map(|v| src_of(&v.to_json()))
+        .unwrap_or_default();
+    (out.errors.len(), text)
+}
+
+/// The `src` of the first node that carries one, walking kids.
+fn src_of(node: &Value) -> String {
+    match node {
+        Value::Object(map) => match map.get("src") {
+            Some(Value::String(s)) => s.clone(),
+            _ => map.get("kids").map(src_of).unwrap_or_default(),
+        },
+        Value::Array(items) => items.iter().map(src_of).collect(),
+        Value::String(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+#[test]
+fn sync_tags_keep_the_rest_of_a_list_under_a_tagged_host() {
+    let spec = list_spec();
+    let (tagged_errors, tagged_src) = recover(&under_host(&spec), "1,!,3");
+    let (bare_errors, bare_src) = recover(&under_host(&without_sync_tags(&spec)), "1,!,3");
+
+    assert_eq!(tagged_errors, 1, "tagged: one bad token, one error");
+    assert_eq!(bare_errors, 1, "untagged: one bad token, one error");
+    assert!(
+        tagged_src.contains('3'),
+        "tagged: the item after the error should survive, got {tagged_src:?}"
+    );
+    assert!(
+        !bare_src.contains('3'),
+        "untagged: without the separator sync point the tail is lost. \
+         A pass here means the tags are no longer doing anything, got \
+         {bare_src:?}"
+    );
+}
+
 // A grammar is free to contain a production actually called
 // `__start__`; the wrapper then takes a numbered name.
 #[test]
