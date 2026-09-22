@@ -4,8 +4,13 @@ Same IR, different emitted grammar across runtimes, is a divergence. The
 org rule (admin DECISIONS.md ADR-13/14) is to repair the port that
 violates what TypeScript defines, and to record here what cannot be
 repaired now. There is no `test/spec` register in this repository; the
-executable record is `rs/tests/oracle_test.rs`, which holds the Rust
-emitter to TypeScript's serialised output byte for byte.
+executable record is three files. `rs/tests/oracle_test.rs` holds the
+Rust emitter to TypeScript's serialised output byte for byte and
+registers the ENGINE-level entries below. `rs/tests/divergence_test.rs`
+is the register for the Rust port's own entries, one test per entry, so
+repairing an entry means deleting its section here and its test there.
+`go/bnf_test.go` carries the Go entry the same way. A row with no test
+is a defect, not a record.
 
 ## Rust
 
@@ -18,6 +23,8 @@ serialized terminals"), so the Rust port emits `^option\b`, as the Go
 port does. The two agree on ASCII input and differ only for a keyword
 immediately followed by a non-ASCII letter, which `\b` treats as a word
 character and the lookahead does not.
+
+Registered by `the_word_keyword_guard_is_a_word_boundary`.
 
 ### Regular expression terminals are refused at emit time
 
@@ -38,6 +45,10 @@ reports, so the Rust port emits them in the same order. `v` is emitted
 by both and the Rust engine alone refuses it at install; that is the
 engine's limit, not this compiler's.
 
+Registered by `a_pattern_outside_the_engine_dialect_is_refused_at_emit`
+and `a_pattern_both_dialects_accept_still_emits`, with the flag half in
+`rs/tests/regex_flags_test.rs`.
+
 ### Element nesting is refused past 128 levels
 
 The passes over an element walk it recursively, as the canonical
@@ -50,6 +61,10 @@ catchable `RangeError`. The limit is `serde_json`'s own default for a
 nested document, so an IR that arrives as JSON is already held to it,
 and it is far past anything an author writes: the deepest nesting in the
 ABNF conformance corpus is in single figures.
+
+Registered by `element_nesting_is_refused_one_level_past_the_limit` and
+the two tests beside it, which pin the last accepted depth as well as
+the first refused one.
 
 ## Engine, observed through this compiler
 

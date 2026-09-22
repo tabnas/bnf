@@ -28,6 +28,7 @@ this crate.
 | `tests/options_data_test.rs` | `go/options_data_test.go`: a front-end's options survive the reductions, strict serialisation and the engine's loader (here they are data by construction, so nothing is refused) |
 | `tests/regex_flags_test.rs` | no twin: the `RegExp` constructor's own rules on an `Element::regex` flag string, which TypeScript gets from the constructor for free and this port has to state — the flags it knows, no repeats, `u` and `v` never together, and the fixed order `RegExp.prototype.flags` reports |
 | `tests/doc_examples_test.rs` | `go/doc_examples_test.go`: the claims the crate documentation makes |
+| `tests/divergence_test.rs` | the executable register for the Rust entries in [`../DIVERGENCE.md`](../DIVERGENCE.md): one test per recorded difference, so a repaired entry has to lose its test as well as its section |
 | `tests/version_test.rs` | the version sites must agree |
 | `README.md` | the crate front page; its `rust` fences run as doctests |
 
@@ -108,7 +109,8 @@ that refusal message is graded byte for byte like the emitted text.
 ## Untrusted IR, and where the stack still runs out
 
 `emit_grammar_spec` measures element nesting before anything walks it
-and refuses past `MAX_ELEMENT_DEPTH` (see `src/ir.rs`), because the
+and refuses past `MAX_ELEMENT_DEPTH` (exported, defined in `src/ir.rs`),
+because the
 passes are recursive and a Rust stack that runs out aborts the process
 rather than unwinding. The walks over the REFERENCE graph (Tarjan's
 components and Paull's ordering in `src/leftrec.rs`) carry their own
