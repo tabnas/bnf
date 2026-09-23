@@ -38,6 +38,8 @@ are not:
 | `ts/src/spec.ts` | Spec-level transforms: recognition/pure lowering, jsonic serialisation, user-action attachment. Operates on an emitted `GrammarSpec`. |
 | `ts/src/bnf.ts` | Package entry; re-exports the public surface. |
 | `go/` | Go port (follows TS). |
+| `go/clib/` | `libtabnasbnf`, the C shared library, on the uniform tabnas C ABI (admin ADR-12: `tabnas_version`, `tabnas_grammar`, `tabnas_parse`, `tabnas_grammar_free`, `tabnas_free`). Its parse input is a serialized `GrammarSpec`; its value is `{recognition, pure}`. The files admin `tasks/adopt-clib.sh` stamps are **template-owned**: change the template and re-stamp. `reduce_test.go` is this repo's own and holds the reduction guarantees. |
+| `py/` | Python ctypes binding over `go/clib` (`recognition_spec`, `pure_spec`): `cd go/clib && ./build.sh`, then `cd py && python3 -m unittest -v`. |
 | `rs/` | Rust port (follows TS): the `tabnas-bnf` crate. Depends on the engine's `tabnas` crate via a `path` dependency on the sibling checkout (`../../parser/rs`). Library only. Holds its emitter to the TypeScript compiler's serialised output byte for byte in `rs/tests/oracle_test.rs`. See `rs/AGENTS.md`. |
 | `ci/` | `ci/rust/run.sh`, the Rust gate: what `.github/workflows/rust.yml` runs, and what you run locally. The workflows once staged under `ci/workflows/` now live in `.github/workflows/`. |
 | `scripts/downstream.sh` | Runs the front-end suites against this working tree: `make downstream` locally, `.github/workflows/downstream.yml` in CI. |
@@ -289,6 +291,17 @@ itself, atomically, *after* npm accepts the publish.
    runs no tests of its own. Confirm `$GH` is green on `main` before
    calling the release good.
 
+   **The dispatch also publishes the C artifacts (admin ADR-19).** Once
+   `go/v$V` is on the remote, `release.yml` calls
+   `.github/workflows/clib-release.yml`, which creates the GitHub Release on
+   that tag as a draft, builds and attaches the shared libraries and
+   `manifest.json`, and only then publishes it. The release is done when
+   that Release is published with `manifest.json` among its assets. A draft
+   left behind means the C build failed after npm and Go had shipped: fix
+   the cause, then dispatch `clib-release.yml` on `main` with that tag and
+   `darwin_only` false, which finishes the same draft. `darwin_only` true
+   only late-attaches darwin artifacts to a Release that has the rest.
+
 ### The engine comes first
 
 This package emits specs the engine executes, so a change here that depends
@@ -371,6 +384,12 @@ state above. If this package ever declares a code, add it there in the
 same change: the code is the contract a fixture pins with `ERROR:<code>`,
 and two runtimes that reject the same input with different codes have
 agreed on nothing.
+
+`clib.errorCodes` in the same file (`usage`, `grammar`, `handle`,
+`internal`) is a different list: the codes `go/clib` returns when a C
+call itself fails (`ok:false`). A spec it cannot reduce is not one of
+them; that is a rejection (`accept:false`) carrying the compiler's
+`{Message, Rules}`.
 
 ## Untrusted input
 
