@@ -185,6 +185,67 @@ func TestControlCharactersSurviveSerialisation(t *testing.T) {
 	}
 }
 
+// CommentDef.Line is a *bool since parser 0.12.0 (tabnas/parser#210), and
+// each of its three states has to cross the data boundary as itself. The
+// explicit false is the one that matters (tabnas/parser#208): a default
+// line comment redefined as a block comment must still be a block comment
+// once the spec is reloaded, and nil must stay "not supplied" rather than
+// turn into a false that overrides the engine's default.
+func TestCommentDefLineSurvivesSerialisation(t *testing.T) {
+	opt := &tabnas.Options{Comment: &tabnas.CommentOptions{
+		Def: map[string]*tabnas.CommentDef{
+			"hash":  {Line: tabnas.Bool(false), Start: "#", End: "@@"},
+			"slash": {Line: tabnas.Bool(true), Start: "//"},
+			"novel": {Start: "%%", End: "%%"},
+		},
+	}}
+	data, err := optionsToData(opt)
+	if err != nil {
+		t.Fatalf("optionsToData: %v", err)
+	}
+	def := data["comment"].(map[string]any)["def"].(map[string]any)
+	if line, ok := def["novel"].(map[string]any)["line"]; ok {
+		t.Errorf("a nil Line was emitted as %v; it must be absent", line)
+	}
+
+	var back map[string]any
+	if err := json.Unmarshal([]byte(ToJsonic(data, true, 0)), &back); err != nil {
+		t.Fatalf("emitted options are not valid JSON: %v", err)
+	}
+	got := tabnas.MapToOptions(back)
+	for name, want := range map[string]*bool{
+		"hash": tabnas.Bool(false), "slash": tabnas.Bool(true), "novel": nil,
+	} {
+		d := got.Comment.Def[name]
+		switch {
+		case d == nil:
+			t.Errorf("%s: def did not survive", name)
+		case want == nil && d.Line != nil:
+			t.Errorf("%s: nil Line came back as %v", name, *d.Line)
+		case want != nil && (d.Line == nil || *d.Line != *want):
+			t.Errorf("%s: Line %v came back as %v", name, *want, d.Line)
+		}
+	}
+
+	// And the engine reading the reloaded options agrees: # is a block
+	// comment ending at @@, not the default line comment.
+	cfg := tabnas.Make(got).Config()
+	for _, start := range cfg.CommentLine {
+		if start == "#" {
+			t.Errorf("# is still a line comment after reload: %v", cfg.CommentLine)
+		}
+	}
+	block := false
+	for _, pair := range cfg.CommentBlock {
+		if pair == [2]string{"#", "@@"} {
+			block = true
+		}
+	}
+	if !block {
+		t.Errorf("# was not reloaded as a block comment: %v", cfg.CommentBlock)
+	}
+}
+
 func TestNilOptionsIsEmptyNotAnError(t *testing.T) {
 	data, err := optionsToData(nil)
 	if err != nil || len(data) != 0 {

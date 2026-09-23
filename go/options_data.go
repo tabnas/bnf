@@ -202,9 +202,16 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 				dm := map[string]any{}
 				putStr(dm, "start", d.Start)
 				putStr(dm, "end", d.End)
-				if d.Line {
-					dm["line"] = true
-				}
+				// Line is a *bool since parser 0.12.0 (tabnas/parser#210),
+				// and all three states are data. nil is "not supplied" and
+				// is omitted, so the engine's overlay falls back to the
+				// default def of that name, as an absent `line` does in
+				// TypeScript. An explicit false is emitted as `line: false`
+				// -- cloneData carries it in TS, and MapToOptions reads it
+				// back as Bool(false) -- so a default line comment
+				// redefined as a block comment (tabnas/parser#208) stays
+				// one after serialisation.
+				putBool(dm, "line", d.Line)
 				def[name] = dm
 			}
 			m["def"] = def
