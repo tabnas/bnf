@@ -24,7 +24,14 @@ use tabnas_bnf::{
 // a natively installed copy accepted.
 fn exact_lexing() -> Map<String, Value> {
     json!({
-        "tokenSet": { "IGNORE": [] },
+        // Explicit nulls, not `[]`. The engine overlays a token set onto
+        // its default index by index: TypeScript's deep merge always has,
+        // and the Rust engine's serialized door has since
+        // tabnas/parser#151. So `[]` overlays nothing and keeps all three
+        // defaults, and it is each `null` that removes a position.
+        // Measured on the canonical TypeScript engine: `IGNORE: []`
+        // leaves three tokens, `IGNORE: [null, null, null]` leaves none.
+        "tokenSet": { "IGNORE": [null, null, null] },
         "space": { "lex": false },
         "line": { "lex": false },
         "comment": { "lex": false },
