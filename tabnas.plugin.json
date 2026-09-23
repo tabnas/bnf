@@ -7,6 +7,17 @@
   "extensions": [
     ".bnf"
   ],
+  "clib": {
+    "dir": "go/clib",
+    "library": "libtabnasbnf",
+    "abi": "v1",
+    "errorCodes": [
+      "usage",
+      "grammar",
+      "handle",
+      "internal"
+    ]
+  },
   "errorCodes": [],
   "docs": "https://tabnas.dev/docs/packages",
   "repository": "https://github.com/tabnas/bnf",

@@ -1,96 +1,80 @@
-# libtabnasbnf — the C ABI
+# libtabnasbnf — the bnf parser as a C ABI
 
-The shared compiler's one capability that is useful **without a
-front-end**: reducing an already-serialized `GrammarSpec` to pure data.
+<!-- tabnas-clib-template: v3 — stamped by admin tasks/adopt-clib.sh;
+     edit the template and re-stamp, not this file. -->
+
+The bnf format parser as a C shared library, so languages with no
+tabnas port can parse and validate bnf input. This is one of the
+per-format tabnas clibs sharing the **uniform ABI** decided by ADR-12:
+every such library exports the same five symbols, and which library you
+load decides which format you parse — so one generic binding per
+language covers the whole fleet. Two format clibs consequently cannot
+be statically linked into one binary; load them dynamically.
 
 ```sh
-./build.sh            # host
+./build.sh            # host, into ./dist
 ZIG=/path/to/zig ./build.sh all
 ```
-
-## What this is, and is not
-
-`@tabnas/bnf` is the compiler *behind* the BNF-family front-ends (GBNF,
-ABNF, EBNF). It is a library those front-ends call, not something an end
-user drives — so this surface is deliberately narrow. There is **no
-"notation text in" function**, because this package parses no notation. A
-front-end does. For GBNF, use [`libtabnasgbnf`](https://github.com/tabnas/gbnf),
-which both compiles and validates.
-
-What is left is the reduction, and it is worth exposing because it is the
-piece that lets a caller with neither Go nor Node assemble the whole
-pipeline:
-
-```
-GBNF text ──libtabnasgbnf──▶ spec ──libtabnasbnf──▶ recognition spec
-                                              │
-                                        libtabnas ──▶ verdicts
-```
-
-## Two reductions
-
-| Function | Keeps | For |
-|---|---|---|
-| `bnf_recognition_spec` | structure only | "is this input in the language" |
-| `bnf_pure_spec` | tree `$`-builtins too | a reloaded grammar that still builds `{rule, src, kids}` |
-
-Recognition drops the **tree** builtins (`@node$`, `@capture$`,
-`@bubble$`) and the spec's own ref-backed actions. It does *not* drop the
-native-value family (`@object$`, `@value$`, …) — so for a spec built from
-those the two reductions are byte-identical. Worth knowing before
-reaching for recognition mode expecting it to shrink something.
-
-Both refuse a spec whose control logic is still closures. Those cannot be
-represented as data at all, and a reduction that dropped them silently
-would hand back a grammar that no longer does what it says.
 
 ## The contract
 
 | Function | Returns |
 |---|---|
-| `bnf_version()` | `{"ok":true,"version":"…","engine":"…"}` |
-| `bnf_recognition_spec(spec, len)` | `{"ok":true,"spec":"…"}` |
-| `bnf_pure_spec(spec, len)` | `{"ok":true,"spec":"…"}` |
-| `bnf_free(str)` | — |
+| `tabnas_version()` | `{"ok":true,"lib":"libtabnasbnf","format":"bnf","template":"v3"}` |
+| `tabnas_grammar(opts, len)` | `{"ok":true,"handle":N}` — opts reserved, pass `(NULL, 0)`, unless the format notes below define them |
+| `tabnas_parse(handle, src, len)` | `{"ok":true,"accept":true[,"value":…]}` or `{"ok":true,"accept":false,"error":{…}}` |
+| `tabnas_grammar_free(handle)` | — |
+| `tabnas_free(str)` | — |
+
+The rules every tabnas clib shares, each load-bearing:
 
 1. **Every call returns JSON.** A C ABI has one return value and no
-   exceptions, so each entry point returns a document and a binding in
-   any language is *call, decode*.
-2. **A failure carries no spec.** `ok:false` never comes with a `spec`
-   field, so a caller cannot half-succeed into using an empty grammar.
-3. **Lengths are explicit,** and `(NULL, 0)` is the empty buffer, as C
-   spells one.
-4. **The caller owns what it is given.** Every `char*` must be released
-   with `bnf_free` (it is `malloc`'d, so that is `free(3)`).
+   exceptions; each entry point returns a document, so a binding in any
+   language is *call, decode* and the error contract is identical
+   everywhere.
+2. **Three outcomes, not two.** A broken call is `ok:false` with a
+   code; input outside the language is `ok:true, accept:false`; an
+   accepted input is `ok:true, accept:true` — plus `value` where the
+   parse result is JSON-representable.
+3. **A rejection is an answer, not a failure.**
+4. **Lengths are explicit.** Buffers are not read as NUL-terminated C
+   strings; input may legitimately contain a zero byte.
+5. **The caller owns what it is given.** Every `char*` must be released
+   with `tabnas_free` (malloc'd — `free(3)`); every handle with
+   `tabnas_grammar_free`.
 
-## A note on the wire format
+Handles are safe to use from several threads: each carries a mutex,
+because the underlying engine is not safe for concurrent Parse and an
+FFI caller is under no obligation to serialise.
 
-The emitted spec is written with `ToJsonic`, not `encoding/json`. A regex
-travels as an `@/source/flags` sentinel that the engine decodes on load;
-`encoding/json` sees the internal holder's unexported fields and writes
-`{}`, which would drop every match token and leave a grammar that lexes
-nothing. If you re-serialize the spec yourself, keep those strings
-intact.
+The grammar is installed **natively** — compiled in-process, not
+serialized and reloaded. Lexing configuration is part of the accepted
+language, and format plugins keep format-specific behaviour as
+closures, which cannot cross a data boundary; see
+`admin/notes/2026-08-16-clib-ffi-strategy.md` for the full account.
 
-## Cross-compiling
+## Consuming without a binding
 
-| target | how |
-|---|---|
-| `linux/amd64`, `linux/arm64` | zig, cross |
-| `windows/amd64` | zig, cross |
-| `darwin/*` | **native macOS host only** |
+C, C++, Zig, Swift, Nim and D consume `include/tabnas.h` directly — no
+binding layer exists or is needed. Zig example:
 
-macOS needs Apple's SDK (`CoreFoundation`, `libresolv`), which zig cannot
-redistribute. `build.sh all` skips darwin unless already running on it; a
-target named explicitly on the command line fails instead of skipping, so
-release automation cannot mistake an incomplete artifact set for success.
+```zig
+const c = @cImport(@cInclude("tabnas.h"));
+// link against libtabnasbnf; every call returns a JSON []u8 to free with
+// c.tabnas_free.
+```
+
+## Format notes
+
+bnf parses no notation of its own: the input to `tabnas_parse` is a serialized tabnas `GrammarSpec` (JSON, as a BNF-family front-end emits it), and `accept` means the spec reduces to pure data. `value` carries both reductions the former `bnf_recognition_spec` / `bnf_pure_spec` returned: `value.recognition` drops the tree and value builders (load it into libtabnas for verdicts only) and `value.pure` keeps them (a reloaded grammar still builds values). Malformed JSON, a non-integer `v`, and non-string action/condition fields (closures, which cannot be data) are rejections (`accept:false`, error `{Message, Rules}`), not call failures. Both reductions stamp `v` with the engine's current builtin schema version.
 
 ## Layout
 
-- `core.go` — the behaviour, in plain Go.
-- `bnf_c.go` — the cgo shim: `(pointer, length)` in, `malloc`'d string
-  out, nothing else.
-- `core_test.go` — the contract.
-
-Go does not support cgo in `_test.go` files, so keeping the behaviour in
-`core.go` is what makes it testable at all.
+- `core.go` — the behaviour, in plain Go (testable).
+- `tabnas_c.go` — the cgo shim: `(pointer, length)` in, malloc'd string
+  out, nothing else. (Go forbids cgo in `_test.go`, which is why the
+  behaviour lives in `core.go`.)
+- `core_test.go` — the contract: accept/reject samples, unknown-handle,
+  reserved options, double-free, concurrency under `-race`.
+- `include/tabnas.h`, `tabnas.pc.in` — the header and pkg-config file
+  for C-header-native consumers.

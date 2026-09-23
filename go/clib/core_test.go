@@ -1,164 +1,178 @@
 // Copyright (c) 2026 Richard Rodger and other contributors, MIT License
 
+// The library's contract, tested where it is testable.
+//
+// tabnas-clib-template: v3 (stamped by admin tasks/adopt-clib.sh;
+// edit the template and re-stamp, not this file).
+//
+// The cgo shim in tabnas_c.go cannot be unit-tested (Go forbids cgo in
+// _test.go), which is exactly why the behaviour lives in core.go —
+// everything below runs against the same functions the exported
+// symbols call.
 package main
-
-// The library's contract, tested where it is testable. The cgo shim in
-// bnf_c.go cannot be unit-tested (Go forbids cgo in _test.go), which is
-// exactly why the behaviour lives in core.go.
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"sync"
 	"testing"
-
-	tabnas "github.com/tabnas/parser/go"
 )
 
-func doc(t *testing.T, s string) map[string]any {
+const (
+	validSample   = "{\"rule\":{\"val\":{\"open\":[{\"s\":[\"#NR\"],\"a\":\"@node$\"}]}}}"
+	invalidSample = "{\"rule\":{\"val\":{\"open\":[{\"s\":[\"#NR\"],\"a\":1}]}}}"
+
+	// optsSample is the tabnas_grammar argument every handle below is
+	// built from: the tsv `opts` column, "" for a row that defines no
+	// options (which is (NULL, 0) at the C boundary).
+	optsSample = ""
+)
+
+func decode(t *testing.T, doc string) map[string]any {
 	t.Helper()
 	var m map[string]any
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
-		t.Fatalf("result is not JSON: %v (%q)", err, s)
+	if err := json.Unmarshal([]byte(doc), &m); err != nil {
+		t.Fatalf("reply is not JSON: %v\n%s", err, doc)
 	}
 	return m
 }
 
-// A serialized spec to reduce. The engine's own JSON-builder fixture is
-// used when a sibling checkout has it; otherwise these tests skip rather
-// than assert against a grammar invented here.
-func fixture(t *testing.T) string {
+func loadHandle(t *testing.T) int64 {
 	t.Helper()
-	for _, p := range []string{
-		filepath.Join("..", "..", "..", "parser", "ts", "test",
-			"json-builder.fixture.json"),
-		filepath.Join("..", "..", "test", "json-builder.fixture.json"),
-	} {
-		if b, err := os.ReadFile(p); err == nil {
-			return string(b)
-		}
+	m := decode(t, loadGrammar(optsSample))
+	if m["ok"] != true {
+		t.Fatalf("loadGrammar failed: %v", m)
 	}
-	t.Skip("no serialized spec fixture available")
-	return ""
+	h, ok := m["handle"].(float64)
+	if !ok || h <= 0 {
+		t.Fatalf("no handle in %v", m)
+	}
+	return int64(h)
 }
 
 func TestVersionDoc(t *testing.T) {
-	got := doc(t, versionDoc())
-	if got["ok"] != true || got["version"] == "" || got["engine"] == "" {
-		t.Errorf("version: %v", got)
+	m := decode(t, versionDoc())
+	if m["ok"] != true || m["lib"] != libName || m["format"] != formatName {
+		t.Fatalf("bad version doc: %v", m)
+	}
+	if m["template"] != templateVersion {
+		t.Fatalf("template marker mismatch: %v", m)
 	}
 }
 
-// The property that makes the reduction worth exposing at all: what
-// comes out must still be a working grammar, not merely valid JSON.
-func TestReducedSpecStillParses(t *testing.T) {
-	for _, recognition := range []bool{true, false} {
-		res := doc(t, reduce(fixture(t), recognition))
-		if res["ok"] != true {
-			t.Fatalf("recognition=%v: %v", recognition, res)
+func TestAcceptsValidSample(t *testing.T) {
+	h := loadHandle(t)
+	defer freeGrammar(h)
+	m := decode(t, parseWith(h, validSample))
+	if m["ok"] != true || m["accept"] != true {
+		t.Fatalf("valid sample rejected: %v", m)
+	}
+	if valueOut {
+		if _, has := m["value"]; !has {
+			t.Fatalf("valueOut set but no value in: %v", m)
 		}
-		out, _ := res["spec"].(string)
-		if out == "" {
-			t.Fatalf("recognition=%v: empty spec", recognition)
-		}
+	}
+}
 
-		gs, err := tabnas.GrammarSpecFromJSON([]byte(out))
-		if err != nil {
-			t.Fatalf("recognition=%v: reduced spec will not load: %v",
-				recognition, err)
+// The silent-accept trap, guarded where it is cheap: a parser that
+// rejects nothing is validating nothing (see parser/go/clib/core.go's
+// start-rule refusal for the engine-level twin of this check).
+func TestRejectsInvalidSample(t *testing.T) {
+	if invalidSample == "" {
+		t.Skip("format has no rejectable sample (accepts any text)")
+	}
+	h := loadHandle(t)
+	defer freeGrammar(h)
+	m := decode(t, parseWith(h, invalidSample))
+	if m["ok"] != true {
+		t.Fatalf("rejection must be an answer (ok:true), got: %v", m)
+	}
+	if m["accept"] != false {
+		t.Fatalf("invalid sample accepted: %v", m)
+	}
+	if _, has := m["error"]; !has {
+		t.Fatalf("rejection carries no error payload: %v", m)
+	}
+}
+
+func TestUnknownHandle(t *testing.T) {
+	m := decode(t, parseWith(1<<40, validSample))
+	if m["ok"] != false {
+		t.Fatalf("unknown handle must be ok:false, got: %v", m)
+	}
+	e, _ := m["error"].(map[string]any)
+	if e == nil || e["code"] != "handle" {
+		t.Fatalf("unknown handle must carry code handle: %v", m)
+	}
+}
+
+func TestOptionsReserved(t *testing.T) {
+	if optsDefined {
+		t.Skip("this library defines its options; see TestDefinedOptionsRefuseJunk")
+	}
+	if m := decode(t, loadGrammar("{}")); m["ok"] != true {
+		t.Fatalf("empty options object refused: %v", m)
+	}
+	if m := decode(t, loadGrammar(`{"x":1}`)); m["ok"] != false {
+		t.Fatalf("non-empty options accepted before being defined: %v", m)
+	}
+	if m := decode(t, loadGrammar("not json")); m["ok"] != false {
+		t.Fatalf("junk options accepted: %v", m)
+	}
+	// `null` unmarshals into a nil map without error; it must not slip
+	// the reservation, and non-object documents must not either.
+	if m := decode(t, loadGrammar("null")); m["ok"] != false {
+		t.Fatalf("null options accepted: %v", m)
+	}
+	if m := decode(t, loadGrammar("[1]")); m["ok"] != false {
+		t.Fatalf("array options accepted: %v", m)
+	}
+}
+
+// A row that defines its options owns the argument, so the reservation
+// above does not apply — but the construct must still refuse a document
+// it cannot read, rather than build a handle from nothing.
+func TestDefinedOptionsRefuseJunk(t *testing.T) {
+	if !optsDefined {
+		t.Skip("options are reserved; see TestOptionsReserved")
+	}
+	if optsSample == "" {
+		t.Fatal("a row that defines options must supply an opts sample")
+	}
+	for _, junk := range []string{"not json", "[1]"} {
+		if m := decode(t, loadGrammar(junk)); m["ok"] != false {
+			t.Fatalf("junk options %q accepted: %v", junk, m)
 		}
-		tn := tabnas.Make()
-		if err := tn.Grammar(gs); err != nil {
-			t.Fatalf("recognition=%v: reduced spec will not install: %v",
-				recognition, err)
-		}
-		for _, c := range []struct {
-			src  string
-			want bool
-		}{
-			{`{"a":1}`, true},
-			{`{"a":1,"b":[1,2]}`, true},
-			{`{"a":1,}`, false},
-			{`{oops`, false},
-		} {
-			_, err := tn.Parse(c.src)
-			if (err == nil) != c.want {
-				t.Errorf("recognition=%v: %q accept=%v want %v",
-					recognition, c.src, err == nil, c.want)
+	}
+}
+
+func TestFreedHandleIsGone(t *testing.T) {
+	h := loadHandle(t)
+	freeGrammar(h)
+	freeGrammar(h) // double free is a no-op, not a fault
+	if m := decode(t, parseWith(h, validSample)); m["ok"] != false {
+		t.Fatalf("freed handle still parses: %v", m)
+	}
+}
+
+// FFI callers are under no obligation to serialise; the per-instance
+// mutex is load-bearing, and the -race detector holds this test to it.
+func TestConcurrentParses(t *testing.T) {
+	h := loadHandle(t)
+	defer freeGrammar(h)
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				m := map[string]any{}
+				_ = json.Unmarshal([]byte(parseWith(h, validSample)), &m)
+				if m["accept"] != true {
+					t.Errorf("concurrent parse rejected: %v", m)
+					return
+				}
 			}
-		}
+		}()
 	}
-}
-
-// What actually separates the two reductions, pinned on a spec that
-// exercises it.
-//
-// Recognition drops the TREE builtins (@node$ / @capture$ / @bubble$)
-// and the spec's own ref-backed actions; pure keeps them. It does NOT
-// drop the native-value family (@object$, @value$, …), so for a spec
-// built from those the two reductions are byte-identical — which is
-// true of the engine's json-builder fixture, and worth knowing before
-// reaching for recognition mode expecting it to shrink something.
-func TestRecognitionDropsTreeBuiltinsPureKeepsThem(t *testing.T) {
-	const spec = `{"rule":{"val":{"open":[{"s":["#NR"],"a":"@node$"}]}}}`
-
-	rec := doc(t, reduce(spec, true))
-	pure := doc(t, reduce(spec, false))
-	if rec["ok"] != true || pure["ok"] != true {
-		t.Fatalf("reduction failed: %v / %v", rec, pure)
-	}
-
-	if containsStr(rec["spec"].(string), "@node$") {
-		t.Errorf("recognition kept a tree builtin: %s", rec["spec"])
-	}
-	if !containsStr(pure["spec"].(string), "@node$") {
-		t.Errorf("pure dropped a tree builtin it should keep: %s", pure["spec"])
-	}
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
-func TestBadInputIsACallErrorNotASpec(t *testing.T) {
-	for _, c := range []struct{ name, src string }{
-		{"not JSON", "{not a spec"},
-		{"truncated", `{"rule":`},
-	} {
-		res := doc(t, reduce(c.src, true))
-		if res["ok"] != false {
-			t.Errorf("%s: accepted, got %v", c.name, res)
-		}
-		if _, leaked := res["spec"]; leaked {
-			t.Errorf("%s: a failure must not carry a spec: %v", c.name, res)
-		}
-	}
-}
-
-// Emitted through ToJsonic rather than encoding/json, because a regex
-// travels as an "@/src/flags" sentinel. encoding/json would write {} for
-// the holder and the grammar would lex nothing — the failure this
-// asserts against.
-func TestMatchTokensSurviveTheReduction(t *testing.T) {
-	out := doc(t, reduce(fixture(t), true))["spec"].(string)
-	var back map[string]any
-	if err := json.Unmarshal([]byte(out), &back); err != nil {
-		t.Fatalf("emitted spec is not valid JSON: %v", err)
-	}
-	opts, _ := back["options"].(map[string]any)
-	if m, ok := opts["match"].(map[string]any); ok {
-		tok, _ := m["token"].(map[string]any)
-		for name, v := range tok {
-			s, isStr := v.(string)
-			if !isStr || (len(s) > 1 && s[0] != '@') {
-				t.Errorf("match token %q serialized as %#v, not a sentinel",
-					name, v)
-			}
-		}
-	}
+	wg.Wait()
 }
