@@ -1,6 +1,6 @@
 {
   "name": "@tabnas/bnf",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "main": "dist/bnf.js",
   "type": "commonjs",
   "types": "dist/bnf.d.ts",
@@ -48,8 +48,8 @@
   },
   "devDependencies": {
     "@tabnas/parser": "*",
-    "@types/node": "25.6.0",
-    "typescript": "6.0.3"
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2"
   },
   "engines": {
     "node": ">=24"
