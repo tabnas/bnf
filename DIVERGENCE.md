@@ -68,13 +68,17 @@ the first refused one.
 
 ## Engine, observed through this compiler
 
-`R = [ A "@" ] A` with `A = 1*ALPHA` (a probe dispatcher) compiles to
-the same document in both runtimes. Run on the TypeScript engine the
-value is `{ rule: "R", src: "", kids: [] }`; on the Rust engine it is the
-full tree. This is the parser's difference, not this compiler's: the
-parser repository's `ci/rust/notation-corpus.js` reports it for the
-identical case. `rs/tests/oracle_test.rs` registers it in
-`ENGINE_VALUE_DIVERGENCES` so it cannot pass or regress silently.
+This section records differences the parser makes between its runtimes,
+seen here because the same compiled document runs on both.
+`rs/tests/oracle_test.rs` registers each one so it cannot pass or regress
+silently.
+
+Its value register, `ENGINE_VALUE_DIVERGENCES`, is empty. The one entry
+it held was the probe dispatcher `R = [ A "@" ] A`, which the TypeScript
+engine returns as `{ rule: "R", src: "", kids: [] }` and the Rust engine
+returned as the full tree. tabnas/parser#206 (commit a801621) made the
+Rust engine keep the parent's child link on the rule it pushed, as
+TypeScript and Go do, and the two now agree.
 
 ### A nullable suffix around hidden left recursion is not recognised
 

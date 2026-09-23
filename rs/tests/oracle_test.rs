@@ -235,11 +235,12 @@ fn emits_the_same_recognition_spec_as_typescript() {
 /// as stale, an unlisted case that starts differing fails as a
 /// regression.
 ///
-/// `abnf-3` is `R = [ A "@" ] A`, a probe dispatcher: the TypeScript
-/// engine returns `R` with an empty `src` and no kids, the Rust engine
-/// (like the Go one) the full tree.
-const ENGINE_VALUE_DIVERGENCES: &[(&str, &str)] =
-    &[("abnf-3", "ab"), ("abnf-3", "a@b"), ("abnf-3", "a")];
+/// Empty today. `abnf-3` (`R = [ A "@" ] A`, a probe dispatcher) was
+/// listed until tabnas/parser#206 (commit a801621) kept the parent's
+/// child link on the rule it pushed, as TypeScript and Go do: the Rust
+/// engine now returns the same `{ rule: "R", src: "", kids: [] }` the
+/// TypeScript engine does, where it used to return the full tree.
+const ENGINE_VALUE_DIVERGENCES: &[(&str, &str)] = &[];
 
 /// Cases the TypeScript ENGINE accepts and this engine rejects, from the
 /// same serialized document. Like the value register above these are the

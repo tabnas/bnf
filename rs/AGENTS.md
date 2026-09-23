@@ -86,12 +86,11 @@ the same value or the same error code from each; that is the compiler
 claim. It separately compares against the TypeScript ENGINE's recorded
 verdict: accept/reject and the error code must match, and a VALUE that
 differs has to be listed in `ENGINE_VALUE_DIVERGENCES`, asserted both
-ways (a listed case that starts agreeing fails as stale). The one entry
-today is the probe-dispatch grammar `R = [ A "@" ] A`, where the
-TypeScript engine returns `R` with an empty `src` and no kids and this
-engine the full tree; the parser repository's own
-`ci/rust/notation-corpus.js` reports the same difference. It is the
-engine's, not this compiler's.
+ways (a listed case that starts agreeing fails as stale). The register
+is empty today. Its one entry, the probe-dispatch grammar
+`R = [ A "@" ] A`, started agreeing once tabnas/parser#206 (commit
+a801621) made the Rust engine keep the parent's child link on the rule
+it pushed, as TypeScript and Go do.
 
 A second register, `ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS`, holds the
 cases the TypeScript engine accepts and this engine rejects from the
