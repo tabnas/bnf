@@ -1,0 +1,90 @@
+# The downstream gate: the abnf, ebnf and gbnf suites, run against THIS
+# tree (tabnas/bnf#48, the half of #41 that a local command could not
+# close on its own).
+#
+# `deps:` in ci.yml clones what this package builds AGAINST, never what
+# builds against it, so without this file every front-end suite sits
+# downstream of a green run here. #41 is what that cost: 0.1.12 emitted
+# correctly, two front-ends discarded part of what it emitted, and 185
+# gbnf tests plus 1 ebnf test were red for two weeks while this repo
+# stayed green.
+#
+# Standalone rather than a `downstream:` input on the org-shared
+# polyglot-ci.yml, for the reason rust.yml gives: that workflow takes no
+# such input, and adding this file needs no change in tabnas/.github.
+# Everything it does is scripts/downstream.sh, so this file and a
+# contributor's `make downstream` cannot say different things.
+name: Downstream
+
+# Runs on EVERY branch push, not just main, with the path lists written
+# out twice, for the reasons docs.yml and rust.yml record. `branches` is
+# set so that a tag push, which Actions does not path-filter, does not run
+# it once per release tag.
+#
+# The paths are what reaches a front-end: the TypeScript source (and so
+# the packed dist/), the package manifest (its "files" decide what the
+# pack carries), and the Go module.
+on:
+  push:
+    branches: [ '**' ]
+    paths:
+      - 'ts/src/**'
+      - 'ts/package.json'
+      - 'go/**'
+      - 'scripts/downstream.sh'
+      - '.github/workflows/downstream.yml'
+  pull_request:
+    paths:
+      - 'ts/src/**'
+      - 'ts/package.json'
+      - 'go/**'
+      - 'scripts/downstream.sh'
+      - '.github/workflows/downstream.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  downstream:
+    runs-on: ubuntu-latest
+    # A full run is about three minutes, most of it abnf's Go conformance
+    # suite. The limit only stops a hung sibling from holding a runner for
+    # the default six hours.
+    timeout-minutes: 30
+    steps:
+      # Checked out into a NAMED directory: the script finds each
+      # front-end at ../<name>, beside this checkout.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          path: bnf
+
+      # The same pins polyglot-ci.yml uses, so this job runs on the Node
+      # and Go the ci.yml jobs do.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: '24.x'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: '1.24'
+
+      # Each front-end at its default branch, installed the way its own CI
+      # installs it: every dependency from the registry. The script then
+      # swaps ONLY @tabnas/bnf for this tree's `npm pack` output, and points
+      # each Go module at go/ through a workspace file in a temp dir.
+      - name: Clone and install the front-ends
+        run: |
+          set -e
+          for p in abnf ebnf gbnf; do
+            git clone --depth 1 "https://github.com/tabnas/$p.git" "$p"
+            (cd "$p/ts" && npm i --no-audit --no-fund)
+          done
+          (cd bnf/ts && npm i --no-audit --no-fund)
+
+      # Builds each front-end before testing it, runs every one even after
+      # one goes red, and fails at the end naming each red suite. What it
+      # does NOT prove is that a clean consumer can RESOLVE this package:
+      # the Go half runs under a workspace, which never consults go.sum.
+      # See the script's header.
+      - name: Downstream suites
+        run: bnf/scripts/downstream.sh

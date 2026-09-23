@@ -39,8 +39,8 @@ are not:
 | `ts/src/bnf.ts` | Package entry; re-exports the public surface. |
 | `go/` | Go port (follows TS). |
 | `rs/` | Rust port (follows TS): the `tabnas-bnf` crate. Depends on the engine's `tabnas` crate via a `path` dependency on the sibling checkout (`../../parser/rs`). Library only. Holds its emitter to the TypeScript compiler's serialised output byte for byte in `rs/tests/oracle_test.rs`. See `rs/AGENTS.md`. |
-| `ci/` | Workflows and scripts **staged** for promotion into `.github/workflows/` by someone whose credentials can write there: `ci/workflows/rust.yml` (the Rust gate), `ci/workflows/docs.yml` (the prose gate), `ci/rust/run.sh` (what the Rust gate runs). |
-| `scripts/downstream.sh` | Runs the front-end suites against this working tree (`make downstream`). The gate CI here cannot be. |
+| `ci/` | `ci/rust/run.sh`, the Rust gate: what `.github/workflows/rust.yml` runs, and what you run locally. The workflows once staged under `ci/workflows/` now live in `.github/workflows/`. |
+| `scripts/downstream.sh` | Runs the front-end suites against this working tree: `make downstream` locally, `.github/workflows/downstream.yml` in CI. |
 
 ## Provenance, and why the tests live downstream
 
@@ -56,17 +56,20 @@ third-party `.abnf` files. After the split, all 300 of its tests passed
 unchanged. When you change something here, run that suite as well as
 this package's own; a green build here proves much less.
 
-**This repo's CI does not run any of it.** `deps:` in `.github/workflows/ci.yml`
+**`ci.yml` does not run any of it.** `deps:` in `.github/workflows/ci.yml`
 clones what this package builds *against*, never what builds against it, so
-every front-end suite is downstream of a green run here. tabnas/bnf#41 is
+every front-end suite is downstream of a green run there. tabnas/bnf#41 is
 what that costs: `0.1.12` emitted correctly, the front-ends discarded part
 of it, and 185 gbnf tests plus 1 ebnf test were red for two weeks while
-this repo stayed green throughout. `make downstream` is the local answer;
-closing it in CI needs a downstream step in
-`tabnas/.github`'s `polyglot-ci.yml` and a matching `with:` here, and
-**neither file is session-writable** — `.github/workflows/*` takes a
-maintainer running tabnas/admin `rollout/apply-ci-folders.sh`
-(admin DECISIONS.md ADR-8).
+this repo stayed green throughout.
+
+**`.github/workflows/downstream.yml` does** (tabnas/bnf#48). It runs
+`scripts/downstream.sh`, the script behind `make downstream`, over abnf,
+ebnf and gbnf at their default branches, on every push and pull request
+that changes `ts/src/`, `ts/package.json` or `go/`. It is a workflow of
+its own rather than a `downstream:` input on the org-shared
+`polyglot-ci.yml`, which has no such input, for the reason `rust.yml`
+gives: adding it needs no change in `tabnas/.github`.
 
 ## Authority and alignment rules
 
@@ -141,8 +144,11 @@ order of authority:
    verification oracle for this compiler (see "Provenance" above), and
    `gbnf` and `ebnf` sit on the same emit pipeline. `make downstream`
    runs all three against this working tree and is what "done" means for
-   an emit-pipeline change — CI here cannot do it for you, so nothing but
-   running it stands between a correct emitter and tabnas/bnf#41.
+   an emit-pipeline change. The Downstream workflow runs the same script
+   on your pull request, but only after you push, and only against each
+   front-end's default branch: a change that needs a front-end to change
+   with it stays red there until that front-end's change lands. Run it
+   locally first, against the sibling checkouts you mean to pair it with.
 
    It hands each sibling this tree the way npm would deliver it
    (`npm pack`, so only what `"files"` publishes) and points its Go module
