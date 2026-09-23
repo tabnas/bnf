@@ -147,7 +147,7 @@ not the grammar:
   input and the passes over an element are recursive, so a grammar that
   nests one element deeper than that is an error return naming the rule.
   TypeScript keeps going several hundred levels further before raising a
-  catchable `RangeError`. No grammar an author writes comes close.
+  `RangeError` the caller can catch. No grammar an author writes comes close.
 - **Diagnostics are prefixed per thread.** The tag of the most recent
   emit on the current thread prefixes every diagnostic this compiler
   raises, so two threads compiling two notations never see each other's
