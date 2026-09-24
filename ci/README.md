@@ -25,10 +25,10 @@ only here does not last:
   template back over it.
 - `clib.yml` and `clib-release.yml` are stamped from admin
   `tasks/clib-template/`, together with `go/clib/`. Change the template
-  and restamp with admin `tasks/adopt-clib.sh`, which writes the two
-  workflows to `ci/`, then move them over the copies in
-  `.github/workflows/` in the same pull request. Admin `scripts/verify.sh`
-  reports a `ci/*.yml` left behind as a promotion still owed.
+  and restamp with admin `tasks/adopt-clib.sh`, which writes both
+  workflows straight into `.github/workflows/`. The new stamp lands in
+  this repository's own reviewed pull request. Admin `scripts/verify.sh`
+  reports a stamped file that differs from its template.
 
 `docs.yml` and `rust.yml`, the last workflows staged here, were promoted
 to `.github/workflows/` on 2026-09-22.
