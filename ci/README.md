@@ -11,23 +11,5 @@ This directory exists because session credentials cannot write
 
 ## Pending
 
-- **`workflows/docs.yml`** — the prose gate: Vale over the reader-facing
-  pages at the levels set in `.vale.ini`, on the file list
-  `ts/scripts/gated-docs.cjs` produces. See `docs/STYLE-GUIDE.md`.
-
-  It needs no sibling checkouts and no secrets, and pins its own Vale
-  version. Errors fail the job; warnings go to the run summary as a
-  report. `make prose` runs the identical check locally, and the other
-  half of the gate (`ts/test/docs.test.js`) already runs in `make test`,
-  so promoting this adds the spelling and Google-convention arm rather
-  than the whole gate.
-
-- **`workflows/rust.yml`** — the Rust gate: `ci/rust/run.sh` on the MSRV
-  toolchain, with the engine cloned as a sibling checkout the way the Go
-  CI already resolves `github.com/tabnas/parser/go` from `main`. It runs
-  `cargo fmt --check`, a build, the tests, the doctests (which include
-  the README's examples), clippy with warnings denied, and a lockfile
-  check that exempts only the engine's recorded version. Standalone
-  rather than an arm of `ci.yml`, because the org-shared polyglot
-  workflow takes no Rust input, so promoting it needs no change in
-  `tabnas/.github`.
+Nothing is pending. `docs.yml` and `rust.yml`, the last workflows
+staged here, were promoted to `.github/workflows/` on 2026-09-22.

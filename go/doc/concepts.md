@@ -97,7 +97,7 @@ that no author wrote.
 ### Why there is a provenance map
 
 Those generated names are not an implementation detail once a tool shows
-them to a person. A rule stack, a hover, a completion list and an
+them to a person. A rule stack, a hover, a completion list, and an
 outline all name rules, and `list$star2` means nothing to somebody who
 wrote `list`.
 

@@ -121,7 +121,7 @@ threading it through the twenty-odd functions that raise a diagnostic.
 In TypeScript that is free: the pipeline is synchronous and the runtime
 is single-threaded, so no second conversion can begin until the first
 returns. In Go nothing stops two goroutines calling `EmitGrammarSpec` at
-once, and when they did, the loser's diagnostics named the WINNER's
+once, and when they did, the loser's diagnostics named the *winner's*
 notation (`gbnf: rule 'x' …` on an error about a rule the ABNF author
 wrote). The race detector reports it as a write-write race on
 `diagPrefix`; what a user saw was the wrong prefix.
