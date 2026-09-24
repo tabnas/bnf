@@ -11,12 +11,5 @@ This directory exists because session credentials cannot write
 
 ## Pending
 
-- **`workflows/rust.yml`** — the Rust gate: `ci/rust/run.sh` on the MSRV
-  toolchain, with the engine cloned as a sibling checkout the way the Go
-  CI already resolves `github.com/tabnas/parser/go` from `main`. It runs
-  `cargo fmt --check`, a build, the tests, the doctests (which include
-  the README's examples), clippy with warnings denied, and a lockfile
-  check that exempts only the engine's recorded version. Standalone
-  rather than an arm of `ci.yml`, because the org-shared polyglot
-  workflow takes no Rust input, so promoting it needs no change in
-  `tabnas/.github`.
+Nothing is pending. `docs.yml` and `rust.yml`, the last workflows
+staged here, were promoted to `.github/workflows/` on 2026-09-22.
