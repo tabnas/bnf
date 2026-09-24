@@ -2,7 +2,7 @@
 
 // Package main builds the C-ABI shared library: libtabnasbnf.
 //
-// tabnas-clib-template: v4 (stamped by admin tasks/adopt-clib.sh;
+// tabnas-clib-template: v5 (stamped by admin tasks/adopt-clib.sh;
 // edit the template and re-stamp, not this file).
 //
 //	go build -buildmode=c-shared -o libtabnasbnf.so ./clib
