@@ -269,3 +269,51 @@ func TestContestEngineTokenMeetsWhatItsMatcherCanTake(t *testing.T) {
 	// flag. Go's regexp has no `\u{...}` escape, so such a pattern never
 	// reaches the predicate here.
 }
+
+func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
+	// The head scanner and the coverage reader take an escape the same
+	// way: one code point they can name, or unknown. `\u1` and `\x1` are
+	// `u` then `1` and `x` then `1` in the JavaScript matcher the
+	// canonical runtime emits for, and `\cA`, `\p{L}`, `\k` and a digit
+	// escape are a control character, a property, a group or a back
+	// reference, none of them the letter after the backslash. Go's regexp
+	// compiles only some of these, so they are pinned on the two readers.
+	for _, p := range []string{`\u1`, `\x1`, `\u12`, `\uD83D`, `\u{}`, `\u{4g}`, `\x{110000}`,
+		`\cA`, `\p{L}`, `\PL`, `\k<a>`, `\1`, `\0`, `\d`} {
+		if end := regexHeadAtomEnd(p); end != -1 {
+			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
+		}
+		if r := patternCharRanges(p); r != nil {
+			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
+		}
+	}
+	for _, p := range []string{`[\p{L}]`, `[a\1]`, `[\u1]`} {
+		if r := patternCharRanges(p); r != nil {
+			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
+		}
+	}
+	for _, c := range []struct {
+		p   string
+		end int
+		cp  rune
+	}{
+		{`\u0041`, 6, 'A'}, {`\x41`, 4, 'A'}, {`\x{41}`, 6, 'A'}, {`\u{1F600}`, 9, 0x1F600}, {`\.`, 2, '.'},
+	} {
+		if end := regexHeadAtomEnd(c.p); end != c.end {
+			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
+		}
+		if r := patternCharRanges(c.p); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
+			t.Errorf("patternCharRanges(%q) = %v, want %U", c.p, r, c.cp)
+		}
+	}
+	// And through the dispatcher, where the regexp compiles: a property
+	// class meets a letter it covers.
+	spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: `[\p{L}]`}, ctLit("é")),
+		&ConvertOptions{Tag: "ct", Start: "doc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+		t.Fatalf(`[\p{L}]: depths %v, want [2 2]`, d)
+	}
+}

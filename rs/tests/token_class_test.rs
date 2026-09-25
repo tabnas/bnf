@@ -149,3 +149,24 @@ fn a_production_with_a_member_that_consumes_nothing_is_not_a_class() {
         assert!(parses(&on, "ab", false));
     }
 }
+
+#[test]
+fn a_production_whose_name_holds_whitespace_is_not_a_class() {
+    // The set standing for a class is named after it, and an alternate's
+    // `s` separates token names with whitespace, so `#C D` would read as
+    // two tokens. Such a production stays plain, as with the option off.
+    for name in ["C D", "C\tD", "C\u{a0}D", "C\u{85}D", "C\u{feff}D"] {
+        let g = || {
+            vec![
+                prod("doc", vec![vec![reference("x")]]),
+                prod("x", vec![vec![reference(name), sens_term("b")]]),
+                prod(name, vec![vec![sens_term("a")], vec![sens_term("c")]]),
+            ]
+        };
+        let on = emit(g(), true);
+        assert!(token_set_names(&on).is_empty(), "{name:?}");
+        assert_eq!(alt_seqs(&on, "x"), alt_seqs(&emit(g(), false), "x"));
+        assert!(parses(&on, "ab", false), "{name:?}");
+        assert!(parses(&on, "cb", false), "{name:?}");
+    }
+}

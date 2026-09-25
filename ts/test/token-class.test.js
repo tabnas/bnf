@@ -107,4 +107,23 @@ describe('token-class', () => {
     }
   })
 
+
+  it('a production whose name holds whitespace is not a class', () => {
+    // The set standing for a class is named after it, and an alternate's
+    // `s` separates token names with whitespace, so `#C D` would read as
+    // two tokens. Such a production stays plain, as with the option off.
+    for (const name of ['C D', 'C\tD', 'C\u00a0D', 'C\u0085D', 'C\ufeffD']) {
+      const g = [
+        prod('doc', [ref('x')]),
+        prod('x', [ref(name), lit('b')]),
+        prod(name, [lit('a')], [lit('c')]),
+      ]
+      const on = emit(g, true)
+      assert.deepEqual(sets(on), [], JSON.stringify(name))
+      assert.deepEqual(seqs(on, 'x'), seqs(emit(g, false), 'x'))
+      assert.ok(parses(on, 'ab'), JSON.stringify(name))
+      assert.ok(parses(on, 'cb'), JSON.stringify(name))
+    }
+  })
+
 })

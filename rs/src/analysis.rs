@@ -676,6 +676,14 @@ pub(crate) fn is_single_segment(alt: &Sequence) -> bool {
     true
 }
 
+/// Whitespace by every runtime's reading: `char::is_whitespace`, which is
+/// Go's `unicode.IsSpace`, together with U+FEFF, which JavaScript's `\s`
+/// counts and they do not (`\s` in turn leaves out U+0085, which they
+/// count). Mirrors the TS `HAS_SPACE`.
+fn is_name_space(c: char) -> bool {
+    c.is_whitespace() || c == '\u{FEFF}'
+}
+
 /// The token classes of a grammar (`ConvertOptions::token_classes`): every
 /// alternative one literal or engine token, at least two of them. A
 /// character class (`regex`) is not a member: those are laid over the
@@ -699,7 +707,12 @@ pub(crate) fn token_class_names(grammar: &Grammar) -> IndexSet<String> {
         // cannot take its own name, and an empty name has none to take
         // (`alloc_token_name` names the set after its content instead),
         // so neither is a class.
-        if prod.name.is_empty() || crate::emit::is_engine_owned_token(&format!("#{}", prod.name)) {
+        // Nor is a name holding whitespace: an alternate's `s` separates
+        // token names with it, so `#C D` would read as two.
+        if prod.name.is_empty()
+            || prod.name.chars().any(is_name_space)
+            || crate::emit::is_engine_owned_token(&format!("#{}", prod.name))
+        {
             continue;
         }
         // Each member is one token the lexer emits. An empty literal

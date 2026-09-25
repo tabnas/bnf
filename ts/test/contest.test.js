@@ -168,4 +168,29 @@ describe('contest', () => {
     assert.deepEqual(depthsOf(unicode), [1, 1])
   })
 
+  it('an escape whose code point cannot be read is not an exact head', () => {
+    // Without the `u` flag `\u1` is `u` then `1`, and `\x1` is `x` then
+    // `1`: neither is U+0001. `\cA`, `\p{L}`, `\k` and a digit escape
+    // name a control character, a property, a group or a backreference,
+    // none of which is the letter after the backslash. A head the
+    // coverage cannot read contests every head.
+    for (const [pattern, text] of [['\\u1', 'u1'], ['\\x1', 'x1']]) {
+      const spec = emitGrammarSpec(semi(rx(pattern), lit(text[0])), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], pattern)
+      assert.ok(parses(spec, text + ';;!!', { lex: { relex: true } }), text + ';;!!')
+      assert.ok(parses(spec, text[0] + '!!;;', { lex: { relex: true } }), text[0] + '!!;;')
+    }
+    for (const [pattern, flags, other] of [
+      ['\\cA', '', 'c'],
+      ['[\\p{L}]', 'u', 'é'],
+      ['[\\1]', '', '1'],
+    ]) {
+      const spec = emitGrammarSpec(semi(rx(pattern, flags), lit(other)), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], pattern)
+    }
+    // Four hex digits, or two, are the code point they spell.
+    const exact = emitGrammarSpec(semi(rx('\\u0041'), lit('u')), { tag: 'ct', start: 'doc' })
+    assert.deepEqual(depthsOf(exact), [1, 1])
+  })
+
 })

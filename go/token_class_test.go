@@ -189,3 +189,30 @@ func TestTokenClassMemberThatConsumesNothingIsNotAClass(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenClassNameWithWhitespaceIsNotAClass(t *testing.T) {
+	// The set standing for a class is named after it, and an alternate's
+	// S separates token names with whitespace, so `#C D` would read as
+	// two tokens. Such a production stays plain, as with the option off.
+	for _, name := range []string{"C D", "C\tD", "C\u00a0D", "C\u0085D", "C\ufeffD"} {
+		g := func() []*Production {
+			return []*Production{
+				{Name: "doc", Alts: []Sequence{{ctRef("x")}}},
+				{Name: "x", Alts: []Sequence{{ctRef(name), ctLit("b")}}},
+				{Name: name, Alts: []Sequence{{ctLit("a")}, {ctLit("c")}}},
+			}
+		}
+		on := tcEmit(t, g(), true)
+		if sets := tcSets(on); len(sets) != 0 {
+			t.Fatalf("%q: token sets %v, want none", name, sets)
+		}
+		if got, want := ctSeqs(t, on, "x"), ctSeqs(t, tcEmit(t, g(), false), "x"); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q: x %q, want the option-off %q", name, got, want)
+		}
+		for _, src := range []string{"ab", "cb"} {
+			if !ctParses(t, on, src, false) {
+				t.Errorf("%q: %s should parse", name, src)
+			}
+		}
+	}
+}

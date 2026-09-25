@@ -66,33 +66,84 @@ func regexHeadAtomEnd(src string) int {
 		}
 		return -1
 	case c == '\\':
-		if len(src) < 2 {
+		// Exactly the escapes patternCharRanges reads: a head this calls
+		// one atom must be one whose coverage is known.
+		r := []rune(src)
+		n, _, ok := readEscape(r, 0)
+		if !ok {
 			return -1
 		}
-		switch m := src[1]; {
-		case m == 'u':
-			if len(src) > 2 && src[2] == '{' {
-				e := strings.IndexByte(src[3:], '}')
-				if e < 0 {
-					return -1
-				}
-				return 3 + e + 1
-			}
-			return 6
-		case m == 'x':
-			return 4
-		case strings.IndexByte("dDwWsSbB0nrtfv", m) >= 0:
-			// Exactly the escapes patternCharRanges declines to name: a
-			// head this calls one atom must be one whose coverage is known.
-			return -1
-		default:
-			return 2
-		}
+		return len(string(r[:n]))
 	case strings.IndexByte("(.|)?*+{", c) >= 0:
 		return -1
 	}
 	_, size := utf8.DecodeRuneInString(src)
 	return size
+}
+
+// readEscape reads the escape at r[at] as one code point: its length in
+// runes and the code point, or ok false when it is not one this can name.
+// A shorthand class, a control or property escape, a group or back
+// reference, and a digit escape all bail rather than guess, and so does a
+// hex escape without its full digits (`\u1` is `u` then `1` in the
+// JavaScript matcher the canonical runtime emits for, not U+0001) or one
+// naming half of a surrogate pair. Unknown coverage keeps every caller
+// conservative. Mirrors the TS readEscape, plus RE2's `\x{…}`: the TS side
+// never writes that form (JavaScript spells it `\u{…}`), but the Go
+// emitter does, for every character class it builds.
+func readEscape(r []rune, at int) (int, rune, bool) {
+	if at+1 >= len(r) {
+		return 0, 0, false
+	}
+	m := r[at+1]
+	if (m == 'u' || m == 'x') && at+2 < len(r) && r[at+2] == '{' {
+		e := -1
+		for k := at + 3; k < len(r); k++ {
+			if r[k] == '}' {
+				e = k
+				break
+			}
+		}
+		if e < 0 || !hexDigits(r[at+3:e], 1, 6) {
+			return 0, 0, false
+		}
+		cp, _ := strconv.ParseInt(string(r[at+3:e]), 16, 32)
+		if cp > maxCodePoint {
+			return 0, 0, false
+		}
+		return e + 1 - at, rune(cp), true
+	}
+	if m == 'u' || m == 'x' {
+		digits := 4
+		if m == 'x' {
+			digits = 2
+		}
+		if at+2+digits > len(r) || !hexDigits(r[at+2:at+2+digits], digits, digits) {
+			return 0, 0, false
+		}
+		cp, _ := strconv.ParseInt(string(r[at+2:at+2+digits]), 16, 32)
+		if 0xD800 <= cp && cp <= 0xDFFF {
+			return 0, 0, false
+		}
+		return 2 + digits, rune(cp), true
+	}
+	if strings.ContainsRune("dDwWsSbBnrtfvckpP0123456789", m) {
+		return 0, 0, false
+	}
+	return 2, m, true
+}
+
+// hexDigits reports whether r is between min and max hexadecimal digits.
+func hexDigits(r []rune, min, max int) bool {
+	if len(r) < min || len(r) > max {
+		return false
+	}
+	for _, c := range r {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func patternCharRanges(pattern string) []charRange {
@@ -114,78 +165,12 @@ func patternCharRanges(pattern string) []charRange {
 			i++
 			return c, true
 		}
-		if i+1 >= len(r) {
+		n, cp, ok := readEscape(r, i)
+		if !ok {
 			return 0, false
 		}
-		m := r[i+1]
-		switch {
-		case m == 'u' && i+2 < len(r) && r[i+2] == '{':
-			e := -1
-			for k := i + 3; k < len(r); k++ {
-				if r[k] == '}' {
-					e = k
-					break
-				}
-			}
-			if e < 0 {
-				return 0, false
-			}
-			cp, err := strconv.ParseInt(string(r[i+3:e]), 16, 32)
-			if err != nil {
-				return 0, false
-			}
-			i = e + 1
-			return rune(cp), true
-		case m == 'u':
-			if i+6 > len(r) {
-				return 0, false
-			}
-			cp, err := strconv.ParseInt(string(r[i+2:i+6]), 16, 32)
-			if err != nil {
-				return 0, false
-			}
-			i += 6
-			return rune(cp), true
-		case m == 'x' && i+2 < len(r) && r[i+2] == '{':
-			// RE2's brace form. The TS side never writes this — JS spells
-			// the same thing `\u{…}` — but the GO emitter does, for every
-			// character class it builds. Reading only `\xHH` here made
-			// every Go-emitted class's coverage UNKNOWN, which silently
-			// switched off every contest check downstream: no guards, and
-			// a valid sentence rejected.
-			e := -1
-			for k := i + 3; k < len(r); k++ {
-				if r[k] == '}' {
-					e = k
-					break
-				}
-			}
-			if e < 0 {
-				return 0, false
-			}
-			cp, err := strconv.ParseInt(string(r[i+3:e]), 16, 32)
-			if err != nil {
-				return 0, false
-			}
-			i = e + 1
-			return rune(cp), true
-		case m == 'x':
-			if i+4 > len(r) {
-				return 0, false
-			}
-			cp, err := strconv.ParseInt(string(r[i+2:i+4]), 16, 32)
-			if err != nil {
-				return 0, false
-			}
-			i += 4
-			return rune(cp), true
-		case strings.ContainsRune(`dDwWsSbB0nrtfv`, m):
-			// Shorthand classes and control escapes: bail rather than
-			// guess — unknown coverage keeps the caller conservative.
-			return 0, false
-		}
-		i += 2
-		return m, true
+		i += n
+		return cp, true
 	}
 
 	if len(r) == 0 {

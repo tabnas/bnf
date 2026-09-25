@@ -3130,6 +3130,11 @@ function nullableRules(prods: Production[]): Set<string> {
 }
 
 
+// Whitespace by every runtime's reading: JavaScript's `\s` together with
+// U+0085, which Go's unicode.IsSpace and Rust's char::is_whitespace count
+// and `\s` does not (they in turn leave out U+FEFF, which `\s` counts).
+const HAS_SPACE = /[\s\u0085]/
+
 // Convert an ABNF grammar AST into a tabnas GrammarSpec.
 // The token classes of a grammar (`ConvertOptions.tokenClasses`): every
 // alternative one literal or engine token, at least two of them. A
@@ -3146,8 +3151,10 @@ function tokenClassNames(grammar: Grammar): Set<string> {
     // set: a production named like an engine token (`TX`, `ZZ`) cannot
     // take its own name, and an empty name has none to take
     // (allocTokenName names the set after its content instead), so
-    // neither is a class.
-    if ('' === prod.name || isEngineOwnedToken('#' + prod.name)) continue
+    // neither is a class. Nor is a name holding whitespace: an alternate's
+    // `s` separates token names with it, so `#C D` would read as two.
+    if ('' === prod.name || HAS_SPACE.test(prod.name) ||
+      isEngineOwnedToken('#' + prod.name)) continue
     // Each member is one token the lexer emits. An empty literal matches
     // nothing, and `#ZZ` and `#AA` can be satisfied without input
     // (elementDerivesEmpty); the set standing for the class is one token
@@ -5701,24 +5708,50 @@ function regexHeadAtomEnd(src: string): number {
     return i < src.length ? i + 1 : -1
   }
   if ('\\' === c) {
-    const m = src[1]
-    if (undefined === m) return -1
-    if ('u' === m) {
-      if ('{' === src[2]) {
-        const e = src.indexOf('}', 3)
-        return e < 0 ? -1 : e + 1
-      }
-      return 6
-    }
-    if ('x' === m) return 4
-    // Exactly the escapes patternCharRanges declines to name: a head
-    // this calls one atom must be one whose coverage is known.
-    if ('dDwWsSbB0nrtfv'.includes(m)) return -1
-    return 2
+    // Exactly the escapes patternCharRanges reads: a head this calls one
+    // atom must be one whose coverage is known.
+    const n = escapeLength(src, 0)
+    return null == n ? -1 : n
   }
   if ('(.|)?*+{'.includes(c)) return -1
   const cp = src.codePointAt(0) as number
   return cp > 0xFFFF ? 2 : 1
+}
+
+// The escape at `at` in a pattern, read as one code point: its length
+// and the code point, or null when it is not one this can name. A
+// shorthand class, a control or property escape, a group or back
+// reference, and a digit escape all bail rather than guess, and so does
+// a hex escape without its full digits (`\u1` is `u` then `1` without the
+// `u` flag, not U+0001) or one naming half of a surrogate pair. Unknown
+// coverage keeps every caller conservative.
+function readEscape(src: string, at: number): [number, number] | null {
+  const m = src[at + 1]
+  if (undefined === m) return null
+  if ('u' === m && '{' === src[at + 2]) {
+    const e = src.indexOf('}', at + 3)
+    if (e < 0) return null
+    const hex = src.slice(at + 3, e)
+    if (!/^[0-9A-Fa-f]{1,6}$/.test(hex)) return null
+    const cp = parseInt(hex, 16)
+    return 0x10FFFF < cp ? null : [e + 1 - at, cp]
+  }
+  if ('u' === m || 'x' === m) {
+    const digits = 'u' === m ? 4 : 2
+    const hex = src.slice(at + 2, at + 2 + digits)
+    if (digits !== hex.length || !/^[0-9A-Fa-f]+$/.test(hex)) return null
+    const cp = parseInt(hex, 16)
+    if (0xD800 <= cp && cp <= 0xDFFF) return null
+    return [2 + digits, cp]
+  }
+  if (/[dDwWsSbBnrtfvckpP0-9]/.test(m)) return null
+  const cp = src.codePointAt(at + 1) as number
+  return [cp > 0xFFFF ? 3 : 2, cp]
+}
+
+function escapeLength(src: string, at: number): number | null {
+  const e = readEscape(src, at)
+  return null == e ? null : e[0]
 }
 
 function patternCharRanges(
@@ -5732,35 +5765,10 @@ function patternCharRanges(
     const c = pattern[i]
     if (undefined === c) return null
     if ('\\' === c) {
-      const m = pattern[i + 1]
-      if (undefined === m) return null
-      if ('u' === m) {
-        if ('{' === pattern[i + 2]) {
-          const e = pattern.indexOf('}', i + 3)
-          if (e < 0) return null
-          const cp = parseInt(pattern.slice(i + 3, e), 16)
-          if (isNaN(cp)) return null
-          i = e + 1
-          return cp
-        }
-        const cp = parseInt(pattern.substr(i + 2, 4), 16)
-        if (isNaN(cp)) return null
-        i += 6
-        return cp
-      }
-      if ('x' === m) {
-        const cp = parseInt(pattern.substr(i + 2, 2), 16)
-        if (isNaN(cp)) return null
-        i += 4
-        return cp
-      }
-      if ('dDwWsSbB0nrtfv'.includes(m)) {
-        // Shorthand classes and control escapes: bail rather than
-        // guess — unknown coverage keeps the caller conservative.
-        return null
-      }
-      i += 2
-      return m.codePointAt(0) as number
+      const e = readEscape(pattern, i)
+      if (null == e) return null
+      i += e[0]
+      return e[1]
     }
     const cp = pattern.codePointAt(i) as number
     i += cp > 0xFFFF ? 2 : 1

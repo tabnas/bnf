@@ -6,6 +6,9 @@ package bnf
 // literal-prefix / k-prefix enumeration, and the probe-dispatch emitter.
 
 import (
+	"strings"
+	"unicode"
+
 	tabnas "github.com/tabnas/parser/go"
 )
 
@@ -429,6 +432,12 @@ type prefixPath struct {
 	done   bool
 }
 
+// isNameSpace is whitespace by every runtime's reading: unicode.IsSpace,
+// which is Rust's char::is_whitespace, together with U+FEFF, which
+// JavaScript's `\s` counts and they do not (`\s` in turn leaves out
+// U+0085, which they count). Mirrors the TS HAS_SPACE.
+func isNameSpace(r rune) bool { return unicode.IsSpace(r) || r == '\uFEFF' }
+
 // tokenClassNames is the token classes of a grammar
 // (ConvertOptions.TokenClasses): every alternative one literal or engine
 // token, at least two of them. A character class (regex) is not a
@@ -450,7 +459,11 @@ func tokenClassNames(grammar *Grammar) map[string]bool {
 		// take its own name, and an empty name has none to take
 		// (allocTokenName names the set after its content instead), so
 		// neither is a class.
-		if prod.Name == "" || isEngineOwnedToken("#"+prod.Name) {
+		// Nor is a name holding whitespace: an alternate's S separates
+		// token names with it, so `#C D` would read as two. Whitespace as
+		// every runtime reads it (see isNameSpace).
+		if prod.Name == "" || strings.ContainsFunc(prod.Name, isNameSpace) ||
+			isEngineOwnedToken("#"+prod.Name) {
 			continue
 		}
 		// Each member is one token the lexer emits. An empty literal

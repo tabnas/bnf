@@ -182,3 +182,19 @@ fn a_brace_escape_is_a_code_point_only_under_the_u_flag() {
         emit_grammar_spec(&semi(rx(r"\u{1}", "u"), sens_term("u")), &opts(false)).unwrap();
     assert_eq!(depths(&unicode), [1, 1]);
 }
+
+#[test]
+fn an_escape_whose_code_point_cannot_be_read_is_not_an_exact_head() {
+    // A head the coverage cannot read contests every head. `\p{L}` is a
+    // property, not the letter `p`, so a class holding it meets `é`. The
+    // escapes the regex crate refuses outright (`\u1`, `\x1`, `\cA`, a
+    // digit escape) never reach the dispatcher here; the two readers pin
+    // them (`an_escape_is_one_code_point_only_when_it_can_be_read` in
+    // `src/ranges.rs`), and TypeScript pins the dispatch.
+    let property =
+        emit_grammar_spec(&semi(rx(r"[\p{L}]", "u"), sens_term("é")), &opts(false)).unwrap();
+    assert_eq!(depths(&property), [2, 2]);
+    // Four hex digits are the code point they spell.
+    let exact = emit_grammar_spec(&semi(rx(r"\u0041", ""), sens_term("u")), &opts(false)).unwrap();
+    assert_eq!(depths(&exact), [1, 1]);
+}
