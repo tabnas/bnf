@@ -57,6 +57,19 @@ export type ConvertOptions = {
   // needs it. Set `false` to keep an embedded grammar as small as
   // possible.
   provenance?: boolean
+  // Compile a token class — a production whose every alternative is a
+  // single literal or engine token (`ident = TX / "message" / "option"`,
+  // `kw = "k1" / … / "kN"`) — as one engine token SET wherever another
+  // rule looks ahead at it, and keep it as a rule of its own rather than
+  // inlining it into the rules it leads. The rule still builds its node,
+  // so a contextual keyword (a word that is a keyword at a statement
+  // head and a name elsewhere) is one class member rather than one
+  // alternative per keyword per site, and a lookahead position that can
+  // hold any of N members costs one alternate rather than N. Parr's
+  // linear approximation of LL(k) lookahead, per class. Off by default:
+  // the class is inlined where it leads an alternative, and its members
+  // are enumerated, exactly as before.
+  tokenClasses?: boolean
 }
 
 
@@ -979,7 +992,14 @@ function expandNullableLeftPrefixes(prods: Production[]): Production[] {
 }
 
 
-function eliminateLeftRecursion(grammar: Grammar): Grammar {
+function eliminateLeftRecursion(
+  grammar: Grammar,
+  // Productions that are never substituted into the alternatives they
+  // lead: the token classes of `ConvertOptions.tokenClasses`. A class
+  // holds no reference, so no left-recursive cycle can run through it,
+  // and Paull's invariant is unaffected by leaving it in place.
+  keep: Set<string> = new Set(),
+): Grammar {
   const originalOrder = grammar.productions.map((p) => p.name)
   // Suffix-debt counter names handed out across the whole grammar.
   const debtNames = new Set<string>()
@@ -1051,6 +1071,7 @@ function eliminateLeftRecursion(grammar: Grammar): Grammar {
       for (let round = 0; round < guard; round++) {
         let changed = false
         for (let j = 0; j < i; j++) {
+          if (keep.has(prods[j].name)) continue
           if (!hasLeadingRefTo(prods[i], prods[j].name)) continue
           prods[i] = substituteLeadingRef(prods[i], prods[j])
           changed = true
@@ -3083,6 +3104,25 @@ function nullableRules(prods: Production[]): Set<string> {
 
 
 // Convert an ABNF grammar AST into a tabnas GrammarSpec.
+// The token classes of a grammar (`ConvertOptions.tokenClasses`): every
+// alternative one literal or engine token, at least two of them. A
+// character class (`regex`) is not a member: those are laid over the
+// partition `classAnalysis` builds, and a set over them is that
+// machinery's to mint.
+function tokenClassNames(grammar: Grammar): Set<string> {
+  const out = new Set<string>()
+  for (const prod of grammar.productions) {
+    if (prod.probeHelper || prod.probeDispatch || prod.tailRepeat) continue
+    if (null != prod.value || prod.alts.length < 2) continue
+    if (prod.alts.every((alt) => 1 === alt.length &&
+      ('term' === alt[0].kind || 'token' === alt[0].kind))) {
+      out.add(prod.name)
+    }
+  }
+  return out
+}
+
+
 function emitGrammarSpec(
   grammar: Grammar,
   opts?: ConvertOptions,
@@ -3141,12 +3181,18 @@ function emitGrammarSpec(
   const liftedLiterals = liftLiteralTokens(grammar, start)
   normalizeBuiltinTokens(grammar)
 
+  // The token classes, read before any rewrite: elimination would
+  // otherwise inline each one into every rule it leads, which is the
+  // multiplier the option exists to remove.
+  const tokenClassesOn = !!opts?.tokenClasses
+  const classNames = tokenClassesOn ? tokenClassNames(grammar) : new Set<string>()
+
   // Eliminate direct left recursion (P → P α | β) by rewriting to
   // the equivalent right-recursive form P → β (α)*, then detect
   // ambiguous `[X D] Y` optional-prefix patterns and rewrite them
   // into probe-dispatch helpers; finally flatten any EBNF sugar
   // (`?`, `*`, `+`, grouping) into plain ABNF.
-  grammar = eliminateLeftRecursion(grammar)
+  grammar = eliminateLeftRecursion(grammar, classNames)
   grammar = rewriteProbeDispatches(grammar)
   // Left factoring runs after the probe rewriter (so `[X D] Y`
   // patterns are recognised in their original alternatives) and
@@ -3236,12 +3282,6 @@ function emitGrammarSpec(
   }
 
   const knownRules = new Set(grammar.productions.map((p) => p.name))
-  const { firstSets, nullable } = computeFirstSets(
-    grammar, literals, regexTokens)
-  const followSets = computeFollowSets(
-    grammar, literals, regexTokens, firstSets, nullable, start)
-  const followPairs = computeFollowPairs(
-    grammar, literals, regexTokens, firstSets, nullable, followSets)
 
   // Character coverage per token, for the contested-repetition check.
   // A fixed token covers its literal's first code point; a match token
@@ -3296,6 +3336,40 @@ function emitGrammarSpec(
   // entries while the distinct token pairs behind them are few — a
   // grammar with hundreds of entries per rule asks the same handful of
   // questions over and over.
+  // The token classes as engine token sets (`ConvertOptions.tokenClasses`):
+  // one set per class, named after the production, holding the tokens
+  // its alternatives are. `classSets` maps the production to its set,
+  // `classMembers` the set to its tokens. Minted after the tokens, since
+  // the members must exist, and before FIRST, whose sets name them.
+  const classSets = new Map<string, string>()
+  const classMembers = new Map<string, string[]>()
+  for (const prod of grammar.productions) {
+    if (!classNames.has(prod.name)) continue
+    const members: string[] = []
+    for (const alt of prod.alts) {
+      const el = alt[0]
+      const tok = 'term' === el.kind
+        ? literals.get(termKey(el)) as string
+        : (el as { name: string }).name
+      if (!members.includes(tok)) members.push(tok)
+    }
+    if (members.length < 2) continue
+    const name = allocTokenName(prod.name, usedNames, prod.name)
+    tokenSets[name.replace(/^#/, '')] = members
+    classSets.set(prod.name, name)
+    classMembers.set(name, members)
+    // The class covers what its members cover, when that is known for
+    // every member; an engine token among them (`#TX`) leaves it
+    // unknown, as it is for that token alone.
+    let covered: Array<[number, number]> | null = []
+    for (const m of members) {
+      const r = tokenRangesOf(m)
+      if (null == r) { covered = null; break }
+      covered.push(...r)
+    }
+    if (null != covered) setRanges.set(name, covered)
+  }
+
   const overlapCache = new Map<string, boolean>()
   const tokensOverlap = (a: string, b: string): boolean => {
     // '\u0000' as an ESCAPE, not a literal NUL byte. A literal one
@@ -3306,10 +3380,94 @@ function emitGrammarSpec(
     const key = a < b ? a + '\u0000' + b : b + '\u0000' + a
     const hit = overlapCache.get(key)
     if (undefined !== hit) return hit
-    const ra = tokenRangesOf(a)
-    const rb = tokenRangesOf(b)
-    const out = null != ra && null != rb && charRangesOverlap(ra, rb)
+    let out = false
+    const ma = classMembers.get(a)
+    const mb = classMembers.get(b)
+    if (null != ma || null != mb) {
+      // A token class meets what any member meets, the same token
+      // included; coverage alone would miss an engine token in it.
+      for (const x of null != ma ? ma : [a]) {
+        for (const y of null != mb ? mb : [b]) {
+          if (x === y || tokensOverlap(x, y)) { out = true; break }
+        }
+        if (out) break
+      }
+    } else {
+      const ra = tokenRangesOf(a)
+      const rb = tokenRangesOf(b)
+      out = null != ra && null != rb && charRangesOverlap(ra, rb)
+    }
     overlapCache.set(key, out)
+    return out
+  }
+
+  const { firstSets, nullable } = computeFirstSets(
+    grammar, literals, regexTokens, classSets)
+  const followSets = computeFollowSets(
+    grammar, literals, regexTokens, firstSets, nullable, start)
+  const followPairs = computeFollowPairs(
+    grammar, literals, regexTokens, firstSets, nullable, followSets)
+
+  // Can the lexer hand the same input to two dispatch heads, so that a
+  // choice between them on one token is no choice? The same token can;
+  // a character class can meet anything its coverage overlaps; a literal
+  // can meet a literal it is a prefix of, or that is a prefix of it,
+  // case-folded when either is insensitive, since a shorter cut may win
+  // where the rule asks for it (under negotiated lexing) — except two
+  // whole-word keywords under `wordKeywords`, whose boundary guard keeps
+  // `option` off `optional`. A token set meets whatever one of its
+  // members meets. The engine's own tokens (`#TX`, `#NR`, …) meet only
+  // themselves: a keyword matcher runs ahead of the text matcher, and a
+  // number is never a literal.
+  //
+  // Narrower than `tokensOverlap` on purpose. That is the lexer's
+  // question, whether two heads can claim one CHARACTER, and asking it
+  // here counted every keyword pair sharing a first letter as contested
+  // — which kept a Protocol Buffers grammar at 41,309 alternates where
+  // 6,630 decide the same inputs (tabnas/bnf#71).
+  const literalByToken = new Map<string, { literal: string; sensitive: boolean }>()
+  for (const [key, name] of literals) {
+    literalByToken.set(name, {
+      literal: key.slice(3), sensitive: key.startsWith('cs:'),
+    })
+  }
+  const isWordLiteral = (lit: string): boolean =>
+    wordKeywords && /[A-Za-z0-9_]$/.test(lit)
+  const contestCache = new Map<string, boolean>()
+  const headsContest = (a: string, b: string): boolean => {
+    if (a === b) return true
+    const key = a < b ? a + '\u0000' + b : b + '\u0000' + a
+    const hit = contestCache.get(key)
+    if (undefined !== hit) return hit
+    let out = false
+    const ma = tokenSets[a.replace(/^#/, '')]
+    const mb = tokenSets[b.replace(/^#/, '')]
+    const la = literalByToken.get(a)
+    const lb = literalByToken.get(b)
+    if (null != ma || null != mb) {
+      // A set meets what any member meets; the members themselves are
+      // never sets.
+      const xs = null != ma ? ma : [a]
+      const ys = null != mb ? mb : [b]
+      for (const x of xs) {
+        for (const y of ys) {
+          if (headsContest(x, y)) { out = true; break }
+        }
+        if (out) break
+      }
+    } else if (null != la && null != lb) {
+      if (!(isWordLiteral(la.literal) && isWordLiteral(lb.literal))) {
+        const fold = !(la.sensitive && lb.sensitive)
+        const x = fold ? la.literal.toLowerCase() : la.literal
+        const y = fold ? lb.literal.toLowerCase() : lb.literal
+        out = x.startsWith(y) || y.startsWith(x)
+      }
+    } else {
+      // A character class, or an atom of one, against anything: by
+      // coverage. The engine's own tokens have none, and meet nothing.
+      out = tokensOverlap(a, b)
+    }
+    contestCache.set(key, out)
     return out
   }
 
@@ -3362,7 +3520,8 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap, valuePlan, arrayHelpers, valueRules, prov,
+      tokensOverlap, headsContest, classSets, valuePlan, arrayHelpers,
+      valueRules, prov,
     )
   }
 
@@ -3819,6 +3978,11 @@ function emitProduction(
   followPairs: Map<string, Map<string, Set<string>>>,
   tokenRangesOf: (tok: string) => Array<[number, number]> | null,
   tokensOverlap: (a: string, b: string) => boolean,
+  // Can the lexer hand the same input to two dispatch heads? See
+  // `headsContest` in emitGrammarSpec.
+  headsContest: (a: string, b: string) => boolean,
+  // The token classes as sets; see `ConvertOptions.tokenClasses`.
+  classSets: Map<string, string>,
   valuePlan: Map<string, boolean[]>,
   // The helpers of an annotated array, and the rules that build a value.
   // Together they say, for any link that pushes: does the pushed rule
@@ -3897,7 +4061,8 @@ function emitProduction(
   const synthKeywordGuards = (
     o: any, alt: Sequence, f: string, consumed: number,
   ): any[] | null => {
-    const paths = altPrefixesRaw(alt, grammar, literals, regexTokens, 2)
+    const paths = altPrefixesRaw(
+      alt, grammar, literals, regexTokens, 2, new Set(), undefined, classSets)
     const seconds = new Set<string>()
     for (const p of paths) {
       if (p.tokens[0] !== f) continue
@@ -4288,7 +4453,7 @@ function emitProduction(
           let paths: string[][] | null = null
           if (altHeadContested(alt, ordered) || contestedByFollow(alt)) {
             const pfx = altPrefixes(
-              alt, grammar, literals, regexTokens, LOOKAHEAD_K)
+              alt, grammar, literals, regexTokens, LOOKAHEAD_K, classSets)
               .filter((p) => 0 < p.length)
             if (0 < pfx.length && pfx.length <= 64) paths = pfx
           }
@@ -4451,6 +4616,25 @@ function emitProduction(
     ? assignMarks(prod.alts, literals, regexTokens)
     : null
 
+  // The ways out of this choice, for the contest check: a choice with
+  // an empty alternative (or one that derives ε) can end on any token
+  // that may follow it, so a content head the lexer could also read as
+  // a follow token has to look further before it commits.
+  const exitPaths: string[][] = []
+  const anyEpsilon = prod.alts.some((alt) => 0 === alt.length) ||
+    prod.alts.some((alt) => 0 < alt.length && null ==
+      firstOfAlt(alt, literals, regexTokens, firstSets, nullable))
+  if (anyEpsilon) {
+    for (const t of followSets.get(prod.name) ?? []) exitPaths.push([t])
+    const pairs = followPairs.get(prod.name)
+    if (null != pairs) {
+      for (const [t, us] of pairs) for (const u of us) exitPaths.push([t, u])
+    }
+  }
+  const dispatch = dispatchPrefixes(
+    prod.alts, grammar, literals, regexTokens, LOOKAHEAD_K, headsContest,
+    exitPaths, classSets)
+
   for (let i = 0; i < prod.alts.length; i++) {
     const alt = prod.alts[i]
     const implName = `${prod.name}$alt${i}`
@@ -4473,12 +4657,13 @@ function emitProduction(
       'helper', prov, originOf(prod), undefined, undefined, undefined,
       arrayHelpers, valueRules, arrayElem)
 
-    // Fan out this alt into one dispatch entry per concrete token
-    // sequence it can start with. Up to LOOKAHEAD_K tokens per
-    // prefix is enough for the grammars this converter targets; a
-    // ref with multiple alts produces one prefix per sub-alt so
-    // overlapping FIRST sets between competing alts can still be
-    // separated by their second (or later) token.
+    // One dispatch entry per prefix this alternative needs to be told
+    // apart from its rivals: its first token where that decides, and
+    // deeper prefixes only under a head another alternative (or the way
+    // out of the choice) shares. See `dispatchPrefixes`. The entry pushes
+    // the alternative's own rule, which parses it whole, so the trees
+    // are those of the K-token fan-out this replaced; an input no
+    // prefix admits fails inside that rule now rather than here.
     // The dispatcher itself is a user (or helper) rule — it must
     // allocate its own AST node on every dispatch alt, otherwise the
     // node inherited from the parent via makeRule(ctx, rule.node)
@@ -4489,20 +4674,16 @@ function emitProduction(
       { init: true, rule: prod.name, kind: dispatchKind, nterms: 0 },
       (r: Rule) => { r.node = mkAstNode(prod.name, dispatchKind) })
 
-    const rawPaths = altPrefixesRaw(
-      alt, grammar, literals, regexTokens, LOOKAHEAD_K)
     // An alternative that can derive ε (all elements nullable — a
-    // complete zero-token path, not a cycle truncation) loses that
-    // derivation in the `usable` filter below. Remember it: after the
-    // loop it is re-issued as FOLLOW-guarded entries plus a bare
-    // fallback, ordered after every content entry so an ε-derivation
-    // never preempts a real match.
-    if (rawPaths.some((p) => 0 === p.tokens.length && !p.done)) {
+    // complete zero-token path, not a cycle truncation) has no prefix
+    // for that derivation. Remember it: after the loop it is re-issued
+    // as FOLLOW-guarded entries plus a bare fallback, ordered after
+    // every content entry so an ε-derivation never preempts a real
+    // match.
+    if (dispatch[i].nullable) {
       nullableImpls.push({ implName, fields: initDispatchFields, mark })
     }
-    const prefixes = altPrefixes(
-      alt, grammar, literals, regexTokens, LOOKAHEAD_K)
-    const usable = prefixes.filter((p) => p.length > 0)
+    const usable = dispatch[i].prefixes
     if (usable.length > 0) {
       for (const p of usable) {
         const o: any = {
@@ -4879,15 +5060,23 @@ function computeFirstSets(
   grammar: Grammar,
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
+  // Production name -> the token set it compiles to, for the token
+  // classes of `ConvertOptions.tokenClasses`: FIRST of such a production
+  // is its set, one name, wherever it is referenced.
+  classSets: Map<string, string> = new Map(),
 ): { firstSets: Map<string, Set<string>>; nullable: Set<string> } {
   const firstSets = new Map<string, Set<string>>()
   const nullable = new Set<string>()
-  for (const p of grammar.productions) firstSets.set(p.name, new Set())
+  for (const p of grammar.productions) {
+    const set = classSets.get(p.name)
+    firstSets.set(p.name, null == set ? new Set() : new Set([set]))
+  }
 
   let changed = true
   while (changed) {
     changed = false
     for (const prod of grammar.productions) {
+      if (classSets.has(prod.name)) continue
       const first = firstSets.get(prod.name) as Set<string>
       for (const alt of prod.alts) {
         // Walk the alt, accumulating FIRST until a non-nullable
@@ -5862,26 +6051,44 @@ function altPrefixesRaw(
   regexTokens: Map<string, string>,
   maxK: number,
   visited: Set<string> = new Set(),
+  // Keep only the paths whose FIRST token passes. The dispatcher deepens
+  // the lookahead under a contested head alone, and enumerating every
+  // path to depth K only to discard the rest is the cost tabnas/bnf#71
+  // measured in seconds; pruning at the head keeps the walk to the
+  // paths that will be emitted.
+  headFilter?: (tok: string) => boolean,
+  // A reference to a token class is one token, its set (see
+  // `ConvertOptions.tokenClasses`), rather than one path per member.
+  classSets?: Map<string, string>,
 ): PrefixPath[] {
   let paths: PrefixPath[] = [{ tokens: [], done: false }]
+
+  // A path that already carries a token has had its head admitted; only
+  // a path still at length zero can be pruned by what it gains next.
+  const admit = (before: PrefixPath, tokens: string[]): boolean =>
+    null == headFilter || 0 < before.tokens.length || 0 === tokens.length ||
+    headFilter(tokens[0])
 
   for (const el of alt) {
     const next: PrefixPath[] = []
     for (const p of paths) {
       if (p.done || p.tokens.length >= maxK) { next.push(p); continue }
       if (el.kind === 'term') {
-        next.push({
-          tokens: [...p.tokens, literals.get(termKey(el)) as string],
-          done: false,
-        })
+        const tokens = [...p.tokens, literals.get(termKey(el)) as string]
+        if (admit(p, tokens)) next.push({ tokens, done: false })
       } else if (el.kind === 'regex') {
-        next.push({
-          tokens: [...p.tokens, regexTokens.get(regexKey(el)) as string],
-          done: false,
-        })
+        const tokens = [...p.tokens, regexTokens.get(regexKey(el)) as string]
+        if (admit(p, tokens)) next.push({ tokens, done: false })
       } else if (el.kind === 'token') {
-        next.push({ tokens: [...p.tokens, el.name], done: false })
+        const tokens = [...p.tokens, el.name]
+        if (admit(p, tokens)) next.push({ tokens, done: false })
       } else if (el.kind === 'ref') {
+        const set = classSets?.get(el.name)
+        if (null != set) {
+          const tokens = [...p.tokens, set]
+          if (admit(p, tokens)) next.push({ tokens, done: false })
+          continue
+        }
         if (visited.has(el.name)) {
           next.push({ tokens: p.tokens, done: true })
           continue
@@ -5895,7 +6102,11 @@ function altPrefixesRaw(
         for (const sub of target.alts) {
           const subPaths = altPrefixesRaw(
             sub, grammar, literals, regexTokens,
-            maxK - p.tokens.length, childVisited)
+            maxK - p.tokens.length, childVisited,
+            // The head of the outer path is the head of the sub-path
+            // while nothing has been consumed yet.
+            0 === p.tokens.length ? headFilter : undefined,
+            classSets)
           for (const sp of subPaths) {
             next.push({
               tokens: [...p.tokens, ...sp.tokens],
@@ -5924,8 +6135,10 @@ function altPrefixes(
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
   maxK: number,
+  classSets?: Map<string, string>,
 ): string[][] {
-  const raw = altPrefixesRaw(alt, grammar, literals, regexTokens, maxK)
+  const raw = altPrefixesRaw(
+    alt, grammar, literals, regexTokens, maxK, new Set(), undefined, classSets)
   const seen = new Set<string>()
   const out: string[][] = []
   for (const p of raw) {
@@ -5933,6 +6146,138 @@ function altPrefixes(
     if (!seen.has(key)) { seen.add(key); out.push(p.tokens) }
   }
   return out
+}
+
+
+// The dispatch prefixes of a choice, using the least lookahead each
+// decision needs (tabnas/bnf#71).
+//
+// A dispatcher chooses an alternative and pushes it whole, so the peek
+// that chooses only has to tell the alternatives apart, never to accept
+// the input; the pushed rule does that. One token does it for most
+// decisions (Parr, 1993). So every alternative is dispatched on its
+// first tokens alone, and lookahead deepens only under a head two
+// alternatives share, one token at a time, until the paths through that
+// head no longer collide, or the window (`maxK`) runs out and the paths
+// are emitted whole, as they always were, for first-match order to
+// settle.
+//
+// Enumerating every K-token path and emitting one alternate per path
+// made the table a cross product of what the grammar allows in each of
+// four positions: 6,102,261 alternates for a Protocol Buffers grammar
+// whose author admitted keywords as identifiers, and N^4 for a repeated
+// two-keyword entry. The contested-only deepening below makes it the
+// size of the decisions instead.
+//
+// "Collide" is `contest(a, b)`: the same token, a token pair the lexer
+// can hand to either alternative (overlapping character classes, a
+// literal that is a prefix of another), or a token set meeting one of
+// its members. Two paths collide up to depth d when their tokens
+// collide at every position below d that both have; a path that ends
+// sooner is open (its alternative is finished there, and anything the
+// enclosing rule accepts may follow), so it keeps colliding for as long
+// as it lasts, and the longer path is then emitted whole.
+//
+// `exitPaths` are the ways OUT of a choice that has an empty
+// alternative: each FOLLOW token as an open one-token path, and each
+// FOLLOW₂ pair. A continue head that collides with an exit is contested
+// too, which is what keeps `*"a" "a" "b"` deciding at `a b` against
+// `a a` rather than committing on the first `a`.
+type DispatchPrefixes = { prefixes: string[][]; nullable: boolean }
+
+function dispatchPrefixes(
+  alts: Sequence[],
+  grammar: Grammar,
+  literals: Map<string, string>,
+  regexTokens: Map<string, string>,
+  maxK: number,
+  contest: (a: string, b: string) => boolean,
+  exitPaths: string[][],
+  classSets: Map<string, string>,
+): DispatchPrefixes[] {
+  const n = alts.length
+  const one: PrefixPath[][] = alts.map((alt) =>
+    0 === alt.length ? [] : altPrefixesRaw(
+      alt, grammar, literals, regexTokens, 1, new Set(), undefined, classSets))
+  const nullable = one.map((paths) =>
+    paths.some((p) => 0 === p.tokens.length && !p.done))
+  // Heads in enumeration order, once each.
+  const heads: string[][] = one.map((paths) => {
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const p of paths) {
+      if (1 !== p.tokens.length || seen.has(p.tokens[0])) continue
+      seen.add(p.tokens[0])
+      out.push(p.tokens[0])
+    }
+    return out
+  })
+
+  // A head is contested when another alternative, or an exit, has a
+  // head the lexer could hand to either.
+  const contested: Set<string>[] = heads.map((mine, i) => {
+    const out = new Set<string>()
+    for (const h of mine) {
+      let hit = false
+      for (let j = 0; j < n && !hit; j++) {
+        if (j === i) continue
+        for (const o of heads[j]) {
+          if (contest(h, o)) { hit = true; break }
+        }
+      }
+      for (let e = 0; e < exitPaths.length && !hit; e++) {
+        if (contest(h, exitPaths[e][0])) hit = true
+      }
+      if (hit) out.add(h)
+    }
+    return out
+  })
+
+  // Deep paths, only under the contested heads.
+  const deep: PrefixPath[][] = alts.map((alt, i) =>
+    0 === contested[i].size ? [] : altPrefixesRaw(
+      alt, grammar, literals, regexTokens, maxK, new Set(),
+      (t) => contested[i].has(t), classSets).filter((p) => 0 < p.tokens.length))
+
+  // The depth at which `p` stops colliding with every rival: the
+  // position after the first one where they differ, over all rivals; or
+  // the whole path when some rival never differs within what both have.
+  const depthOf = (p: PrefixPath, i: number): number => {
+    let d = 1
+    const against = (q: string[]): boolean => {
+      const m = Math.min(p.tokens.length, q.length)
+      let k = 0
+      while (k < m && contest(p.tokens[k], q[k])) k++
+      if (k === m) return false
+      if (k + 1 > d) d = k + 1
+      return true
+    }
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue
+      for (const q of deep[j]) if (!against(q.tokens)) return p.tokens.length
+    }
+    for (const e of exitPaths) if (!against(e)) return p.tokens.length
+    return d
+  }
+
+  return alts.map((alt, i) => {
+    const prefixes: string[][] = []
+    const seen = new Set<string>()
+    const push = (tokens: string[]) => {
+      const key = tokens.join(' ')
+      if (seen.has(key)) return
+      seen.add(key)
+      prefixes.push(tokens)
+    }
+    for (const h of heads[i]) {
+      if (!contested[i].has(h)) { push([h]); continue }
+      for (const p of deep[i]) {
+        if (p.tokens[0] !== h) continue
+        push(p.tokens.slice(0, depthOf(p, i)))
+      }
+    }
+    return { prefixes, nullable: nullable[i] }
+  })
 }
 
 

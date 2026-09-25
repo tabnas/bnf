@@ -74,17 +74,28 @@ func mapsToAlts(ms []map[string]any) []*tabnas.GrammarAltSpec {
 
 // ---- FIRST sets ----------------------------------------------------
 
-func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string) (map[string]map[string]bool, map[string]bool) {
+// computeFirstSets is FIRST(ref) for every production, plus which
+// productions are nullable. classSets maps a token-class production to
+// the token set it compiles to (ConvertOptions.TokenClasses): FIRST of
+// such a production is its set, one name, wherever it is referenced.
+func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string,
+	classSets map[string]string) (map[string]map[string]bool, map[string]bool) {
 	firstSets := map[string]map[string]bool{}
 	nullable := map[string]bool{}
 	for _, p := range grammar.Productions {
 		firstSets[p.Name] = map[string]bool{}
+		if set, ok := classSets[p.Name]; ok {
+			firstSets[p.Name][set] = true
+		}
 	}
 
 	changed := true
 	for changed {
 		changed = false
 		for _, prod := range grammar.Productions {
+			if _, ok := classSets[prod.Name]; ok {
+				continue
+			}
 			first := firstSets[prod.Name]
 			for _, alt := range prod.Alts {
 				altNullable := true
@@ -418,9 +429,54 @@ type prefixPath struct {
 	done   bool
 }
 
+// tokenClassNames is the token classes of a grammar
+// (ConvertOptions.TokenClasses): every alternative one literal or engine
+// token, at least two of them. A character class (regex) is not a
+// member: those are laid over the partition the class analysis builds,
+// and a set over them is that machinery's to mint. Mirrors the TS
+// tokenClassNames.
+func tokenClassNames(grammar *Grammar) map[string]bool {
+	out := map[string]bool{}
+	for _, prod := range grammar.Productions {
+		if prod.ProbeHelper != nil || prod.ProbeDisp != nil || prod.TailRepeat != nil {
+			continue
+		}
+		if prod.Value != nil || len(prod.Alts) < 2 {
+			continue
+		}
+		all := true
+		for _, alt := range prod.Alts {
+			if len(alt) != 1 || (alt[0].Kind != KindTerm && alt[0].Kind != KindToken) {
+				all = false
+				break
+			}
+		}
+		if all {
+			out[prod.Name] = true
+		}
+	}
+	return out
+}
+
+// altPrefixesRaw enumerates the concrete token-sequence prefixes an
+// alternative can start with, each at most maxK tokens long. headFilter,
+// when non-nil, keeps only the paths whose FIRST token it admits: the
+// dispatcher deepens the lookahead under a contested head alone, and
+// enumerating every path to depth K only to discard the rest is the cost
+// tabnas/bnf#71 measured in seconds. classSets maps a token-class
+// production to its set: a reference to one is one token, its set, rather
+// than one path per member. Mirrors the TS altPrefixesRaw.
 func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[string]string,
-	maxK int, visited map[string]bool) []prefixPath {
+	maxK int, visited map[string]bool, headFilter func(string) bool,
+	classSets map[string]string) []prefixPath {
 	paths := []prefixPath{{tokens: []string{}, done: false}}
+
+	// A path that already carries a token has had its head admitted; only
+	// a path still at length zero can be pruned by what it gains next.
+	admit := func(before prefixPath, tokens []string) bool {
+		return headFilter == nil || 0 < len(before.tokens) || 0 == len(tokens) ||
+			headFilter(tokens[0])
+	}
 
 	for _, el := range alt {
 		next := []prefixPath{}
@@ -431,15 +487,28 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 			}
 			switch el.Kind {
 			case KindTerm:
-				next = append(next, prefixPath{
-					tokens: appendStr(p.tokens, literals[termKey(el)]), done: false})
+				tokens := appendStr(p.tokens, literals[termKey(el)])
+				if admit(p, tokens) {
+					next = append(next, prefixPath{tokens: tokens, done: false})
+				}
 			case KindRegex:
-				next = append(next, prefixPath{
-					tokens: appendStr(p.tokens, regexTokens[regexKey(el)]), done: false})
+				tokens := appendStr(p.tokens, regexTokens[regexKey(el)])
+				if admit(p, tokens) {
+					next = append(next, prefixPath{tokens: tokens, done: false})
+				}
 			case KindToken:
-				next = append(next, prefixPath{
-					tokens: appendStr(p.tokens, el.Name), done: false})
+				tokens := appendStr(p.tokens, el.Name)
+				if admit(p, tokens) {
+					next = append(next, prefixPath{tokens: tokens, done: false})
+				}
 			case KindRef:
+				if set, ok := classSets[el.Name]; ok {
+					tokens := appendStr(p.tokens, set)
+					if admit(p, tokens) {
+						next = append(next, prefixPath{tokens: tokens, done: false})
+					}
+					continue
+				}
 				if visited[el.Name] {
 					next = append(next, prefixPath{tokens: p.tokens, done: true})
 					continue
@@ -451,9 +520,15 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 					next = append(next, prefixPath{tokens: p.tokens, done: true})
 					continue
 				}
+				// The head of the outer path is the head of the sub-path
+				// while nothing has been consumed yet.
+				var subFilter func(string) bool
+				if 0 == len(p.tokens) {
+					subFilter = headFilter
+				}
 				for _, sub := range target.Alts {
 					subPaths := altPrefixesRaw(sub, grammar, literals, regexTokens,
-						maxK-len(p.tokens), childVisited)
+						maxK-len(p.tokens), childVisited, subFilter, classSets)
 					for _, sp := range subPaths {
 						next = append(next, prefixPath{
 							tokens: appendStrs(p.tokens, sp.tokens), done: sp.done})
@@ -478,8 +553,9 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 	return paths
 }
 
-func altPrefixes(alt Sequence, grammar *Grammar, literals, regexTokens map[string]string, maxK int) [][]string {
-	raw := altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{})
+func altPrefixes(alt Sequence, grammar *Grammar, literals, regexTokens map[string]string, maxK int,
+	classSets map[string]string) [][]string {
+	raw := altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{}, nil, classSets)
 	seen := map[string]bool{}
 	out := [][]string{}
 	for _, p := range raw {
@@ -488,6 +564,166 @@ func altPrefixes(alt Sequence, grammar *Grammar, literals, regexTokens map[strin
 			seen[key] = true
 			out = append(out, p.tokens)
 		}
+	}
+	return out
+}
+
+// dispatchPrefixes is one entry per alternative of a choice: the
+// prefixes to dispatch it on, using the least lookahead each decision
+// needs, and whether the alternative can derive ε. Mirrors the TS
+// dispatchPrefixes (tabnas/bnf#71).
+//
+// Every alternative is dispatched on its first tokens alone, and the
+// lookahead deepens only under a head two alternatives share, one token
+// at a time, until the paths through that head no longer collide, or the
+// window (maxK) runs out and the paths are emitted whole, as they always
+// were. "Collide" is contest(a, b): the same token, a pair the lexer can
+// hand to either alternative, or a token set meeting one of its members.
+// Two paths collide up to depth d when their tokens collide at every
+// position below d that both have; a path that ends sooner is open, so
+// it keeps colliding for as long as it lasts, and the longer path is then
+// emitted whole. exitPaths are the ways OUT of a choice that has an empty
+// alternative: each FOLLOW token as an open one-token path, and each
+// FOLLOW₂ pair.
+type dispatchPrefixSet struct {
+	prefixes [][]string
+	nullable bool
+}
+
+func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens map[string]string,
+	maxK int, contest func(a, b string) bool, exitPaths [][]string,
+	classSets map[string]string) []dispatchPrefixSet {
+	n := len(alts)
+	one := make([][]prefixPath, n)
+	nullable := make([]bool, n)
+	heads := make([][]string, n)
+	for i, alt := range alts {
+		if len(alt) == 0 {
+			continue
+		}
+		one[i] = altPrefixesRaw(alt, grammar, literals, regexTokens, 1, map[string]bool{}, nil, classSets)
+		seen := map[string]bool{}
+		for _, p := range one[i] {
+			if len(p.tokens) == 0 && !p.done {
+				nullable[i] = true
+			}
+			if len(p.tokens) != 1 || seen[p.tokens[0]] {
+				continue
+			}
+			seen[p.tokens[0]] = true
+			heads[i] = append(heads[i], p.tokens[0])
+		}
+	}
+
+	// A head is contested when another alternative, or an exit, has a
+	// head the lexer could hand to either.
+	contested := make([]map[string]bool, n)
+	for i := range alts {
+		contested[i] = map[string]bool{}
+		for _, h := range heads[i] {
+			hit := false
+			for j := 0; j < n && !hit; j++ {
+				if j == i {
+					continue
+				}
+				for _, o := range heads[j] {
+					if contest(h, o) {
+						hit = true
+						break
+					}
+				}
+			}
+			for e := 0; e < len(exitPaths) && !hit; e++ {
+				if contest(h, exitPaths[e][0]) {
+					hit = true
+				}
+			}
+			if hit {
+				contested[i][h] = true
+			}
+		}
+	}
+
+	// Deep paths, only under the contested heads.
+	deep := make([][]prefixPath, n)
+	for i, alt := range alts {
+		if len(contested[i]) == 0 {
+			continue
+		}
+		c := contested[i]
+		for _, p := range altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{},
+			func(t string) bool { return c[t] }, classSets) {
+			if 0 < len(p.tokens) {
+				deep[i] = append(deep[i], p)
+			}
+		}
+	}
+
+	// The depth at which p stops colliding with every rival: the position
+	// after the first one where they differ, over all rivals; or the whole
+	// path when some rival never differs within what both have.
+	depthOf := func(p prefixPath, i int) int {
+		d := 1
+		against := func(q []string) bool {
+			m := len(p.tokens)
+			if len(q) < m {
+				m = len(q)
+			}
+			k := 0
+			for k < m && contest(p.tokens[k], q[k]) {
+				k++
+			}
+			if k == m {
+				return false
+			}
+			if k+1 > d {
+				d = k + 1
+			}
+			return true
+		}
+		for j := 0; j < n; j++ {
+			if j == i {
+				continue
+			}
+			for _, q := range deep[j] {
+				if !against(q.tokens) {
+					return len(p.tokens)
+				}
+			}
+		}
+		for _, e := range exitPaths {
+			if !against(e) {
+				return len(p.tokens)
+			}
+		}
+		return d
+	}
+
+	out := make([]dispatchPrefixSet, n)
+	for i := range alts {
+		seen := map[string]bool{}
+		prefixes := [][]string{}
+		push := func(tokens []string) {
+			key := joinSpace(tokens)
+			if seen[key] {
+				return
+			}
+			seen[key] = true
+			prefixes = append(prefixes, tokens)
+		}
+		for _, h := range heads[i] {
+			if !contested[i][h] {
+				push([]string{h})
+				continue
+			}
+			for _, p := range deep[i] {
+				if p.tokens[0] != h {
+					continue
+				}
+				push(p.tokens[:depthOf(p, i)])
+			}
+		}
+		out[i] = dispatchPrefixSet{prefixes: prefixes, nullable: nullable[i]}
 	}
 	return out
 }

@@ -42,22 +42,112 @@ type contestCtx struct {
 	// precisely the set of classes the guards exist for.
 	setRanges map[string][]charRange
 
+	// The token classes of ConvertOptions.TokenClasses: classSets maps a
+	// production to its set, classMembers the set to its tokens.
+	classSets    map[string]string
+	classMembers map[string][]string
+	// Every token set the emitted spec declares (class-partition sets and
+	// token classes alike), for the heads predicate.
+	tokenSets map[string][]string
+	// Token name -> the literal it was allocated for, for the heads
+	// predicate's prefix test.
+	literalByToken map[string]contestLiteral
+	wordKeywords   bool
+
 	rangeCache   map[string][]charRange
 	rangeKnown   map[string]bool
 	overlapCache map[string]bool
+	contestCache map[string]bool
+}
+
+type contestLiteral struct {
+	literal   string
+	sensitive bool
 }
 
 func newContestCtx(fixedTokens map[string]*string,
 	matchTokens map[string]*regexp.Regexp,
 	setRanges map[string][]charRange) *contestCtx {
 	return &contestCtx{
-		fixedTokens:  fixedTokens,
-		matchTokens:  matchTokens,
-		setRanges:    setRanges,
-		rangeCache:   map[string][]charRange{},
-		rangeKnown:   map[string]bool{},
-		overlapCache: map[string]bool{},
+		fixedTokens:    fixedTokens,
+		matchTokens:    matchTokens,
+		setRanges:      setRanges,
+		classSets:      map[string]string{},
+		classMembers:   map[string][]string{},
+		tokenSets:      map[string][]string{},
+		literalByToken: map[string]contestLiteral{},
+		rangeCache:     map[string][]charRange{},
+		rangeKnown:     map[string]bool{},
+		overlapCache:   map[string]bool{},
+		contestCache:   map[string]bool{},
 	}
+}
+
+// headsContest answers "can the lexer hand the same input to two dispatch
+// heads, so that a choice between them on one token is no choice?" The
+// same token can; a literal can meet a literal it is a prefix of, or
+// that is a prefix of it, case-folded when either is insensitive — except
+// two whole-word keywords under WordKeywords, whose boundary guard keeps
+// `option` off `optional`; a token set meets whatever one of its members
+// meets; a character class, or an atom of one, meets what its coverage
+// overlaps; the engine's own tokens meet only themselves. Narrower than
+// tokensOverlap on purpose: that is the lexer's question, whether two
+// heads can claim one CHARACTER. Mirrors the TS headsContest.
+func (c *contestCtx) headsContest(a, b string) bool {
+	if a == b {
+		return true
+	}
+	key := a + "\x00" + b
+	if b < a {
+		key = b + "\x00" + a
+	}
+	if hit, ok := c.contestCache[key]; ok {
+		return hit
+	}
+	out := false
+	ma, aSet := c.tokenSets[strings.TrimPrefix(a, "#")]
+	mb, bSet := c.tokenSets[strings.TrimPrefix(b, "#")]
+	la, aLit := c.literalByToken[a]
+	lb, bLit := c.literalByToken[b]
+	if aSet || bSet {
+		// A set meets what any member meets; the members themselves are
+		// never sets.
+		xs := []string{a}
+		if aSet {
+			xs = ma
+		}
+		ys := []string{b}
+		if bSet {
+			ys = mb
+		}
+	outer:
+		for _, x := range xs {
+			for _, y := range ys {
+				if c.headsContest(x, y) {
+					out = true
+					break outer
+				}
+			}
+		}
+	} else if aLit && bLit {
+		if !(c.isWordLiteral(la.literal) && c.isWordLiteral(lb.literal)) {
+			x, y := la.literal, lb.literal
+			if !(la.sensitive && lb.sensitive) {
+				x, y = strings.ToLower(x), strings.ToLower(y)
+			}
+			out = strings.HasPrefix(x, y) || strings.HasPrefix(y, x)
+		}
+	} else {
+		// A character class, or an atom of one, against anything: by
+		// coverage. The engine's own tokens have none, and meet nothing.
+		out = c.tokensOverlap(a, b)
+	}
+	c.contestCache[key] = out
+	return out
+}
+
+func (c *contestCtx) isWordLiteral(lit string) bool {
+	return c.wordKeywords && endsWithWordChar(lit)
 }
 
 // tokenRangesOf is the character coverage of a token, or nil when it
@@ -134,9 +224,34 @@ func (c *contestCtx) tokensOverlap(a, b string) bool {
 	if hit, ok := c.overlapCache[key]; ok {
 		return hit
 	}
-	ra := c.tokenRangesOf(a)
-	rb := c.tokenRangesOf(b)
-	hit := ra != nil && rb != nil && charRangesOverlap(ra, rb)
+	hit := false
+	ma, aClass := c.classMembers[a]
+	mb, bClass := c.classMembers[b]
+	if aClass || bClass {
+		// A token class meets what any member meets, the same token
+		// included; coverage alone would miss an engine token in it.
+		xs := []string{a}
+		if aClass {
+			xs = ma
+		}
+		ys := []string{b}
+		if bClass {
+			ys = mb
+		}
+	outer:
+		for _, x := range xs {
+			for _, y := range ys {
+				if x == y || c.tokensOverlap(x, y) {
+					hit = true
+					break outer
+				}
+			}
+		}
+	} else {
+		ra := c.tokenRangesOf(a)
+		rb := c.tokenRangesOf(b)
+		hit = ra != nil && rb != nil && charRangesOverlap(ra, rb)
+	}
 	c.overlapCache[key] = hit
 	return hit
 }
@@ -275,9 +390,9 @@ func pairExitGuards(prod *Production, baseO map[string]any,
 // where the grammar put it.
 func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f string,
 	consumed int, grammar *Grammar, literals, regexTokens map[string]string,
-	followSets map[string]map[string]bool) []map[string]any {
+	followSets map[string]map[string]bool, classSets map[string]string) []map[string]any {
 
-	paths := altPrefixesRaw(alt, grammar, literals, regexTokens, 2, map[string]bool{})
+	paths := altPrefixesRaw(alt, grammar, literals, regexTokens, 2, map[string]bool{}, nil, classSets)
 	seconds := map[string]bool{}
 	for _, path := range paths {
 		p := path.tokens
@@ -458,7 +573,7 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 		var guards []map[string]any
 		if consumed == 0 || consumed == 1 {
 			guards = synthKeywordGuards(prod, e.o, e.alt, f, consumed,
-				grammar, literals, regexTokens, followSets)
+				grammar, literals, regexTokens, followSets, cc.classSets)
 		}
 		if guards == nil {
 			put(e.o, float64(i))

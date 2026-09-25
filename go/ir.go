@@ -330,6 +330,16 @@ type ConvertOptions struct {
 	// small as possible. Mirrors the TS `provenance?: boolean`, which is
 	// likewise on unless explicitly `false`.
 	Provenance *bool
+	// TokenClasses compiles a token class — a production whose every
+	// alternative is a single literal or engine token (`ident = TX /
+	// "message" / "option"`) — as one engine token SET wherever another
+	// rule looks ahead at it, and keeps it as a rule of its own rather than
+	// inlining it into the rules it leads. A lookahead position that can
+	// hold any of N members then costs one alternate rather than N, and a
+	// contextual keyword is one class member. Off by default: the class is
+	// inlined where it leads an alternative and its members are enumerated,
+	// exactly as before. Mirrors the TS `tokenClasses`.
+	TokenClasses bool
 }
 
 // provenanceOn reports whether the provenance map should be emitted:

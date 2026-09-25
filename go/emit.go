@@ -293,7 +293,15 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	liftedLiterals := liftLiteralTokens(grammar, start)
 	normalizeBuiltinTokens(grammar)
 
-	grammar = eliminateLeftRecursion(grammar)
+	// The token classes, read before any rewrite: elimination would
+	// otherwise inline each one into every rule it leads, which is the
+	// multiplier the option exists to remove.
+	classNames := map[string]bool{}
+	if opts.TokenClasses {
+		classNames = tokenClassNames(grammar)
+	}
+
+	grammar = eliminateLeftRecursionKeeping(grammar, classNames)
 	grammar = rewriteProbeDispatches(grammar)
 	// Left factoring runs after the probe rewriter (so `[X D] Y`
 	// patterns are recognised in their original alternatives) and
@@ -499,12 +507,67 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	for _, p := range grammar.Productions {
 		knownRules[p.Name] = true
 	}
-	firstSets, nullable := computeFirstSets(grammar, literals, regexTokens)
+	cc := newContestCtx(fixedTokens, matchTokens, setRanges)
+	cc.tokenSets = tokenSets
+	cc.wordKeywords = opts.WordKeywords
+	for key, name := range literals {
+		cc.literalByToken[name] = contestLiteral{
+			literal: key[3:], sensitive: strings.HasPrefix(key, "cs:"),
+		}
+	}
+
+	// The token classes as engine token sets (ConvertOptions.TokenClasses):
+	// one set per class, named after the production, holding the tokens
+	// its alternatives are. Minted after the tokens, since the members
+	// must exist, and before FIRST, whose sets name them. Mirrors TS.
+	for _, prod := range grammar.Productions {
+		if !classNames[prod.Name] {
+			continue
+		}
+		members := []string{}
+		for _, alt := range prod.Alts {
+			tok := tokenForTerminal(alt[0], literals, regexTokens)
+			dup := false
+			for _, m := range members {
+				if m == tok {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				members = append(members, tok)
+			}
+		}
+		if len(members) < 2 {
+			continue
+		}
+		name := allocTokenName(prod.Name, usedNames, prod.Name)
+		tokenSets[strings.TrimPrefix(name, "#")] = members
+		cc.classSets[prod.Name] = name
+		cc.classMembers[name] = members
+		// The class covers what its members cover, when that is known for
+		// every member; an engine token among them (#TX) leaves it
+		// unknown, as it is for that token alone.
+		covered := []charRange{}
+		known := true
+		for _, m := range members {
+			r := cc.tokenRangesOf(m)
+			if r == nil {
+				known = false
+				break
+			}
+			covered = append(covered, r...)
+		}
+		if known {
+			setRanges[name] = covered
+		}
+	}
+
+	firstSets, nullable := computeFirstSets(grammar, literals, regexTokens, cc.classSets)
 	// Settle the contested left-recursion tail loops flagged during
 	// elimination, now that FIRST sets can say whether the competition is
 	// real. Runs on the desugared grammar because the loop is a helper
 	// production by this point.
-	cc := newContestCtx(fixedTokens, matchTokens, setRanges)
 	resolveSuffixDebts(grammar, literals, regexTokens, firstSets, nullable, cc)
 	// FOLLOW puts the tokens that may come after a repetition back into
 	// its terminating alternative's token column; FOLLOW₂ decides a
@@ -1300,7 +1363,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 						contestedByFollow(prod, alt, literals, regexTokens,
 							firstSets, nullable, followSets, cc) {
 						pfx := [][]string{}
-						for _, p := range altPrefixes(alt, grammar, literals, regexTokens, lookaheadKSpan) {
+						for _, p := range altPrefixes(alt, grammar, literals, regexTokens, lookaheadKSpan, cc.classSets) {
 							if len(p) > 0 {
 								pfx = append(pfx, p)
 							}
@@ -1501,6 +1564,33 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		dispatchMarks = buildMarks(prod.Alts, literals, regexTokens)
 	}
 
+	// The ways out of this choice, for the contest check: a choice with
+	// an empty alternative (or one that derives ε) can end on any token
+	// that may follow it, so a content head the lexer could also read as
+	// a follow token has to look further before it commits.
+	exitPaths := [][]string{}
+	anyEpsilon := false
+	for _, alt := range prod.Alts {
+		if len(alt) == 0 || firstOfAlt(alt, literals, regexTokens, firstSets, nullable) == nil {
+			anyEpsilon = true
+			break
+		}
+	}
+	if anyEpsilon {
+		for _, t := range sortedKeys(followSets[prod.Name]) {
+			exitPaths = append(exitPaths, []string{t})
+		}
+		pairs := followPairs[prod.Name]
+		for _, t := range sortedKeysOfPairs(pairs) {
+			for _, u := range sortedKeys(pairs[t]) {
+				exitPaths = append(exitPaths, []string{t, u})
+			}
+		}
+	}
+	const lookaheadK = 4
+	dispatch := dispatchPrefixes(prod.Alts, grammar, literals, regexTokens, lookaheadK,
+		cc.headsContest, exitPaths, cc.classSets)
+
 	for i, alt := range prod.Alts {
 		implName := fmt.Sprintf("%s$alt%d", prod.Name, i)
 		mark := ""
@@ -1532,32 +1622,27 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			"init": true, "rule": prod.Name, "kind": dispatchKind, "nterms": 0,
 		})
 
-		const lookaheadK = 4
+		// One dispatch entry per prefix this alternative needs to be told
+		// apart from its rivals: its first token where that decides, and
+		// deeper prefixes only under a head another alternative (or the
+		// way out of the choice) shares. See dispatchPrefixes. The entry
+		// pushes the alternative's own rule, which parses it whole, so the
+		// trees are those of the K-token fan-out this replaced.
+		//
 		// An alternative that can derive ε — every element nullable, a
-		// complete zero-token path rather than a cycle truncation — loses
-		// that derivation in the `usable` filter below, because a
-		// zero-token prefix names no token to dispatch on. Remember it:
-		// after the loop it is re-issued as FOLLOW-guarded entries plus a
-		// bare fallback. Without this, `expression ::= term (("+"|"-")
-		// term)*` reaches the `;` that ends the statement with nothing in
-		// the token column that can lex it, and a valid C program is
-		// rejected one character from the end.
-		for _, p := range altPrefixesRaw(
-			alt, grammar, literals, regexTokens, lookaheadK, map[string]bool{}) {
-			if len(p.tokens) == 0 && !p.done {
-				nullableImpls = append(nullableImpls, nullableImpl{
-					implName: implName, fields: initDispatchFields, mark: mark,
-				})
-				break
-			}
+		// complete zero-token path rather than a cycle truncation — has no
+		// prefix for that derivation. Remember it: after the loop it is
+		// re-issued as FOLLOW-guarded entries plus a bare fallback. Without
+		// this, `expression ::= term (("+"|"-") term)*` reaches the `;`
+		// that ends the statement with nothing in the token column that can
+		// lex it, and a valid C program is rejected one character from the
+		// end.
+		if dispatch[i].nullable {
+			nullableImpls = append(nullableImpls, nullableImpl{
+				implName: implName, fields: initDispatchFields, mark: mark,
+			})
 		}
-		prefixes := altPrefixes(alt, grammar, literals, regexTokens, lookaheadK)
-		usable := [][]string{}
-		for _, p := range prefixes {
-			if len(p) > 0 {
-				usable = append(usable, p)
-			}
-		}
+		usable := dispatch[i].prefixes
 		if len(usable) > 0 {
 			for _, p := range usable {
 				o := map[string]any{"s": strings.Join(p, " "), "b": len(p), "p": implName, "g": tag}

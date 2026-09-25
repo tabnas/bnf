@@ -49,11 +49,24 @@ pub(crate) type FollowPairs = IndexMap<String, IndexMap<String, IndexSet<String>
 /// FIRST(ref) for every production, plus which productions are nullable.
 /// Iterates to a fixed point; terminals are represented by their
 /// allocated token names.
-pub(crate) fn compute_first_sets(grammar: &Grammar, tokens: &Tokens) -> (FirstSets, Nullable) {
+/// `class_sets` maps a token-class production to the token set it
+/// compiles to (`ConvertOptions::token_classes`): FIRST of such a
+/// production is its set, one name, wherever it is referenced.
+pub(crate) fn compute_first_sets(
+    grammar: &Grammar,
+    tokens: &Tokens,
+    class_sets: &IndexMap<String, String>,
+) -> (FirstSets, Nullable) {
     let mut first_sets: FirstSets = grammar
         .productions
         .iter()
-        .map(|p| (p.name.clone(), IndexSet::new()))
+        .map(|p| {
+            let mut first = IndexSet::new();
+            if let Some(set) = class_sets.get(&p.name) {
+                first.insert(set.clone());
+            }
+            (p.name.clone(), first)
+        })
         .collect();
     let mut nullable: Nullable = IndexSet::new();
 
@@ -61,6 +74,9 @@ pub(crate) fn compute_first_sets(grammar: &Grammar, tokens: &Tokens) -> (FirstSe
     while changed {
         changed = false;
         for prod in &grammar.productions {
+            if class_sets.contains_key(&prod.name) {
+                continue;
+            }
             for alt in &prod.alts {
                 let mut alt_nullable = true;
                 for el in alt {
@@ -487,17 +503,34 @@ pub(crate) struct PrefixPath {
 /// cycles back or exhausts depth, the path is TERMINATED at the tokens
 /// accumulated so far, and `done` is propagated out so a truncated
 /// sub-prefix is never extended.
+/// `head_filter`, when given, keeps only the paths whose FIRST token it
+/// admits: the dispatcher deepens the lookahead under a contested head
+/// alone, and enumerating every path to depth K only to discard the rest
+/// is the cost tabnas/bnf#71 measured in seconds. `class_sets` maps a
+/// token-class production to its set: a reference to one is one token,
+/// its set, rather than one path per member.
 pub(crate) fn alt_prefixes_raw(
     alt: &[Element],
     grammar: &Grammar,
     tokens: &Tokens,
     max_k: usize,
     visited: &IndexSet<String>,
+    head_filter: Option<&dyn Fn(&str) -> bool>,
+    class_sets: Option<&IndexMap<String, String>>,
 ) -> Vec<PrefixPath> {
     let mut paths: Vec<PrefixPath> = vec![PrefixPath {
         tokens: Vec::new(),
         done: false,
     }];
+
+    // A path that already carries a token has had its head admitted; only
+    // a path still at length zero can be pruned by what it gains next.
+    let admit = |before: &PrefixPath, tokens: &[String]| -> bool {
+        match head_filter {
+            None => true,
+            Some(f) => !before.tokens.is_empty() || tokens.is_empty() || f(&tokens[0]),
+        }
+    };
 
     for el in alt {
         let mut next: Vec<PrefixPath> = Vec::new();
@@ -510,12 +543,25 @@ pub(crate) fn alt_prefixes_raw(
                 Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
                     let mut t = p.tokens.clone();
                     t.push(tokens.name(el));
-                    next.push(PrefixPath {
-                        tokens: t,
-                        done: false,
-                    });
+                    if admit(p, &t) {
+                        next.push(PrefixPath {
+                            tokens: t,
+                            done: false,
+                        });
+                    }
                 }
                 Kind::Ref { name, .. } => {
+                    if let Some(set) = class_sets.and_then(|c| c.get(name)) {
+                        let mut t = p.tokens.clone();
+                        t.push(set.clone());
+                        if admit(p, &t) {
+                            next.push(PrefixPath {
+                                tokens: t,
+                                done: false,
+                            });
+                        }
+                        continue;
+                    }
                     if visited.contains(name) {
                         next.push(PrefixPath {
                             tokens: p.tokens.clone(),
@@ -533,6 +579,13 @@ pub(crate) fn alt_prefixes_raw(
                         });
                         continue;
                     };
+                    // The head of the outer path is the head of the sub-path
+                    // while nothing has been consumed yet.
+                    let sub_filter = if p.tokens.is_empty() {
+                        head_filter
+                    } else {
+                        None
+                    };
                     for sub in &target.alts {
                         let sub_paths = alt_prefixes_raw(
                             sub,
@@ -540,6 +593,8 @@ pub(crate) fn alt_prefixes_raw(
                             tokens,
                             max_k - p.tokens.len(),
                             &child_visited,
+                            sub_filter,
+                            class_sets,
                         );
                         for sp in sub_paths {
                             let mut t = p.tokens.clone();
@@ -574,8 +629,17 @@ pub(crate) fn alt_prefixes(
     grammar: &Grammar,
     tokens: &Tokens,
     max_k: usize,
+    class_sets: Option<&IndexMap<String, String>>,
 ) -> Vec<Vec<String>> {
-    let raw = alt_prefixes_raw(alt, grammar, tokens, max_k, &IndexSet::new());
+    let raw = alt_prefixes_raw(
+        alt,
+        grammar,
+        tokens,
+        max_k,
+        &IndexSet::new(),
+        None,
+        class_sets,
+    );
     let mut seen: IndexSet<String> = IndexSet::new();
     let mut out: Vec<Vec<String>> = Vec::new();
     for p in raw {
@@ -608,4 +672,215 @@ pub(crate) fn is_single_segment(alt: &Sequence) -> bool {
         }
     }
     true
+}
+
+/// The token classes of a grammar (`ConvertOptions::token_classes`): every
+/// alternative one literal or engine token, at least two of them. A
+/// character class (`regex`) is not a member: those are laid over the
+/// partition the class analysis builds, and a set over them is that
+/// machinery's to mint. Mirrors the TypeScript `tokenClassNames`.
+pub(crate) fn token_class_names(grammar: &Grammar) -> IndexSet<String> {
+    let mut out = IndexSet::new();
+    for prod in &grammar.productions {
+        if prod.probe_helper.is_some()
+            || prod.probe_dispatch.is_some()
+            || prod.tail_repeat.is_some()
+        {
+            continue;
+        }
+        if prod.value.is_some() || prod.alts.len() < 2 {
+            continue;
+        }
+        let all = prod.alts.iter().all(|alt| {
+            alt.len() == 1 && matches!(alt[0].kind, Kind::Term { .. } | Kind::Token { .. })
+        });
+        if all {
+            out.insert(prod.name.clone());
+        }
+    }
+    out
+}
+
+/// One entry per alternative of a choice: the prefixes to dispatch it
+/// on, and whether it can derive ε.
+pub(crate) struct DispatchPrefixes {
+    pub prefixes: Vec<Vec<String>>,
+    pub nullable: bool,
+}
+
+/// The dispatch prefixes of a choice, using the least lookahead each
+/// decision needs (tabnas/bnf#71). Mirrors the TypeScript
+/// `dispatchPrefixes`.
+///
+/// Every alternative is dispatched on its first tokens alone, and the
+/// lookahead deepens only under a head two alternatives share, one token
+/// at a time, until the paths through that head no longer collide, or
+/// the window (`max_k`) runs out and the paths are emitted whole, as they
+/// always were. "Collide" is `contest(a, b)`: the same token, a pair the
+/// lexer can hand to either alternative, or a token set meeting one of
+/// its members. Two paths collide up to depth d when their tokens collide
+/// at every position below d that both have; a path that ends sooner is
+/// open, so it keeps colliding for as long as it lasts, and the longer
+/// path is then emitted whole. `exit_paths` are the ways OUT of a choice
+/// that has an empty alternative: each FOLLOW token as an open one-token
+/// path, and each FOLLOW₂ pair.
+pub(crate) fn dispatch_prefixes(
+    alts: &[Sequence],
+    grammar: &Grammar,
+    tokens: &Tokens,
+    max_k: usize,
+    contest: &dyn Fn(&str, &str) -> bool,
+    exit_paths: &[Vec<String>],
+    class_sets: &IndexMap<String, String>,
+) -> Vec<DispatchPrefixes> {
+    let n = alts.len();
+    let mut one: Vec<Vec<PrefixPath>> = Vec::with_capacity(n);
+    let mut nullable: Vec<bool> = Vec::with_capacity(n);
+    let mut heads: Vec<Vec<String>> = Vec::with_capacity(n);
+    for alt in alts {
+        let paths = if alt.is_empty() {
+            Vec::new()
+        } else {
+            alt_prefixes_raw(
+                alt,
+                grammar,
+                tokens,
+                1,
+                &IndexSet::new(),
+                None,
+                Some(class_sets),
+            )
+        };
+        nullable.push(paths.iter().any(|p| p.tokens.is_empty() && !p.done));
+        let mut seen: IndexSet<String> = IndexSet::new();
+        let mut hs: Vec<String> = Vec::new();
+        for p in &paths {
+            if p.tokens.len() != 1 {
+                continue;
+            }
+            if seen.insert(p.tokens[0].clone()) {
+                hs.push(p.tokens[0].clone());
+            }
+        }
+        heads.push(hs);
+        one.push(paths);
+    }
+
+    // A head is contested when another alternative, or an exit, has a
+    // head the lexer could hand to either.
+    let mut contested: Vec<IndexSet<String>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut out: IndexSet<String> = IndexSet::new();
+        for h in &heads[i] {
+            let mut hit = false;
+            for (j, others) in heads.iter().enumerate() {
+                if j == i || hit {
+                    continue;
+                }
+                if others.iter().any(|o| contest(h, o)) {
+                    hit = true;
+                }
+            }
+            if !hit && exit_paths.iter().any(|e| contest(h, &e[0])) {
+                hit = true;
+            }
+            if hit {
+                out.insert(h.clone());
+            }
+        }
+        contested.push(out);
+    }
+
+    // Deep paths, only under the contested heads.
+    let mut deep: Vec<Vec<PrefixPath>> = Vec::with_capacity(n);
+    for (i, alt) in alts.iter().enumerate() {
+        if contested[i].is_empty() {
+            deep.push(Vec::new());
+            continue;
+        }
+        let c = &contested[i];
+        let filter = |t: &str| c.contains(t);
+        deep.push(
+            alt_prefixes_raw(
+                alt,
+                grammar,
+                tokens,
+                max_k,
+                &IndexSet::new(),
+                Some(&filter),
+                Some(class_sets),
+            )
+            .into_iter()
+            .filter(|p| !p.tokens.is_empty())
+            .collect(),
+        );
+    }
+
+    // The depth at which `p` stops colliding with every rival: the
+    // position after the first one where they differ, over all rivals;
+    // or the whole path when some rival never differs within what both
+    // have.
+    let depth_of = |p: &PrefixPath, i: usize| -> usize {
+        let mut d = 1usize;
+        let mut against = |q: &[String]| -> bool {
+            let m = p.tokens.len().min(q.len());
+            let mut k = 0;
+            while k < m && contest(&p.tokens[k], &q[k]) {
+                k += 1;
+            }
+            if k == m {
+                return false;
+            }
+            if k + 1 > d {
+                d = k + 1;
+            }
+            true
+        };
+        for (j, paths) in deep.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            for q in paths {
+                if !against(&q.tokens) {
+                    return p.tokens.len();
+                }
+            }
+        }
+        for e in exit_paths {
+            if !against(e) {
+                return p.tokens.len();
+            }
+        }
+        d
+    };
+
+    let mut out: Vec<DispatchPrefixes> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut seen: IndexSet<String> = IndexSet::new();
+        let mut prefixes: Vec<Vec<String>> = Vec::new();
+        for h in &heads[i] {
+            if !contested[i].contains(h) {
+                if seen.insert(h.clone()) {
+                    prefixes.push(vec![h.clone()]);
+                }
+                continue;
+            }
+            for p in &deep[i] {
+                if &p.tokens[0] != h {
+                    continue;
+                }
+                let d = depth_of(p, i);
+                let prefix: Vec<String> = p.tokens[..d].to_vec();
+                if seen.insert(prefix.join(" ")) {
+                    prefixes.push(prefix);
+                }
+            }
+        }
+        out.push(DispatchPrefixes {
+            prefixes,
+            nullable: nullable[i],
+        });
+    }
+    let _ = one;
+    out
 }

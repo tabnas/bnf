@@ -22,8 +22,8 @@ use serde_json::{json, Map, Value};
 
 use crate::analysis::{
     alt_prefixes, alt_prefixes_raw, compute_first_sets, compute_follow_pairs, compute_follow_sets,
-    first_of_alt, is_single_segment, resolve_suffix_debts, FirstSets, FollowPairs, FollowSets,
-    Nullable, Tokens,
+    dispatch_prefixes, first_of_alt, is_single_segment, resolve_suffix_debts, token_class_names,
+    FirstSets, FollowPairs, FollowSets, Nullable, Tokens,
 };
 use crate::annotate::{plan_array_helpers, plan_value_annotations};
 use crate::desugar::desugar;
@@ -33,7 +33,8 @@ use crate::ir::{
     origin_of, regex_key, set_diag_name, term_key_of, ConvertOptions, Element, EmitError, Grammar,
     Kind, NodeKind, Production, Sequence, SrcSpan, ValueAnnotation,
 };
-use crate::leftrec::{eliminate_left_recursion, rewrite_tail_repeats};
+use crate::leftrec::eliminate_left_recursion_keeping;
+use crate::leftrec::rewrite_tail_repeats;
 use crate::probe::rewrite_probe_dispatches;
 use crate::prose::{
     lift_literal_tokens, normalize_builtin_tokens, nullable_rules, resolve_prose_terminals,
@@ -217,8 +218,20 @@ struct ContestCtx {
     /// The coverage of a class that became a token SET over atoms, so it
     /// appears in neither token table.
     set_ranges: IndexMap<String, Vec<CharRange>>,
+    /// The token classes of `ConvertOptions::token_classes`: production
+    /// to its set, and set to its member tokens.
+    class_sets: IndexMap<String, String>,
+    class_members: IndexMap<String, Vec<String>>,
+    /// Every token set the emitted spec declares (class-partition sets and
+    /// token classes alike), for the heads predicate.
+    token_sets: IndexMap<String, Vec<String>>,
+    /// Token name to the literal it was allocated for and whether it is
+    /// case-sensitive, for the heads predicate's prefix test.
+    literal_by_token: IndexMap<String, (String, bool)>,
+    word_keywords: bool,
     range_cache: RefCell<IndexMap<String, Option<Vec<CharRange>>>>,
     overlap_cache: RefCell<IndexMap<String, bool>>,
+    contest_cache: RefCell<IndexMap<String, bool>>,
 }
 
 impl ContestCtx {
@@ -274,14 +287,84 @@ impl ContestCtx {
         if let Some(hit) = self.overlap_cache.borrow().get(&key) {
             return *hit;
         }
-        let ra = self.token_ranges_of(a);
-        let rb = self.token_ranges_of(b);
-        let out = match (ra, rb) {
-            (Some(ra), Some(rb)) => char_ranges_overlap(&ra, &rb),
-            _ => false,
+        let ma = self.class_members.get(a);
+        let mb = self.class_members.get(b);
+        let out = if ma.is_some() || mb.is_some() {
+            // A token class meets what any member meets, the same token
+            // included; coverage alone would miss an engine token in it.
+            let xs: Vec<String> = ma.cloned().unwrap_or_else(|| vec![a.to_string()]);
+            let ys: Vec<String> = mb.cloned().unwrap_or_else(|| vec![b.to_string()]);
+            xs.iter()
+                .any(|x| ys.iter().any(|y| x == y || self.tokens_overlap(x, y)))
+        } else {
+            let ra = self.token_ranges_of(a);
+            let rb = self.token_ranges_of(b);
+            match (ra, rb) {
+                (Some(ra), Some(rb)) => char_ranges_overlap(&ra, &rb),
+                _ => false,
+            }
         };
         self.overlap_cache.borrow_mut().insert(key, out);
         out
+    }
+
+    /// Can the lexer hand the same input to two dispatch heads, so that a
+    /// choice between them on one token is no choice? The same token can;
+    /// a literal can meet a literal it is a prefix of, or that is a prefix
+    /// of it, case-folded when either is insensitive, except two
+    /// whole-word keywords under `word_keywords`, whose boundary guard
+    /// keeps `option` off `optional`; a token set meets whatever one of
+    /// its members meets; a character class, or an atom of one, meets what
+    /// its coverage overlaps; the engine's own tokens meet only
+    /// themselves. Narrower than `tokens_overlap` on purpose: that is the
+    /// lexer's question, whether two heads can claim one CHARACTER.
+    /// Mirrors the TypeScript `headsContest`.
+    fn heads_contest(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let key = if a < b {
+            format!("{a}\0{b}")
+        } else {
+            format!("{b}\0{a}")
+        };
+        if let Some(hit) = self.contest_cache.borrow().get(&key) {
+            return *hit;
+        }
+        let ma = self.token_sets.get(a.trim_start_matches('#'));
+        let mb = self.token_sets.get(b.trim_start_matches('#'));
+        let la = self.literal_by_token.get(a);
+        let lb = self.literal_by_token.get(b);
+        let out = if ma.is_some() || mb.is_some() {
+            // A set meets what any member meets; the members themselves
+            // are never sets.
+            let xs: Vec<String> = ma.cloned().unwrap_or_else(|| vec![a.to_string()]);
+            let ys: Vec<String> = mb.cloned().unwrap_or_else(|| vec![b.to_string()]);
+            xs.iter()
+                .any(|x| ys.iter().any(|y| self.heads_contest(x, y)))
+        } else if let (Some((la, sa)), Some((lb, sb))) = (la, lb) {
+            if self.is_word_literal(la) && self.is_word_literal(lb) {
+                false
+            } else {
+                let fold = !(*sa && *sb);
+                let (x, y) = if fold {
+                    (la.to_lowercase(), lb.to_lowercase())
+                } else {
+                    (la.clone(), lb.clone())
+                };
+                x.starts_with(&y) || y.starts_with(&x)
+            }
+        } else {
+            // A character class, or an atom of one, against anything: by
+            // coverage. The engine's own tokens have none, and meet nothing.
+            self.tokens_overlap(a, b)
+        };
+        self.contest_cache.borrow_mut().insert(key, out);
+        out
+    }
+
+    fn is_word_literal(&self, lit: &str) -> bool {
+        self.word_keywords && ends_with_word_char(lit)
     }
 }
 
@@ -470,7 +553,16 @@ pub fn emit_grammar_spec(
     let lifted_literals = lift_literal_tokens(&mut grammar, &start);
     normalize_builtin_tokens(&mut grammar);
 
-    let grammar = eliminate_left_recursion(&grammar)?;
+    // The token classes, read before any rewrite: elimination would
+    // otherwise inline each one into every rule it leads, which is the
+    // multiplier the option exists to remove.
+    let class_names: IndexSet<String> = if opts.token_classes {
+        token_class_names(&grammar)
+    } else {
+        IndexSet::new()
+    };
+
+    let grammar = eliminate_left_recursion_keeping(&grammar, &class_names)?;
     let grammar = rewrite_probe_dispatches(&grammar)?;
     // Left factoring runs after the probe rewriter and before
     // tail-repeat detection and desugaring.
@@ -582,18 +674,72 @@ pub fn emit_grammar_spec(
 
     let known_rules: IndexSet<String> =
         grammar.productions.iter().map(|p| p.name.clone()).collect();
-    let (first_sets, nullable) = compute_first_sets(&grammar, &tokens);
-    let follow_sets = compute_follow_sets(&grammar, &tokens, &first_sets, &nullable, &start);
-    let follow_pairs =
-        compute_follow_pairs(&grammar, &tokens, &first_sets, &nullable, &follow_sets);
 
-    let contest = ContestCtx {
+    let mut contest = ContestCtx {
         fixed_tokens: fixed_tokens.clone(),
         match_tokens: match_tokens.clone(),
         set_ranges,
+        class_sets: IndexMap::new(),
+        class_members: IndexMap::new(),
+        token_sets: IndexMap::new(),
+        literal_by_token: IndexMap::new(),
+        word_keywords,
         range_cache: RefCell::new(IndexMap::new()),
         overlap_cache: RefCell::new(IndexMap::new()),
+        contest_cache: RefCell::new(IndexMap::new()),
     };
+    for (key, name) in &tokens.literals {
+        contest
+            .literal_by_token
+            .insert(name.clone(), (key[3..].to_string(), key.starts_with("cs:")));
+    }
+
+    // The token classes as engine token sets (`ConvertOptions::token_classes`):
+    // one set per class, named after the production, holding the tokens
+    // its alternatives are. Minted after the tokens, since the members
+    // must exist, and before FIRST, whose sets name them.
+    for prod in &grammar.productions {
+        if !class_names.contains(&prod.name) {
+            continue;
+        }
+        let mut members: Vec<String> = Vec::new();
+        for alt in &prod.alts {
+            let tok = tokens.name(&alt[0]);
+            if !members.contains(&tok) {
+                members.push(tok);
+            }
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        let name = alloc_token_name(&prod.name, &mut used_names, Some(&prod.name));
+        token_sets.insert(name.trim_start_matches('#').to_string(), members.clone());
+        contest.class_sets.insert(prod.name.clone(), name.clone());
+        // The class covers what its members cover, when that is known for
+        // every member; an engine token among them (`#TX`) leaves it
+        // unknown, as it is for that token alone.
+        let mut covered: Vec<CharRange> = Vec::new();
+        let mut known = true;
+        for m in &members {
+            match contest.token_ranges_of(m) {
+                Some(r) => covered.extend(r),
+                None => {
+                    known = false;
+                    break;
+                }
+            }
+        }
+        if known {
+            contest.set_ranges.insert(name.clone(), covered);
+        }
+        contest.class_members.insert(name, members);
+    }
+    contest.token_sets = token_sets.clone();
+
+    let (first_sets, nullable) = compute_first_sets(&grammar, &tokens, &contest.class_sets);
+    let follow_sets = compute_follow_sets(&grammar, &tokens, &first_sets, &nullable, &start);
+    let follow_pairs =
+        compute_follow_pairs(&grammar, &tokens, &first_sets, &nullable, &follow_sets);
 
     // Settle the contested left-recursion tail loops flagged during
     // elimination, now that FIRST sets can say whether the competition
@@ -1367,7 +1513,15 @@ impl Emitter<'_> {
         f: &str,
         consumed: i64,
     ) -> Option<Vec<AltSpec>> {
-        let paths = alt_prefixes_raw(alt, self.grammar, &self.tokens, 2, &IndexSet::new());
+        let paths = alt_prefixes_raw(
+            alt,
+            self.grammar,
+            &self.tokens,
+            2,
+            &IndexSet::new(),
+            None,
+            Some(&self.contest.class_sets),
+        );
         let mut seconds: IndexSet<String> = IndexSet::new();
         for p in &paths {
             if p.tokens.first().map(String::as_str) != Some(f) {
@@ -1798,11 +1952,16 @@ impl Emitter<'_> {
                         if self.alt_head_contested(idx, &ordered)
                             || self.contested_by_follow(prod, alt)
                         {
-                            let pfx: Vec<Vec<String>> =
-                                alt_prefixes(alt, self.grammar, &self.tokens, LOOKAHEAD_K)
-                                    .into_iter()
-                                    .filter(|p| !p.is_empty())
-                                    .collect();
+                            let pfx: Vec<Vec<String>> = alt_prefixes(
+                                alt,
+                                self.grammar,
+                                &self.tokens,
+                                LOOKAHEAD_K,
+                                Some(&self.contest.class_sets),
+                            )
+                            .into_iter()
+                            .filter(|p| !p.is_empty())
+                            .collect();
                             if !pfx.is_empty() && pfx.len() <= 64 {
                                 paths = Some(pfx);
                             }
@@ -2006,6 +2165,42 @@ impl Emitter<'_> {
         };
         let origin = origin_of(prod).to_string();
 
+        // The ways out of this choice, for the contest check: a choice with
+        // an empty alternative (or one that derives ε) can end on any token
+        // that may follow it, so a content head the lexer could also read
+        // as a follow token has to look further before it commits.
+        let mut exit_paths: Vec<Vec<String>> = Vec::new();
+        let any_epsilon = prod.alts.iter().any(|alt| {
+            alt.is_empty()
+                || first_of_alt(alt, &self.tokens, &self.first_sets, &self.nullable).is_none()
+        });
+        if any_epsilon {
+            if let Some(fol) = self.follow_sets.get(&prod.name) {
+                for t in fol {
+                    exit_paths.push(vec![t.clone()]);
+                }
+            }
+            if let Some(pairs) = self.follow_pairs.get(&prod.name) {
+                for (t, us) in pairs {
+                    for u in us {
+                        exit_paths.push(vec![t.clone(), u.clone()]);
+                    }
+                }
+            }
+        }
+        let dispatch = {
+            let contest = &self.contest;
+            dispatch_prefixes(
+                &prod.alts,
+                self.grammar,
+                &self.tokens,
+                LOOKAHEAD_K,
+                &|a, b| contest.heads_contest(a, b),
+                &exit_paths,
+                &contest.class_sets,
+            )
+        };
+
         for (i, alt) in prod.alts.iter().enumerate() {
             let impl_name = format!("{}$alt{}", prod.name, i);
             let mark = dispatch_marks.as_ref().map(|m| m[i].clone());
@@ -2035,26 +2230,25 @@ impl Emitter<'_> {
             self.refs
                 .node(&mut init_dispatch_fields, true, &prod.name, prod_kind, 0);
 
-            let raw_paths = alt_prefixes_raw(
-                alt,
-                self.grammar,
-                &self.tokens,
-                LOOKAHEAD_K,
-                &IndexSet::new(),
-            );
-            // An alternative that can derive ε loses that derivation in
-            // the `usable` filter below. Remember it: it is re-issued as
-            // FOLLOW-guarded entries plus a bare fallback, after every
-            // content entry.
-            if raw_paths.iter().any(|p| p.tokens.is_empty() && !p.done) {
+            // One dispatch entry per prefix this alternative needs to be
+            // told apart from its rivals: its first token where that
+            // decides, and deeper prefixes only under a head another
+            // alternative (or the way out of the choice) shares. See
+            // `dispatch_prefixes`. The entry pushes the alternative's own
+            // rule, which parses it whole, so the trees are those of the
+            // K-token fan-out this replaced.
+            //
+            // An alternative that can derive ε has no prefix for that
+            // derivation. Remember it: it is re-issued as FOLLOW-guarded
+            // entries plus a bare fallback, after every content entry.
+            if dispatch[i].nullable {
                 nullable_impls.push((
                     impl_name.clone(),
                     init_dispatch_fields.clone(),
                     mark.clone(),
                 ));
             }
-            let prefixes = alt_prefixes(alt, self.grammar, &self.tokens, LOOKAHEAD_K);
-            let usable: Vec<Vec<String>> = prefixes.into_iter().filter(|p| !p.is_empty()).collect();
+            let usable: Vec<Vec<String>> = dispatch[i].prefixes.clone();
             // `{ s, b, p, a, k?, g }`.
             let mut push_entry = |s: String, b: usize| {
                 let mut o = AltSpec::new();
@@ -2487,7 +2681,7 @@ mod tests {
         resolve_prose_terminals(&mut out).expect("prose");
         lift_literal_tokens(&mut out, start);
         normalize_builtin_tokens(&mut out);
-        let out = eliminate_left_recursion(&out).expect("left recursion");
+        let out = crate::leftrec::eliminate_left_recursion(&out).expect("left recursion");
         let out = rewrite_probe_dispatches(&out).expect("probe");
         let out = left_factor(&out).expect("factor");
         let out = rewrite_tail_repeats(out, start);

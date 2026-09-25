@@ -86,8 +86,15 @@ normalised.
 | `desugar` | Turns repetition and grouping into helper productions. |
 | `resolveSuffixDebts` | Confirms or drops the counter guarding a tail loop whose greediness contests an enclosing suffix. |
 | `computeFollowSets` | Works out what may follow a repetition, so an empty terminating alternative can be guarded by a peek. |
+| `tokenClassNames` | Under `TokenClasses`, names the productions whose alternatives are all single literals or tokens; each becomes one engine token set, kept out of the left-recursion substitution so it stays a rule of its own. |
 
-Then the emitter walks the normalised grammar and writes alternates.
+Then the emitter walks the normalised grammar and writes alternates. A
+choice dispatches on the first token of each alternative
+(`dispatchPrefixes`), and peeks one token deeper only under a head two
+alternatives share, up to the engine's four-token window, so the table
+grows with the number of decisions rather than with the product of the
+tokens that can fill the window. A token class counts as one token at
+every such position.
 
 The result is bigger than it looks. Two productions in the
 [tutorial](tutorial.md) compile to thirteen rules; a twelve-production

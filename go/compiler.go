@@ -180,6 +180,15 @@ func expandNullableLeftPrefixes(prods []*Production) []*Production {
 }
 
 func eliminateLeftRecursion(grammar *Grammar) *Grammar {
+	return eliminateLeftRecursionKeeping(grammar, nil)
+}
+
+// eliminateLeftRecursionKeeping is eliminateLeftRecursion with a set of
+// productions that are never substituted into the alternatives they
+// lead: the token classes of ConvertOptions.TokenClasses. A class holds
+// no reference, so no left-recursive cycle can run through it, and
+// Paull's invariant is unaffected by leaving it in place.
+func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Grammar {
 	// Suffix-debt counter names handed out across the whole grammar.
 	debtNames := map[string]bool{}
 	originalOrder := make([]string, len(grammar.Productions))
@@ -248,6 +257,9 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 			for round := 0; round < guard; round++ {
 				changed := false
 				for j := 0; j < i; j++ {
+					if keep[prods[j].Name] {
+						continue
+					}
 					if !hasLeadingRefTo(prods[i], prods[j].Name) {
 						continue
 					}

@@ -101,6 +101,7 @@ assigned.
 | `builtins` | Emit probe dispatch and tree building as engine `$`-builtin refs instead of closures, keeping the spec function-free and serializable. |
 | `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
 | `word_keywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. |
+| `token_classes` | Compile a production whose alternatives are all single literals or tokens to one engine token set, named after it, that stands as one token at lookahead positions. The rule keeps its per-member alternates and its node. |
 | `provenance` | Emit `meta.provenance`, the map from each generated rule name back to the production it came from. On by default. |
 
 ## Install

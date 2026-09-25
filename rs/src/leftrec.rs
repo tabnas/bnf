@@ -104,6 +104,18 @@ fn expand_nullable_left_prefixes(prods: Vec<Production>) -> Vec<Production> {
 /// Returns a new grammar carrying only productions, in the caller's
 /// declared order. The input is not modified.
 pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError> {
+    eliminate_left_recursion_keeping(grammar, &IndexSet::new())
+}
+
+/// [`eliminate_left_recursion`] with a set of productions that are never
+/// substituted into the alternatives they lead: the token classes of
+/// `ConvertOptions::token_classes`. A class holds no reference, so no
+/// left-recursive cycle can run through it, and Paull's invariant is
+/// unaffected by leaving it in place.
+pub(crate) fn eliminate_left_recursion_keeping(
+    grammar: &Grammar,
+    keep: &IndexSet<String>,
+) -> Result<Grammar, EmitError> {
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
@@ -135,6 +147,9 @@ pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError>
             for _ in 0..guard {
                 let mut changed = false;
                 for j in 0..i {
+                    if keep.contains(&prods[j].name) {
+                        continue;
+                    }
                     if !has_leading_ref_to(&prods[i], &prods[j].name) {
                         continue;
                     }

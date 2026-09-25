@@ -158,6 +158,29 @@ spec, _ := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
 Punctuation is unaffected, since a word boundary after `+` would be
 wrong.
 
+## Compile a keyword class to one token
+
+A language whose identifiers admit keywords writes its identifier rule
+as a choice: `ident = TX / "message" / "enum" / "option" / ...`. Each
+place the grammar peeks at an identifier would then dispatch on every
+member, and a rule that peeks at two of them in a row on their product.
+The `TokenClasses` option compiles such a production, one whose
+alternatives are all single literals or tokens, to one engine token set
+named after it, and every lookahead position that would have named a
+member names the set instead:
+
+```go
+spec, _ := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
+    Start: "file", Tag: "demo", WordKeywords: true, TokenClasses: true,
+})
+// spec.Options["tokenSet"]["ident"] lists the members' tokens; an
+// alternate that peeks an identifier carries `s: "#ident"`.
+```
+
+The rule itself is unchanged: it keeps one alternate per member and
+still builds its node, so a walk sees the same tree with the option on
+or off. Only the size of what the rules around it dispatch on changes.
+
 ## Control literal case sensitivity
 
 ABNF strings are case-insensitive by default, and this compiler keeps
