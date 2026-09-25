@@ -3472,9 +3472,39 @@ function emitGrammarSpec(
   }
   const isWordLiteral = (lit: string): boolean =>
     wordKeywords && /[A-Za-z0-9_]$/.test(lit)
+  // Is one case-insensitive literal a prefix of the other under the
+  // matcher's own folding? Lowercase alone is not that relation: `/^Σ/i`
+  // takes `ς` and `/^ς/i` takes `Σ`, while `"Σ".toLowerCase()` is `σ` and
+  // `"ς".toLowerCase()` stays `ς`. Folding both ways over-approximates
+  // the matcher (a contest declared where the matcher would not meet)
+  // and never under-approximates it, which is the safe direction here.
+  const foldedPrefix = (short: string, long: string): boolean =>
+    long.toLowerCase().startsWith(short.toLowerCase()) ||
+    long.toUpperCase().startsWith(short.toUpperCase())
+  // A regex-backed head whose first character can be read off its
+  // pattern: one atom or one class, alone or repeated with `+`. Anything
+  // else (`a|b` begins with b too, `a?b` with b, `.` with anything, `\d`
+  // with a digit patternCharRanges declines to name) may meet any head,
+  // and the dispatcher must treat it so.
+  const regexHeadIsExact = (tok: string): boolean => {
+    // A literal, fixed or guarded (`^option(?![A-Za-z0-9_])`), covers
+    // its first character exactly whatever follows it in the matcher.
+    if (literalByToken.has(tok)) return true
+    const re = matchTokens[tok]
+    if (null == re) return true
+    let src = re.source.replace(/^\^/, '')
+    const m = /^\(\?:(.*)\)$/.exec(src)
+    if (m) src = m[1]
+    const end = regexHeadAtomEnd(src)
+    if (end < 0) return false
+    const rest = src.slice(end)
+    return '' === rest || '+' === rest
+  }
   const contestCache = new Map<string, boolean>()
   const headsContest = (a: string, b: string): boolean => {
     if (a === b) return true
+    // The engine's ANY token takes every token, so it meets every head.
+    if ('#AA' === a || '#AA' === b) return true
     const key = a < b ? a + '\u0000' + b : b + '\u0000' + a
     const hit = contestCache.get(key)
     if (undefined !== hit) return hit
@@ -3495,16 +3525,23 @@ function emitGrammarSpec(
         if (out) break
       }
     } else if (null != la && null != lb) {
-      if (!(isWordLiteral(la.literal) && isWordLiteral(lb.literal))) {
-        const fold = !(la.sensitive && lb.sensitive)
-        const x = fold ? la.literal.toLowerCase() : la.literal
-        const y = fold ? lb.literal.toLowerCase() : lb.literal
-        out = x.startsWith(y) || y.startsWith(x)
+      const x = la.literal
+      const y = lb.literal
+      const [short, long] = x.length <= y.length ? [x, y] : [y, x]
+      const fold = !(la.sensitive && lb.sensitive)
+      if (fold ? foldedPrefix(short, long) : long.startsWith(short)) {
+        // Two whole-word keywords under `wordKeywords`: the shorter's
+        // boundary guard refuses the longer wherever the longer goes on
+        // with a word character (`option` off `optional`), and admits
+        // it wherever it goes on with anything else (`a` on `a-b`).
+        out = !(isWordLiteral(x) && isWordLiteral(y) &&
+          short.length < long.length && /[A-Za-z0-9_]/.test(long[short.length]))
       }
     } else {
       // A character class, or an atom of one, against anything: by
-      // coverage. The engine's own tokens have none, and meet nothing.
-      out = tokensOverlap(a, b)
+      // coverage, when the coverage is exact. The engine's own tokens
+      // (`#TX`, `#NR`, …) have none, and meet nothing.
+      out = !regexHeadIsExact(a) || !regexHeadIsExact(b) || tokensOverlap(a, b)
     }
     contestCache.set(key, out)
     return out
@@ -5547,6 +5584,38 @@ function computeFollowPairs(
 // (`[aA][bB]`, boundary guards) is irrelevant here: only the FIRST
 // character's coverage decides whether two tokens can contest one
 // input position.
+// Where a pattern's first atom or class ends, or -1 when the pattern does
+// not begin with one: a group, an alternation, a quantifier, `.`, or an
+// escape whose coverage patternCharRanges declines to name.
+function regexHeadAtomEnd(src: string): number {
+  if ('' === src) return -1
+  const c = src[0]
+  if ('[' === c) {
+    let i = 1
+    if ('^' === src[i]) i++
+    if (']' === src[i]) i++
+    while (i < src.length && ']' !== src[i]) i += '\\' === src[i] ? 2 : 1
+    return i < src.length ? i + 1 : -1
+  }
+  if ('\\' === c) {
+    const m = src[1]
+    if (undefined === m) return -1
+    if ('u' === m) {
+      if ('{' === src[2]) {
+        const e = src.indexOf('}', 3)
+        return e < 0 ? -1 : e + 1
+      }
+      return 6
+    }
+    if ('x' === m) return 4
+    if ('dDwWsSbB'.includes(m)) return -1
+    return 2
+  }
+  if ('(.|)?*+{'.includes(c)) return -1
+  const cp = src.codePointAt(0) as number
+  return cp > 0xFFFF ? 2 : 1
+}
+
 function patternCharRanges(
   pattern: string,
 ): Array<[number, number]> | null {

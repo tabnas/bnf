@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // charRange is an inclusive code-point span.
@@ -36,6 +37,62 @@ const maxCodePoint = 0x10FFFF
 // Trailing content after the first class (`[aA][bB]`, boundary guards)
 // is irrelevant: only the FIRST character's coverage decides whether
 // two tokens can contest one input position.
+// regexHeadAtomEnd is the byte offset where a pattern's first atom or
+// class ends, or -1 when the pattern does not begin with one: a group, an
+// alternation, a quantifier, `.`, or an escape whose coverage
+// patternCharRanges declines to name.
+func regexHeadAtomEnd(src string) int {
+	if src == "" {
+		return -1
+	}
+	switch c := src[0]; {
+	case c == '[':
+		i := 1
+		if i < len(src) && src[i] == '^' {
+			i++
+		}
+		if i < len(src) && src[i] == ']' {
+			i++
+		}
+		for i < len(src) && src[i] != ']' {
+			if src[i] == '\\' {
+				i += 2
+			} else {
+				i++
+			}
+		}
+		if i < len(src) {
+			return i + 1
+		}
+		return -1
+	case c == '\\':
+		if len(src) < 2 {
+			return -1
+		}
+		switch m := src[1]; {
+		case m == 'u':
+			if len(src) > 2 && src[2] == '{' {
+				e := strings.IndexByte(src[3:], '}')
+				if e < 0 {
+					return -1
+				}
+				return 3 + e + 1
+			}
+			return 6
+		case m == 'x':
+			return 4
+		case strings.IndexByte("dDwWsSbB", m) >= 0:
+			return -1
+		default:
+			return 2
+		}
+	case strings.IndexByte("(.|)?*+{", c) >= 0:
+		return -1
+	}
+	_, size := utf8.DecodeRuneInString(src)
+	return size
+}
+
 func patternCharRanges(pattern string) []charRange {
 	if pattern == `[\s\S]` {
 		return []charRange{{0, maxCodePoint}}

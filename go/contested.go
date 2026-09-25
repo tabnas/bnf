@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // contestCtx answers "can these two tokens claim the same character?"
@@ -97,6 +98,10 @@ func (c *contestCtx) headsContest(a, b string) bool {
 	if a == b {
 		return true
 	}
+	// The engine's ANY token takes every token, so it meets every head.
+	if a == "#AA" || b == "#AA" {
+		return true
+	}
 	key := a + "\x00" + b
 	if b < a {
 		key = b + "\x00" + a
@@ -130,20 +135,81 @@ func (c *contestCtx) headsContest(a, b string) bool {
 			}
 		}
 	} else if aLit && bLit {
-		if !(c.isWordLiteral(la.literal) && c.isWordLiteral(lb.literal)) {
-			x, y := la.literal, lb.literal
-			if !(la.sensitive && lb.sensitive) {
-				x, y = strings.ToLower(x), strings.ToLower(y)
+		x, y := la.literal, lb.literal
+		short, long := x, y
+		if utf8.RuneCountInString(y) < utf8.RuneCountInString(x) {
+			short, long = y, x
+		}
+		isPrefix := strings.HasPrefix(long, short)
+		if !(la.sensitive && lb.sensitive) {
+			isPrefix = foldedPrefix(short, long)
+		}
+		if isPrefix {
+			// Two whole-word keywords under WordKeywords: the shorter's
+			// boundary guard refuses the longer wherever the longer goes
+			// on with a word character (`option` off `optional`), and
+			// admits it wherever it goes on with anything else (`a` on
+			// `a-b`).
+			out = true
+			if c.isWordLiteral(x) && c.isWordLiteral(y) {
+				lr, sr := []rune(long), []rune(short)
+				if len(sr) < len(lr) && isWordRune(lr[len(sr)]) {
+					out = false
+				}
 			}
-			out = strings.HasPrefix(x, y) || strings.HasPrefix(y, x)
 		}
 	} else {
 		// A character class, or an atom of one, against anything: by
-		// coverage. The engine's own tokens have none, and meet nothing.
-		out = c.tokensOverlap(a, b)
+		// coverage, when the coverage is exact. The engine's own tokens
+		// (#TX, #NR, ...) have none, and meet nothing.
+		out = !c.regexHeadIsExact(a) || !c.regexHeadIsExact(b) || c.tokensOverlap(a, b)
 	}
 	c.contestCache[key] = out
 	return out
+}
+
+// foldedPrefix reports whether one case-insensitive literal is a prefix
+// of the other under the matcher's own folding. Lowercase alone is not
+// that relation: (?i)Σ takes ς and (?i)ς takes Σ, while lowercase maps Σ
+// to σ and leaves ς alone. Folding both ways over-approximates the
+// matcher (a contest declared where the matcher would not meet) and
+// never under-approximates it, which is the safe direction here.
+func foldedPrefix(short, long string) bool {
+	return strings.HasPrefix(strings.ToLower(long), strings.ToLower(short)) ||
+		strings.HasPrefix(strings.ToUpper(long), strings.ToUpper(short))
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || ('0' <= r && r <= '9') || ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z')
+}
+
+// regexHeadIsExact reports whether a regex-backed head's first character
+// can be read off its pattern: one atom or one class, alone or repeated
+// with `+`. Anything else (`a|b` begins with b too, `a?b` with b, `.`
+// with anything, `\d` with a digit patternCharRanges declines to name)
+// may meet any head, and the dispatcher must treat it so. A literal,
+// fixed or guarded (`^option\b`), covers its first character exactly
+// whatever follows it in the matcher.
+func (c *contestCtx) regexHeadIsExact(tok string) bool {
+	if _, isLit := c.literalByToken[tok]; isLit {
+		return true
+	}
+	re, ok := c.matchTokens[tok]
+	if !ok || re == nil {
+		return true
+	}
+	src := re.String()
+	src = strings.TrimPrefix(src, "(?i)")
+	src = strings.TrimPrefix(src, "^")
+	if strings.HasPrefix(src, "(?:") && strings.HasSuffix(src, ")") {
+		src = src[3 : len(src)-1]
+	}
+	end := regexHeadAtomEnd(src)
+	if end < 0 {
+		return false
+	}
+	rest := src[end:]
+	return rest == "" || rest == "+"
 }
 
 func (c *contestCtx) isWordLiteral(lit string) bool {

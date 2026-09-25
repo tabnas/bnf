@@ -32,6 +32,48 @@ const MAX_CODE_POINT: u32 = 0x10FFFF;
 /// content after the first class is irrelevant: only the FIRST
 /// character's coverage decides whether two tokens can contest one input
 /// position.
+/// Where a pattern's first atom or class ends, in chars, or `None` when
+/// the pattern does not begin with one: a group, an alternation, a
+/// quantifier, `.`, or an escape whose coverage `pattern_char_ranges`
+/// declines to name.
+pub fn regex_head_atom_end(src: &str) -> Option<usize> {
+    let chars: Vec<char> = src.chars().collect();
+    let c = *chars.first()?;
+    if c == '[' {
+        let mut i = 1;
+        if chars.get(i) == Some(&'^') {
+            i += 1;
+        }
+        if chars.get(i) == Some(&']') {
+            i += 1;
+        }
+        while i < chars.len() && chars[i] != ']' {
+            i += if chars[i] == '\\' { 2 } else { 1 };
+        }
+        return (i < chars.len()).then_some(i + 1);
+    }
+    if c == '\\' {
+        let m = *chars.get(1)?;
+        return match m {
+            'u' => {
+                if chars.get(2) == Some(&'{') {
+                    let e = (3..chars.len()).find(|k| chars[*k] == '}')?;
+                    Some(e + 1)
+                } else {
+                    Some(6)
+                }
+            }
+            'x' => Some(4),
+            'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'b' | 'B' => None,
+            _ => Some(2),
+        };
+    }
+    if "(.|)?*+{".contains(c) {
+        return None;
+    }
+    Some(1)
+}
+
 pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
     if pattern == r"[\s\S]" {
         return Some(vec![(0, MAX_CODE_POINT)]);

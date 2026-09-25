@@ -106,7 +106,7 @@ Object.keys(spec.rule).includes('val')   // => true
 | `builtins` | Emit probe dispatch and tree building as engine `$`-builtin refs instead of closures, keeping the spec function-free and serializable. |
 | `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
 | `wordKeywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. For tokenised, keyword-rich languages; leave off for char-level grammars. |
-| `tokenClasses` | Compile a production whose alternatives are all single literals or tokens (a keyword or operator class) to one engine token set, named after it, that stands as one token wherever a lookahead would otherwise enumerate its members. The tree is unchanged: the rule keeps its per-member alternates and its node wherever the plain compile keeps a reference to it, and where the plain compile inlines it (a leading reference) the one token is consumed instead. For languages whose identifiers admit keywords. |
+| `tokenClasses` | Compile a production whose alternatives are all single literals or tokens (a keyword or operator class) to one engine token set, named after it, that stands as one token wherever a lookahead would otherwise enumerate its members. The tree is unchanged: the rule keeps its per-member alternates and its node wherever the plain compile keeps a reference to it, and where the plain compile expands it in place (a leading reference) the one token is consumed instead. For languages whose identifiers admit keywords. |
 
 ## Runtimes
 

@@ -323,6 +323,10 @@ impl ContestCtx {
         if a == b {
             return true;
         }
+        // The engine's ANY token takes every token, so it meets every head.
+        if a == "#AA" || b == "#AA" {
+            return true;
+        }
         let key = if a < b {
             format!("{a}\0{b}")
         } else {
@@ -343,21 +347,34 @@ impl ContestCtx {
             xs.iter()
                 .any(|x| ys.iter().any(|y| self.heads_contest(x, y)))
         } else if let (Some((la, sa)), Some((lb, sb))) = (la, lb) {
-            if self.is_word_literal(la) && self.is_word_literal(lb) {
-                false
+            let (short, long) = if la.chars().count() <= lb.chars().count() {
+                (la, lb)
             } else {
-                let fold = !(*sa && *sb);
-                let (x, y) = if fold {
-                    (la.to_lowercase(), lb.to_lowercase())
-                } else {
-                    (la.clone(), lb.clone())
-                };
-                x.starts_with(&y) || y.starts_with(&x)
-            }
+                (lb, la)
+            };
+            let is_prefix = if *sa && *sb {
+                long.starts_with(short.as_str())
+            } else {
+                folded_prefix(short, long)
+            };
+            // Two whole-word keywords under `word_keywords`: the shorter's
+            // boundary guard refuses the longer wherever the longer goes
+            // on with a word character (`option` off `optional`), and
+            // admits it wherever it goes on with anything else (`a` on
+            // `a-b`).
+            is_prefix
+                && !(self.is_word_literal(la) && self.is_word_literal(lb) && {
+                    let lr: Vec<char> = long.chars().collect();
+                    let n = short.chars().count();
+                    n < lr.len() && is_word_char(lr[n])
+                })
         } else {
             // A character class, or an atom of one, against anything: by
-            // coverage. The engine's own tokens have none, and meet nothing.
-            self.tokens_overlap(a, b)
+            // coverage, when the coverage is exact. The engine's own
+            // tokens (`#TX`, `#NR`, ...) have none, and meet nothing.
+            !self.regex_head_is_exact(a)
+                || !self.regex_head_is_exact(b)
+                || self.tokens_overlap(a, b)
         };
         self.contest_cache.borrow_mut().insert(key, out);
         out
@@ -366,6 +383,50 @@ impl ContestCtx {
     fn is_word_literal(&self, lit: &str) -> bool {
         self.word_keywords && ends_with_word_char(lit)
     }
+
+    /// Whether a regex-backed head's first character can be read off its
+    /// pattern: one atom or one class, alone or repeated with `+`.
+    /// Anything else (`a|b` begins with b too, `a?b` with b, `.` with
+    /// anything, `\d` with a digit `pattern_char_ranges` declines to
+    /// name) may meet any head, and the dispatcher must treat it so. A
+    /// literal, fixed or guarded (`^option\b`), covers its first
+    /// character exactly whatever follows it in the matcher.
+    fn regex_head_is_exact(&self, tok: &str) -> bool {
+        if self.literal_by_token.contains_key(tok) {
+            return true;
+        }
+        let Some(re) = self.match_tokens.get(tok) else {
+            return true;
+        };
+        let mut src = re
+            .source
+            .strip_prefix('^')
+            .unwrap_or(&re.source)
+            .to_string();
+        if let Some(inner) = src.strip_prefix("(?:").and_then(|s| s.strip_suffix(')')) {
+            src = inner.to_string();
+        }
+        let Some(end) = crate::ranges::regex_head_atom_end(&src) else {
+            return false;
+        };
+        let rest: String = src.chars().skip(end).collect();
+        rest.is_empty() || rest == "+"
+    }
+}
+
+/// Whether one case-insensitive literal is a prefix of the other under
+/// the matcher's own folding. Lowercase alone is not that relation:
+/// `(?i)Σ` takes `ς` and `(?i)ς` takes `Σ`, while lowercase maps `Σ` to
+/// `σ` and leaves `ς` alone. Folding both ways over-approximates the
+/// matcher (a contest declared where the matcher would not meet) and
+/// never under-approximates it, which is the safe direction here.
+fn folded_prefix(short: &str, long: &str) -> bool {
+    long.to_lowercase().starts_with(&short.to_lowercase())
+        || long.to_uppercase().starts_with(&short.to_uppercase())
+}
+
+fn is_word_char(c: char) -> bool {
+    c == '_' || c.is_ascii_alphanumeric()
 }
 
 /// Allocates unique `@`-prefixed ref names for the tree-building and
