@@ -3148,8 +3148,14 @@ function tokenClassNames(grammar: Grammar): Set<string> {
     // (allocTokenName names the set after its content instead), so
     // neither is a class.
     if ('' === prod.name || isEngineOwnedToken('#' + prod.name)) continue
+    // Each member is one token the lexer emits. An empty literal matches
+    // nothing, and `#ZZ` and `#AA` can be satisfied without input
+    // (elementDerivesEmpty); the set standing for the class is one token
+    // and never empty, so a class with such a member would drop the
+    // path that skipped it.
     if (prod.alts.every((alt) => 1 === alt.length &&
-      ('term' === alt[0].kind || 'token' === alt[0].kind))) {
+      ('term' === alt[0].kind || 'token' === alt[0].kind) &&
+      !elementDerivesEmpty(alt[0], new Set()))) {
       out.add(prod.name)
     }
   }
@@ -3489,9 +3495,10 @@ function emitGrammarSpec(
   // where the rule asks for it (under negotiated lexing) — except two
   // whole-word keywords under `wordKeywords`, whose boundary guard keeps
   // `option` off `optional`. A token set meets whatever one of its
-  // members meets. The engine's own tokens (`#TX`, `#NR`, …) meet only
-  // themselves: a keyword matcher runs ahead of the text matcher, and a
-  // number is never a literal.
+  // members meets. The engine's own tokens meet themselves and what their
+  // matchers can take when the parser asks (engineTokenMeets): numbers,
+  // strings and text, but never a fixed literal the text matcher defers
+  // to, which is what keeps a keyword off an identifier.
   //
   // Narrower than `tokensOverlap` on purpose. That is the lexer's
   // question, whether two heads can claim one CHARACTER, and asking it
@@ -3541,8 +3548,33 @@ function emitGrammarSpec(
     if (m) src = m[1]
     const end = regexHeadAtomEnd(src)
     if (end < 0) return false
+    // `\u{61}` is the code point `a` only under the `u` or `v` flag;
+    // without either it is `u` repeated 61 times, which is not what
+    // patternCharRanges reads it as.
+    if (!/[uv]/.test(re.flags) && src.slice(0, end).includes('\\u{')) return false
     const rest = src.slice(end)
     return ('' === rest || '+' === rest) && null != tokenRangesOf(tok)
+  }
+  // Three of the engine's own matchers can take text another head claims,
+  // and under negotiated lexing the parser asks them to: `relex` runs
+  // only the matchers that can produce the token an alternative wants.
+  // The number matcher takes a leading digit, sign or point, the string
+  // matcher a leading quote, and the text matcher any text that no fixed
+  // token claims, a number's or a string's included; a fixed literal it
+  // defers to. Measured against the four-token dispatch this replaced,
+  // these are exactly the pairs it kept apart that a one-token dispatch
+  // would not. `#VL` is not among them: an emitted grammar lexes no
+  // values, so nothing is ever cut as one.
+  const NUMBER_START: Array<[number, number]> = [[0x2B, 0x2B], [0x2D, 0x2E], [0x30, 0x39]]
+  const QUOTE_START: Array<[number, number]> = [[0x22, 0x22], [0x27, 0x27], [0x60, 0x60]]
+  const engineTokenMeets = (eng: string, other: string): boolean => {
+    if ('#TX' === eng) {
+      return '#NR' === other || '#ST' === other || null != matchTokens[other]
+    }
+    const starts = '#NR' === eng ? NUMBER_START : '#ST' === eng ? QUOTE_START : null
+    if (null == starts) return false
+    const r = tokenRangesOf(other)
+    return null != r && charRangesOverlap(starts, r)
   }
   const contestCache = new Map<string, boolean>()
   const headsContest = (a: string, b: string): boolean => {
@@ -3585,9 +3617,11 @@ function emitGrammarSpec(
       }
     } else {
       // A character class, or an atom of one, against anything: by
-      // coverage, when the coverage is exact. The engine's own tokens
-      // (`#TX`, `#NR`, …) have none, and meet nothing.
-      out = !regexHeadIsExact(a) || !regexHeadIsExact(b) || tokensOverlap(a, b)
+      // coverage, when the coverage is exact. An engine token has no
+      // coverage of its own, and meets what its matcher can take
+      // (engineTokenMeets).
+      out = !regexHeadIsExact(a) || !regexHeadIsExact(b) || tokensOverlap(a, b) ||
+        engineTokenMeets(a, b) || engineTokenMeets(b, a)
     }
     contestCache.set(key, out)
     return out

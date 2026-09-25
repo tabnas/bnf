@@ -91,7 +91,8 @@ func newContestCtx(fixedTokens map[string]*string,
 // two whole-word keywords under WordKeywords, whose boundary guard keeps
 // `option` off `optional`; a token set meets whatever one of its members
 // meets; a character class, or an atom of one, meets what its coverage
-// overlaps; the engine's own tokens meet only themselves. Narrower than
+// overlaps; an engine token meets itself and what its matcher can take
+// when the parser asks (engineTokenMeets). Narrower than
 // tokensOverlap on purpose: that is the lexer's question, whether two
 // heads can claim one CHARACTER. Mirrors the TS headsContest.
 func (c *contestCtx) headsContest(a, b string) bool {
@@ -162,9 +163,11 @@ func (c *contestCtx) headsContest(a, b string) bool {
 		}
 	} else {
 		// A character class, or an atom of one, against anything: by
-		// coverage, when the coverage is exact. The engine's own tokens
-		// (#TX, #NR, ...) have none, and meet nothing.
-		out = !c.regexHeadIsExact(a) || !c.regexHeadIsExact(b) || c.tokensOverlap(a, b)
+		// coverage, when the coverage is exact. An engine token has no
+		// coverage of its own, and meets what its matcher can take
+		// (engineTokenMeets).
+		out = !c.regexHeadIsExact(a) || !c.regexHeadIsExact(b) || c.tokensOverlap(a, b) ||
+			c.engineTokenMeets(a, b) || c.engineTokenMeets(b, a)
 	}
 	c.contestCache[key] = out
 	return out
@@ -248,6 +251,42 @@ func (c *contestCtx) literalHeadRangesOf(tok string) []charRange {
 		}
 	}
 	return out
+}
+
+// Three of the engine's own matchers can take text another head claims,
+// and under negotiated lexing the parser asks them to: relex runs only the
+// matchers that can produce the token an alternative wants. The number
+// matcher takes a leading digit, sign or point, the string matcher a
+// leading quote, and the text matcher any text that no fixed token claims,
+// a number's or a string's included; a fixed literal it defers to.
+// Measured against the four-token dispatch this replaced, these are
+// exactly the pairs it kept apart that a one-token dispatch would not. #VL
+// is not among them: an emitted grammar lexes no values, so nothing is
+// ever cut as one. Mirrors the TS engineTokenMeets.
+var (
+	numberStart = []charRange{{0x2B, 0x2B}, {0x2D, 0x2E}, {0x30, 0x39}}
+	quoteStart  = []charRange{{0x22, 0x22}, {0x27, 0x27}, {0x60, 0x60}}
+)
+
+func (c *contestCtx) engineTokenMeets(eng, other string) bool {
+	if eng == "#TX" {
+		if other == "#NR" || other == "#ST" {
+			return true
+		}
+		re, ok := c.matchTokens[other]
+		return ok && re != nil
+	}
+	var starts []charRange
+	switch eng {
+	case "#NR":
+		starts = numberStart
+	case "#ST":
+		starts = quoteStart
+	default:
+		return false
+	}
+	r := c.tokenRangesOf(other)
+	return r != nil && charRangesOverlap(starts, r)
 }
 
 func (c *contestCtx) isWordLiteral(lit string) bool {

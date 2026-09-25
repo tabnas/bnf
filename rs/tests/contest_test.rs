@@ -119,3 +119,66 @@ fn a_case_insensitive_head_beyond_ascii_contests_what_unicode_folding_lets_it_me
     let ascii = emit_grammar_spec(&grammar(rx("[b]", "i"), sens_term("a")), &opts(false)).unwrap();
     assert_eq!(depths(&ascii), [1, 1]);
 }
+
+// `grammar` with tails no engine matcher can take (a number would swallow
+// the `.` of `1..`): t = ";" ";" ; u = "!" "!".
+fn semi(a: Element, b: Element) -> Grammar {
+    Grammar::new(vec![
+        prod("doc", vec![vec![reference("x")]]),
+        prod(
+            "x",
+            vec![
+                vec![a, reference("t"), reference("u")],
+                vec![b, reference("u"), reference("t")],
+            ],
+        ),
+        prod("t", vec![vec![sens_term(";"), sens_term(";")]]),
+        prod("u", vec![vec![sens_term("!"), sens_term("!")]]),
+    ])
+}
+
+#[test]
+fn an_engine_token_contests_what_its_matcher_can_take_when_the_parser_asks() {
+    // Negotiated lexing runs only the matchers that can produce the token
+    // an alternative wants: the number matcher takes a leading digit, the
+    // string matcher a quote, and the text matcher any text no fixed
+    // literal claims. The four-token dispatch this replaced kept each of
+    // these pairs apart; a one-token dispatch did not.
+    let cases = [
+        (tok("#NR"), sens_term("1"), "1"),
+        (tok("#ST"), sens_term("'a'"), "'a'"),
+        (tok("#TX"), term("let"), "let"),
+        (tok("#NR"), tok("#TX"), "1"),
+        (tok("#NR"), rx("[0-9]", ""), "1"),
+        (tok("#TX"), rx("[a-z]+", ""), "let"),
+    ];
+    for (a, b, text) in cases {
+        let spec = emit_grammar_spec(&semi(a, b), &opts(false)).unwrap();
+        assert_eq!(depths(&spec), [2, 2], "{text}");
+        assert!(parses(&spec, &format!("{text};;!!"), true), "{text};;!!");
+        assert!(parses(&spec, &format!("{text}!!;;"), true), "{text}!!;;");
+    }
+    // The text matcher defers to a fixed literal, and an emitted grammar
+    // lexes no values: those stay one token deep.
+    for (a, b) in [
+        (tok("#TX"), sens_term("let")),
+        (tok("#VL"), sens_term("true")),
+    ] {
+        let spec = emit_grammar_spec(&semi(a, b), &opts(false)).unwrap();
+        assert_eq!(depths(&spec), [1, 1]);
+    }
+}
+
+#[test]
+fn a_brace_escape_is_a_code_point_only_under_the_u_flag() {
+    // Without `u` or `v`, `\u{1}` is `u` once in the JavaScript matcher
+    // the canonical runtime emits for, not U+0001, so the emitted dispatch
+    // treats the head as inexact. The depths are the emitted-spec
+    // contract; the Rust regex crate reads `\u{1}` as a code point under
+    // any flags, so the parse side is pinned in TypeScript alone.
+    let legacy = emit_grammar_spec(&semi(rx(r"\u{1}", ""), sens_term("u")), &opts(false)).unwrap();
+    assert_eq!(depths(&legacy), [2, 2]);
+    let unicode =
+        emit_grammar_spec(&semi(rx(r"\u{1}", "u"), sens_term("u")), &opts(false)).unwrap();
+    assert_eq!(depths(&unicode), [1, 1]);
+}

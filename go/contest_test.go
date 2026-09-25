@@ -208,3 +208,64 @@ func TestContestCaseInsensitiveHeadBeyondASCII(t *testing.T) {
 		t.Fatalf("depths %v, want [1 1]", d)
 	}
 }
+
+// ctSemi is ctGrammar with tails no engine matcher can take (a number
+// would swallow the `.` of `1..`): t = ";" ";" ; u = "!" "!".
+func ctSemi(a, b *Element) *Grammar {
+	return &Grammar{Productions: []*Production{
+		{Name: "doc", Alts: []Sequence{{ctRef("x")}}},
+		{Name: "x", Alts: []Sequence{{a, ctRef("t"), ctRef("u")}, {b, ctRef("u"), ctRef("t")}}},
+		{Name: "t", Alts: []Sequence{{ctLit(";"), ctLit(";")}}},
+		{Name: "u", Alts: []Sequence{{ctLit("!"), ctLit("!")}}},
+	}}
+}
+
+func TestContestEngineTokenMeetsWhatItsMatcherCanTake(t *testing.T) {
+	// Negotiated lexing runs only the matchers that can produce the token
+	// an alternative wants: the number matcher takes a leading digit, the
+	// string matcher a quote, and the text matcher any text no fixed
+	// literal claims. The four-token dispatch this replaced kept each of
+	// these pairs apart; a one-token dispatch did not.
+	tk := func(n string) *Element { return &Element{Kind: KindToken, Name: n} }
+	rx := func(p string) *Element { return &Element{Kind: KindRegex, Pattern: p} }
+	for _, c := range []struct {
+		a, b *Element
+		text string
+	}{
+		{tk("#NR"), ctLit("1"), "1"},
+		{tk("#ST"), ctLit("'a'"), "'a'"},
+		{tk("#TX"), ctILit("let"), "let"},
+		{tk("#NR"), tk("#TX"), "1"},
+		{tk("#NR"), rx("[0-9]"), "1"},
+		{tk("#TX"), rx("[a-z]+"), "let"},
+	} {
+		spec, err := EmitGrammarSpec(ctSemi(c.a, c.b), &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Fatalf("%s: depths %v, want [2 2]", c.text, d)
+		}
+		for _, src := range []string{c.text + ";;!!", c.text + "!!;;"} {
+			if !ctParses(t, spec, src, true) {
+				t.Errorf("%q should parse", src)
+			}
+		}
+	}
+	// The text matcher defers to a fixed literal, and an emitted grammar
+	// lexes no values: those stay one token deep.
+	for _, c := range []struct{ a, b *Element }{
+		{tk("#TX"), ctLit("let")}, {tk("#VL"), ctLit("true")},
+	} {
+		spec, err := EmitGrammarSpec(ctSemi(c.a, c.b), &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := ctDepths(t, spec); d[0] != 1 || d[1] != 1 {
+			t.Fatalf("%s: depths %v, want [1 1]", c.a.Name, d)
+		}
+	}
+	// TypeScript and Rust also pin that `\u{1}` is inexact without the u
+	// flag. Go's regexp has no `\u{...}` escape, so such a pattern never
+	// reaches the predicate here.
+}

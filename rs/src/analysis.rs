@@ -702,8 +702,15 @@ pub(crate) fn token_class_names(grammar: &Grammar) -> IndexSet<String> {
         if prod.name.is_empty() || crate::emit::is_engine_owned_token(&format!("#{}", prod.name)) {
             continue;
         }
+        // Each member is one token the lexer emits. An empty literal
+        // matches nothing, and `#ZZ` and `#AA` can be satisfied without
+        // input (`element_derives_empty`); the set standing for the class
+        // is one token and never empty, so a class with such a member
+        // would drop the path that skipped it.
         let all = prod.alts.iter().all(|alt| {
-            alt.len() == 1 && matches!(alt[0].kind, Kind::Term { .. } | Kind::Token { .. })
+            alt.len() == 1
+                && matches!(alt[0].kind, Kind::Term { .. } | Kind::Token { .. })
+                && !crate::prose::element_derives_empty(&alt[0], &IndexSet::new())
         });
         if all {
             out.insert(prod.name.clone());

@@ -320,8 +320,8 @@ impl ContestCtx {
     /// whole-word keywords under `word_keywords`, whose boundary guard
     /// keeps `option` off `optional`; a token set meets whatever one of
     /// its members meets; a character class, or an atom of one, meets what
-    /// its coverage overlaps; the engine's own tokens meet only
-    /// themselves. Narrower than `tokens_overlap` on purpose: that is the
+    /// its coverage overlaps; an engine token meets itself and what its
+    /// matcher can take when the parser asks (`engine_token_meets`). Narrower than `tokens_overlap` on purpose: that is the
     /// lexer's question, whether two heads can claim one CHARACTER.
     /// Mirrors the TypeScript `headsContest`.
     fn heads_contest(&self, a: &str, b: &str) -> bool {
@@ -377,14 +377,43 @@ impl ContestCtx {
                 })
         } else {
             // A character class, or an atom of one, against anything: by
-            // coverage, when the coverage is exact. The engine's own
-            // tokens (`#TX`, `#NR`, ...) have none, and meet nothing.
+            // coverage, when the coverage is exact. An engine token has no
+            // coverage of its own, and meets what its matcher can take
+            // (`engine_token_meets`).
             !self.regex_head_is_exact(a)
                 || !self.regex_head_is_exact(b)
                 || self.tokens_overlap(a, b)
+                || self.engine_token_meets(a, b)
+                || self.engine_token_meets(b, a)
         };
         self.contest_cache.borrow_mut().insert(key, out);
         out
+    }
+
+    /// Three of the engine's own matchers can take text another head
+    /// claims, and under negotiated lexing the parser asks them to:
+    /// `relex` runs only the matchers that can produce the token an
+    /// alternative wants. The number matcher takes a leading digit, sign
+    /// or point, the string matcher a leading quote, and the text matcher
+    /// any text that no fixed token claims, a number's or a string's
+    /// included; a fixed literal it defers to. Measured against the
+    /// four-token dispatch this replaced, these are exactly the pairs it
+    /// kept apart that a one-token dispatch would not. `#VL` is not among
+    /// them: an emitted grammar lexes no values, so nothing is ever cut as
+    /// one. Mirrors the TypeScript `engineTokenMeets`.
+    fn engine_token_meets(&self, eng: &str, other: &str) -> bool {
+        const NUMBER_START: [CharRange; 3] = [(0x2B, 0x2B), (0x2D, 0x2E), (0x30, 0x39)];
+        const QUOTE_START: [CharRange; 3] = [(0x22, 0x22), (0x27, 0x27), (0x60, 0x60)];
+        let starts: &[CharRange] = match eng {
+            "#TX" => {
+                return other == "#NR" || other == "#ST" || self.match_tokens.contains_key(other);
+            }
+            "#NR" => &NUMBER_START,
+            "#ST" => &QUOTE_START,
+            _ => return false,
+        };
+        self.token_ranges_of(other)
+            .is_some_and(|r| char_ranges_overlap(starts, &r))
     }
 
     fn is_word_literal(&self, lit: &str) -> bool {
@@ -429,6 +458,13 @@ impl ContestCtx {
         let Some(end) = crate::ranges::regex_head_atom_end(&src) else {
             return false;
         };
+        // `\u{61}` is the code point `a` only under the `u` or `v` flag;
+        // without either it is `u` repeated 61 times, which is not what
+        // `pattern_char_ranges` reads it as.
+        let head: String = src.chars().take(end).collect();
+        if !re.flags.contains('u') && !re.flags.contains('v') && head.contains("\\u{") {
+            return false;
+        }
         let rest: String = src.chars().skip(end).collect();
         (rest.is_empty() || rest == "+") && self.token_ranges_of(tok).is_some()
     }

@@ -89,4 +89,22 @@ describe('token-class', () => {
     assert.ok(parses(on, 'b!'))
   })
 
+
+  it('a production with a member that consumes nothing is not a class', () => {
+    // doc = x ; x = C "b" ; C = <member> / "a". An empty literal matches
+    // nothing, and #ZZ and #AA can be satisfied without input, while the
+    // set standing for a class is one token and never empty.
+    for (const member of [lit(''), tok('#ZZ'), tok('#AA')]) {
+      const g = [
+        prod('doc', [ref('x')]),
+        prod('x', [ref('C'), lit('b')]),
+        prod('C', [member], [lit('a')]),
+      ]
+      const on = emit(g, true)
+      assert.deepEqual(sets(on), [], JSON.stringify(member))
+      assert.deepEqual(seqs(on, 'x'), seqs(emit(g, false), 'x'))
+      assert.ok(parses(on, 'ab'))
+    }
+  })
+
 })

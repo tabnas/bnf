@@ -35,6 +35,19 @@ const grammar = (a, b) => ({
   ],
 })
 
+// doc = x ; x = <a> t u / <b> u t ; t = ";" ";" ; u = "!" "!"
+// The same shape with tails no engine matcher can take (a number would
+// swallow the `.` of `1..`).
+const semi = (a, b) => ({
+  productions: [
+    prod('doc', [ref('x')]),
+    prod('x', [a, ref('t'), ref('u')], [b, ref('u'), ref('t')]),
+    prod('t', [lit(';'), lit(';')]),
+    prod('u', [lit('!'), lit('!')]),
+  ],
+})
+const depthsOf = (spec) => spec.rule.x.open.map((o) => o.s.split(' ').length)
+
 const parses = (spec, src, opts) => {
   const tn = new Tabnas(opts || {}).grammar(spec)
   return tn.parse(src).rule === 'doc'
@@ -115,6 +128,44 @@ describe('contest', () => {
     // Within ASCII the folded coverage stays exact: `/[b]/i` meets no `a`.
     const ascii = emitGrammarSpec(grammar(rx('[b]', 'i'), lit('a')), { tag: 'ct', start: 'doc' })
     assert.deepEqual(ascii.rule.x.open.map((o) => o.s.split(' ').length), [1, 1])
+  })
+
+
+  it('an engine token contests what its matcher can take when the parser asks', () => {
+    // Negotiated lexing runs only the matchers that can produce the
+    // token an alternative wants: the number matcher takes a leading
+    // digit, the string matcher a quote, and the text matcher any text
+    // no fixed literal claims. The four-token dispatch this replaced kept
+    // each of these pairs apart; a one-token dispatch did not.
+    for (const [a, b, text] of [
+      [tok('#NR'), lit('1'), '1'],
+      [tok('#ST'), lit("'a'"), "'a'"],
+      [tok('#TX'), ilit('let'), 'let'],
+      [tok('#NR'), tok('#TX'), '1'],
+      [tok('#NR'), rx('[0-9]'), '1'],
+      [tok('#TX'), rx('[a-z]+'), 'let'],
+    ]) {
+      const spec = emitGrammarSpec(semi(a, b), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], a.name + ' / ' + (b.name || b.literal || b.pattern))
+      assert.ok(parses(spec, text + ';;!!', { lex: { relex: true } }), text + ';;!!')
+      assert.ok(parses(spec, text + '!!;;', { lex: { relex: true } }), text + '!!;;')
+    }
+    // The text matcher defers to a fixed literal, and an emitted grammar
+    // lexes no values: those stay one token deep.
+    for (const [a, b] of [[tok('#TX'), lit('let')], [tok('#VL'), lit('true')]]) {
+      const spec = emitGrammarSpec(semi(a, b), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [1, 1], a.name)
+    }
+  })
+
+  it('a brace escape is a code point only under the u flag', () => {
+    // Without `u` or `v`, `\u{1}` is `u` once, not U+0001.
+    const legacy = emitGrammarSpec(semi(rx('\\u{1}'), lit('u')), { tag: 'ct', start: 'doc' })
+    assert.deepEqual(depthsOf(legacy), [2, 2])
+    assert.ok(parses(legacy, 'u;;!!', { lex: { relex: true } }))
+    assert.ok(parses(legacy, 'u!!;;', { lex: { relex: true } }))
+    const unicode = emitGrammarSpec(semi(rx('\\u{1}', 'u'), lit('u')), { tag: 'ct', start: 'doc' })
+    assert.deepEqual(depthsOf(unicode), [1, 1])
   })
 
 })

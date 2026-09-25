@@ -125,3 +125,27 @@ fn an_empty_production_name_is_not_a_class() {
     assert!(parses(&on, "a!", false));
     assert!(parses(&on, "b!", false));
 }
+
+#[test]
+fn a_production_with_a_member_that_consumes_nothing_is_not_a_class() {
+    // doc = x ; x = C "b" ; C = <member> / "a". An empty literal matches
+    // nothing, and #ZZ and #AA can be satisfied without input, while the
+    // set standing for a class is one token and never empty.
+    for member in [sens_term(""), tok("#ZZ"), tok("#AA")] {
+        let g = || {
+            vec![
+                prod("doc", vec![vec![reference("x")]]),
+                prod("x", vec![vec![reference("C"), sens_term("b")]]),
+                prod("C", vec![vec![member.clone()], vec![sens_term("a")]]),
+            ]
+        };
+        let on = emit(g(), true);
+        assert!(
+            token_set_names(&on).is_empty(),
+            "{:?}",
+            token_set_names(&on)
+        );
+        assert_eq!(alt_seqs(&on, "x"), alt_seqs(&emit(g(), false), "x"));
+        assert!(parses(&on, "ab", false));
+    }
+}

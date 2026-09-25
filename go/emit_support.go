@@ -453,9 +453,15 @@ func tokenClassNames(grammar *Grammar) map[string]bool {
 		if prod.Name == "" || isEngineOwnedToken("#"+prod.Name) {
 			continue
 		}
+		// Each member is one token the lexer emits. An empty literal
+		// matches nothing, and #ZZ and #AA can be satisfied without input
+		// (elementDerivesEmpty); the set standing for the class is one
+		// token and never empty, so a class with such a member would drop
+		// the path that skipped it.
 		all := true
 		for _, alt := range prod.Alts {
-			if len(alt) != 1 || (alt[0].Kind != KindTerm && alt[0].Kind != KindToken) {
+			if len(alt) != 1 || (alt[0].Kind != KindTerm && alt[0].Kind != KindToken) ||
+				elementDerivesEmpty(alt[0], map[string]bool{}) {
 				all = false
 				break
 			}

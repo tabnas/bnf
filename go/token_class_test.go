@@ -164,3 +164,28 @@ func TestTokenClassEmptyProductionNameIsNotAClass(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenClassMemberThatConsumesNothingIsNotAClass(t *testing.T) {
+	// doc = x ; x = C "b" ; C = <member> / "a". An empty literal matches
+	// nothing, and #ZZ and #AA can be satisfied without input, while the
+	// set standing for a class is one token and never empty.
+	for _, member := range []*Element{ctLit(""), tcTok("#ZZ"), tcTok("#AA")} {
+		g := func() []*Production {
+			return []*Production{
+				{Name: "doc", Alts: []Sequence{{ctRef("x")}}},
+				{Name: "x", Alts: []Sequence{{ctRef("C"), ctLit("b")}}},
+				{Name: "C", Alts: []Sequence{{member}, {ctLit("a")}}},
+			}
+		}
+		on := tcEmit(t, g(), true)
+		if sets := tcSets(on); len(sets) != 0 {
+			t.Fatalf("%q%s: token sets %v, want none", member.Literal, member.Name, sets)
+		}
+		if got, want := ctSeqs(t, on, "x"), ctSeqs(t, tcEmit(t, g(), false), "x"); !reflect.DeepEqual(got, want) {
+			t.Fatalf("x: %q, want the option-off %q", got, want)
+		}
+		if !ctParses(t, on, "ab", false) {
+			t.Errorf("%q%s: ab should parse", member.Literal, member.Name)
+		}
+	}
+}
