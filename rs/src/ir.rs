@@ -758,6 +758,28 @@ pub fn is_prose_name(name: &str) -> bool {
     name.starts_with('<') && name.ends_with('>')
 }
 
+/// Collect every token element's name in a sequence, nested ones
+/// included. Mirrors the TypeScript `tokensIn`.
+pub fn tokens_in(alt: &[Element], out: &mut IndexSet<String>) {
+    for el in alt {
+        match &el.kind {
+            Kind::Token { name, .. } => {
+                out.insert(name.clone());
+            }
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => tokens_in(std::slice::from_ref(inner), out),
+            Kind::Group { alts } => {
+                for a in alts {
+                    tokens_in(a, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Collect the rule references in a sequence, sugar included.
 pub fn refs_in(alt: &[Element], out: &mut IndexSet<String>) {
     for el in alt {

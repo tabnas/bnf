@@ -158,3 +158,53 @@ func TestContestAnyTokenMeetsEveryHead(t *testing.T) {
 		}
 	}
 }
+
+func TestContestRegexHeadWhoseCoverageIsUnnamed(t *testing.T) {
+	// \n, \t and \v are one atom each, but patternCharRanges declines to
+	// name what a control escape covers, so nothing says the literal
+	// character is not what the pattern matches.
+	for _, c := range []struct{ pattern, literal string }{
+		{`\n`, "\n"}, {`\t`, "\t"}, {`\v`, "\v"},
+	} {
+		spec, err := EmitGrammarSpec(ctGrammar(&Element{Kind: KindRegex, Pattern: c.pattern}, ctLit(c.literal)), &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatalf("%s: %v", c.pattern, err)
+		}
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Fatalf("%s: depths %v, want [2 2]", c.pattern, d)
+		}
+	}
+	spec, err := EmitGrammarSpec(ctGrammar(&Element{Kind: KindRegex, Pattern: `\v`}, ctLit("\v")), &ConvertOptions{Tag: "ct", Start: "doc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{"\v..,,", "\v,,.."} {
+		if !ctParses(t, spec, src, true) {
+			t.Errorf("%q should parse", src)
+		}
+	}
+}
+
+func TestContestCaseInsensitiveHeadBeyondASCII(t *testing.T) {
+	// (?i)[Σ] takes ς, and the coverage folds ASCII letters alone.
+	spec, err := EmitGrammarSpec(ctGrammar(&Element{Kind: KindRegex, Pattern: "[Σ]", Flags: "i"}, ctLit("ς")), &ConvertOptions{Tag: "ct", Start: "doc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+		t.Fatalf("depths %v, want [2 2]", d)
+	}
+	for _, src := range []string{"ς..,,", "Σ..,,", "ς,,.."} {
+		if !ctParses(t, spec, src, true) {
+			t.Errorf("%q should parse", src)
+		}
+	}
+	// Within ASCII the folded coverage stays exact: (?i)[b] meets no a.
+	ascii, err := EmitGrammarSpec(ctGrammar(&Element{Kind: KindRegex, Pattern: "[b]", Flags: "i"}, ctLit("a")), &ConvertOptions{Tag: "ct", Start: "doc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := ctDepths(t, ascii); d[0] != 1 || d[1] != 1 {
+		t.Fatalf("depths %v, want [1 1]", d)
+	}
+}

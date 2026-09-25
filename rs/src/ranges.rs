@@ -64,7 +64,12 @@ pub fn regex_head_atom_end(src: &str) -> Option<usize> {
                 }
             }
             'x' => Some(4),
-            'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'b' | 'B' => None,
+            // Exactly the escapes `pattern_char_ranges` declines to name:
+            // a head this calls one atom must be one whose coverage is
+            // known.
+            'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'b' | 'B' | '0' | 'n' | 'r' | 't' | 'f' | 'v' => {
+                None
+            }
             _ => Some(2),
         };
     }

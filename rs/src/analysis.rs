@@ -10,7 +10,9 @@
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ir::{diag_name, refs_in, regex_key, term_key_of, Element, Grammar, Kind, Sequence};
+use crate::ir::{
+    diag_name, refs_in, regex_key, term_key_of, tokens_in, Element, Grammar, Kind, Sequence,
+};
 
 /// The allocated token tables: literal key -> token name and regex key
 /// -> token name.
@@ -694,8 +696,10 @@ pub(crate) fn token_class_names(grammar: &Grammar) -> IndexSet<String> {
         // The class's set is named after it (`#ident`), and a reference
         // the substitution pass consumes as that token has to resolve to
         // the set: a production named like an engine token (`TX`, `ZZ`)
-        // cannot take its own name, so it is not a class.
-        if crate::emit::is_engine_owned_token(&format!("#{}", prod.name)) {
+        // cannot take its own name, and an empty name has none to take
+        // (`alloc_token_name` names the set after its content instead),
+        // so neither is a class.
+        if prod.name.is_empty() || crate::emit::is_engine_owned_token(&format!("#{}", prod.name)) {
             continue;
         }
         let all = prod.alts.iter().all(|alt| {
@@ -704,6 +708,20 @@ pub(crate) fn token_class_names(grammar: &Grammar) -> IndexSet<String> {
         if all {
             out.insert(prod.name.clone());
         }
+    }
+    // A token the grammar spells under a class's set name would be read
+    // as the set, and a class with its own set, or another class's, among
+    // its members would be a set of sets, which the engine cannot resolve
+    // and whose expansion never ends (`C = #C / "a"`). Such a class stays
+    // a plain production, as it is with the option off.
+    if !out.is_empty() {
+        let mut spelled: IndexSet<String> = IndexSet::new();
+        for prod in &grammar.productions {
+            for alt in &prod.alts {
+                tokens_in(alt, &mut spelled);
+            }
+        }
+        out.retain(|name| !spelled.contains(&format!("#{name}")));
     }
     out
 }

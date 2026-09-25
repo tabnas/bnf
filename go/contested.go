@@ -115,8 +115,10 @@ func (c *contestCtx) headsContest(a, b string) bool {
 	la, aLit := c.literalByToken[a]
 	lb, bLit := c.literalByToken[b]
 	if aSet || bSet {
-		// A set meets what any member meets; the members themselves are
-		// never sets.
+		// A set meets what any member meets. The members are never sets
+		// (tokenClassNames), and the provisional answer, the conservative
+		// one, would end the expansion if one were.
+		c.contestCache[key] = true
 		xs := []string{a}
 		if aSet {
 			xs = ma
@@ -185,20 +187,38 @@ func isWordRune(r rune) bool {
 
 // regexHeadIsExact reports whether a regex-backed head's first character
 // can be read off its pattern: one atom or one class, alone or repeated
-// with `+`. Anything else (`a|b` begins with b too, `a?b` with b, `.`
-// with anything, `\d` with a digit patternCharRanges declines to name)
-// may meet any head, and the dispatcher must treat it so. A literal,
-// fixed or guarded (`^option\b`), covers its first character exactly
-// whatever follows it in the matcher.
+// with `+`, whose coverage patternCharRanges can name. Anything else
+// (`a|b` begins with b too, `a?b` with b, `.` with anything, `\d` with a
+// digit and `\n` with a character patternCharRanges declines to name)
+// may meet any head, and the dispatcher must treat it so. Mirrors the TS
+// regexHeadIsExact.
 func (c *contestCtx) regexHeadIsExact(tok string) bool {
-	if _, isLit := c.literalByToken[tok]; isLit {
-		return true
-	}
 	re, ok := c.matchTokens[tok]
 	if !ok || re == nil {
 		return true
 	}
 	src := re.String()
+	// A case-insensitive matcher folds case, and the coverage is folded
+	// for ASCII only (foldCaseRanges): a head that reaches beyond ASCII
+	// meets whatever Unicode folding lets it ((?i)[Σ] takes ς), which the
+	// coverage does not say. That holds for a case-insensitive literal as
+	// much as for a pattern.
+	if strings.HasPrefix(src, "(?i)") {
+		r := c.tokenRangesOf(tok)
+		if r == nil {
+			return false
+		}
+		for _, span := range r {
+			if span.hi > 0x7F {
+				return false
+			}
+		}
+	}
+	// A literal, fixed or guarded (`^option\b`), covers its first
+	// character exactly whatever follows it in the matcher.
+	if _, isLit := c.literalByToken[tok]; isLit {
+		return true
+	}
 	src = strings.TrimPrefix(src, "(?i)")
 	src = strings.TrimPrefix(src, "^")
 	if strings.HasPrefix(src, "(?:") && strings.HasSuffix(src, ")") {
@@ -209,7 +229,25 @@ func (c *contestCtx) regexHeadIsExact(tok string) bool {
 		return false
 	}
 	rest := src[end:]
-	return rest == "" || rest == "+"
+	return (rest == "" || rest == "+") && c.tokenRangesOf(tok) != nil
+}
+
+// literalHeadRangesOf is what a literal head covers: a literal its first
+// character; a token class's set what its literal members cover, since
+// an engine token among them (#TX) meets no character class here, as it
+// would not as a head of its own. Mirrors the TS literalHeadRangesOf.
+func (c *contestCtx) literalHeadRangesOf(tok string) []charRange {
+	members, isClass := c.classMembers[tok]
+	if !isClass {
+		return c.tokenRangesOf(tok)
+	}
+	var out []charRange
+	for _, m := range members {
+		if r := c.tokenRangesOf(m); r != nil {
+			out = append(out, r...)
+		}
+	}
+	return out
 }
 
 func (c *contestCtx) isWordLiteral(lit string) bool {
@@ -296,6 +334,10 @@ func (c *contestCtx) tokensOverlap(a, b string) bool {
 	if aClass || bClass {
 		// A token class meets what any member meets, the same token
 		// included; coverage alone would miss an engine token in it.
+		// tokenClassNames keeps a set out of every set's members; were one
+		// to get in, this provisional answer, the conservative one, is
+		// what ends the expansion when it comes back to the same pair.
+		c.overlapCache[key] = true
 		xs := []string{a}
 		if aClass {
 			xs = ma
@@ -515,8 +557,15 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 	literals, regexTokens map[string]string, followSets map[string]map[string]bool,
 	cc *contestCtx) []map[string]any {
 
+	// A token class's set is a literal head here: its members are
+	// literals and engine tokens, never a character class
+	// (tokenClassNames), and with the option off those members are
+	// literal heads this ordering places, each one.
 	litToks := map[string]bool{}
 	for _, t := range literals {
+		litToks[t] = true
+	}
+	for _, t := range cc.classSets {
 		litToks[t] = true
 	}
 	classToks := map[string]bool{}
@@ -590,7 +639,7 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 		f := heads[i]
 		var fr []charRange
 		if f != "" && litToks[f] {
-			fr = cc.tokenRangesOf(f)
+			fr = cc.literalHeadRangesOf(f)
 		}
 
 		// First and last contesting class entry, in one pass.

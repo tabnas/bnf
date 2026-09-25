@@ -292,6 +292,11 @@ impl ContestCtx {
         let out = if ma.is_some() || mb.is_some() {
             // A token class meets what any member meets, the same token
             // included; coverage alone would miss an engine token in it.
+            // `token_class_names` keeps a set out of every set's members;
+            // were one to get in, this provisional answer, the
+            // conservative one, is what ends the expansion when it comes
+            // back to the same pair.
+            self.overlap_cache.borrow_mut().insert(key.clone(), true);
             let xs: Vec<String> = ma.cloned().unwrap_or_else(|| vec![a.to_string()]);
             let ys: Vec<String> = mb.cloned().unwrap_or_else(|| vec![b.to_string()]);
             xs.iter()
@@ -340,8 +345,10 @@ impl ContestCtx {
         let la = self.literal_by_token.get(a);
         let lb = self.literal_by_token.get(b);
         let out = if ma.is_some() || mb.is_some() {
-            // A set meets what any member meets; the members themselves
-            // are never sets.
+            // A set meets what any member meets. The members are never
+            // sets (`token_class_names`), and the provisional answer, the
+            // conservative one, would end the expansion if one were.
+            self.contest_cache.borrow_mut().insert(key.clone(), true);
             let xs: Vec<String> = ma.cloned().unwrap_or_else(|| vec![a.to_string()]);
             let ys: Vec<String> = mb.cloned().unwrap_or_else(|| vec![b.to_string()]);
             xs.iter()
@@ -385,19 +392,32 @@ impl ContestCtx {
     }
 
     /// Whether a regex-backed head's first character can be read off its
-    /// pattern: one atom or one class, alone or repeated with `+`.
-    /// Anything else (`a|b` begins with b too, `a?b` with b, `.` with
-    /// anything, `\d` with a digit `pattern_char_ranges` declines to
-    /// name) may meet any head, and the dispatcher must treat it so. A
-    /// literal, fixed or guarded (`^option\b`), covers its first
-    /// character exactly whatever follows it in the matcher.
+    /// pattern: one atom or one class, alone or repeated with `+`, whose
+    /// coverage `pattern_char_ranges` can name. Anything else (`a|b`
+    /// begins with b too, `a?b` with b, `.` with anything, `\d` with a
+    /// digit and `\n` with a character `pattern_char_ranges` declines to
+    /// name) may meet any head, and the dispatcher must treat it so.
+    /// Mirrors the TypeScript `regexHeadIsExact`.
     fn regex_head_is_exact(&self, tok: &str) -> bool {
-        if self.literal_by_token.contains_key(tok) {
-            return true;
-        }
         let Some(re) = self.match_tokens.get(tok) else {
             return true;
         };
+        // A case-insensitive matcher folds case, and the coverage is
+        // folded for ASCII only (`fold_case_ranges`): a head that reaches
+        // beyond ASCII meets whatever Unicode folding lets it (`(?i)[Σ]`
+        // takes `ς`), which the coverage does not say. That holds for a
+        // case-insensitive literal as much as for a pattern.
+        if re.flags.contains('i') {
+            match self.token_ranges_of(tok) {
+                Some(r) if r.iter().all(|(_, hi)| *hi <= 0x7F) => {}
+                _ => return false,
+            }
+        }
+        // A literal, fixed or guarded (`^option\b`), covers its first
+        // character exactly whatever follows it in the matcher.
+        if self.literal_by_token.contains_key(tok) {
+            return true;
+        }
         let mut src = re
             .source
             .strip_prefix('^')
@@ -410,7 +430,24 @@ impl ContestCtx {
             return false;
         };
         let rest: String = src.chars().skip(end).collect();
-        rest.is_empty() || rest == "+"
+        (rest.is_empty() || rest == "+") && self.token_ranges_of(tok).is_some()
+    }
+
+    /// What a literal head covers: a literal its first character; a token
+    /// class's set what its literal members cover, since an engine token
+    /// among them (`#TX`) meets no character class here, as it would not
+    /// as a head of its own. Mirrors the TypeScript `literalHeadRangesOf`.
+    fn literal_head_ranges_of(&self, tok: &str) -> Option<Vec<CharRange>> {
+        let Some(members) = self.class_members.get(tok) else {
+            return self.token_ranges_of(tok);
+        };
+        let mut out: Option<Vec<CharRange>> = None;
+        for m in members {
+            if let Some(r) = self.token_ranges_of(m) {
+                out.get_or_insert_with(Vec::new).extend(r);
+            }
+        }
+        out
     }
 }
 
@@ -1625,7 +1662,16 @@ impl Emitter<'_> {
     /// drops behind the class entries so it can no longer steal; entries
     /// that already carry multi-token prefixes simply move ahead.
     fn reorder_keyword_shadow(&self, prod: &Production, entries: &[Entry]) -> Vec<Placed> {
-        let lit_toks: IndexSet<&String> = self.tokens.literals.values().collect();
+        // A token class's set is a literal head here: its members are
+        // literals and engine tokens, never a character class
+        // (`token_class_names`), and with the option off those members
+        // are literal heads this ordering places, each one.
+        let lit_toks: IndexSet<&String> = self
+            .tokens
+            .literals
+            .values()
+            .chain(self.contest.class_sets.values())
+            .collect();
         let class_toks: IndexSet<&String> = self.tokens.regex_tokens.values().collect();
 
         // Head token and lookahead length, resolved ONCE per entry.
@@ -1691,7 +1737,9 @@ impl Emitter<'_> {
         for (i, e) in entries.iter().enumerate() {
             let f = heads[i].as_deref();
             let fr = match f {
-                Some(f) if lit_toks.contains(&f.to_string()) => self.contest.token_ranges_of(f),
+                Some(f) if lit_toks.contains(&f.to_string()) => {
+                    self.contest.literal_head_ranges_of(f)
+                }
                 _ => None,
             };
 

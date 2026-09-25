@@ -25,6 +25,23 @@ func refsIn(alt Sequence, out map[string]bool) {
 	}
 }
 
+// tokensIn collects every token element's name in a sequence, nested
+// ones included. Mirrors the TS tokensIn.
+func tokensIn(alt Sequence, out map[string]bool) {
+	for _, el := range alt {
+		switch el.Kind {
+		case KindToken:
+			out[el.Name] = true
+		case KindOpt, KindStar, KindPlus, KindRep:
+			tokensIn(Sequence{el.Inner}, out)
+		case KindGroup:
+			for _, a := range el.Alts {
+				tokensIn(a, out)
+			}
+		}
+	}
+}
+
 // cloneGrammar copies a grammar deeply enough that the emit pipeline cannot
 // disturb the caller's AST. The passes replace Productions, Alts and the
 // individual sequences, but treat elements as immutable (each rewriting walk

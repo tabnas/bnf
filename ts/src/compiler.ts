@@ -3144,14 +3144,44 @@ function tokenClassNames(grammar: Grammar): Set<string> {
     // The class's set is named after it (`#ident`), and a reference the
     // substitution pass consumes as that token has to resolve to the
     // set: a production named like an engine token (`TX`, `ZZ`) cannot
-    // take its own name, so it is not a class.
-    if (isEngineOwnedToken('#' + prod.name)) continue
+    // take its own name, and an empty name has none to take
+    // (allocTokenName names the set after its content instead), so
+    // neither is a class.
+    if ('' === prod.name || isEngineOwnedToken('#' + prod.name)) continue
     if (prod.alts.every((alt) => 1 === alt.length &&
       ('term' === alt[0].kind || 'token' === alt[0].kind))) {
       out.add(prod.name)
     }
   }
+  // A token the grammar spells under a class's set name would be read
+  // as the set, and a class with its own set, or another class's, among
+  // its members would be a set of sets, which the engine cannot resolve
+  // and whose expansion never ends (`C = #C / "a"`). Such a class stays
+  // a plain production, as it is with the option off.
+  if (0 < out.size) {
+    const spelled = new Set<string>()
+    for (const prod of grammar.productions) {
+      for (const alt of prod.alts) tokensIn(alt, spelled)
+    }
+    for (const name of [...out]) {
+      if (spelled.has('#' + name)) out.delete(name)
+    }
+  }
   return out
+}
+
+
+// Every token element's name in a sequence, nested ones included.
+function tokensIn(alt: Sequence, out: Set<string>): void {
+  for (const el of alt) {
+    if (el.kind === 'token') out.add(el.name)
+    else if (el.kind === 'opt' || el.kind === 'star' ||
+             el.kind === 'plus' || el.kind === 'rep') {
+      tokensIn([el.inner], out)
+    } else if (el.kind === 'group') {
+      for (const a of el.alts) tokensIn(a, out)
+    }
+  }
 }
 
 
@@ -3425,6 +3455,10 @@ function emitGrammarSpec(
     if (null != ma || null != mb) {
       // A token class meets what any member meets, the same token
       // included; coverage alone would miss an engine token in it.
+      // tokenClassNames keeps a set out of every set's members; were one
+      // to get in, this provisional answer, the conservative one, is what
+      // ends the expansion when it comes back to the same pair.
+      overlapCache.set(key, true)
       for (const x of null != ma ? ma : [a]) {
         for (const y of null != mb ? mb : [b]) {
           if (x === y || tokensOverlap(x, y)) { out = true; break }
@@ -3482,23 +3516,33 @@ function emitGrammarSpec(
     long.toLowerCase().startsWith(short.toLowerCase()) ||
     long.toUpperCase().startsWith(short.toUpperCase())
   // A regex-backed head whose first character can be read off its
-  // pattern: one atom or one class, alone or repeated with `+`. Anything
-  // else (`a|b` begins with b too, `a?b` with b, `.` with anything, `\d`
-  // with a digit patternCharRanges declines to name) may meet any head,
-  // and the dispatcher must treat it so.
+  // pattern: one atom or one class, alone or repeated with `+`, whose
+  // coverage patternCharRanges can name. Anything else (`a|b` begins
+  // with b too, `a?b` with b, `.` with anything, `\d` with a digit and
+  // `\n` with a character patternCharRanges declines to name) may meet
+  // any head, and the dispatcher must treat it so.
   const regexHeadIsExact = (tok: string): boolean => {
+    const re = matchTokens[tok]
+    if (null == re) return true
+    // A case-insensitive matcher folds case, and the coverage is folded
+    // for ASCII only (foldCaseRanges): a head that reaches beyond ASCII
+    // meets whatever Unicode folding lets it (`/[Σ]/i` takes `ς`), which
+    // the coverage does not say. That holds for a case-insensitive
+    // literal as much as for a pattern.
+    if (re.flags.includes('i')) {
+      const r = tokenRangesOf(tok)
+      if (null == r || r.some(([, hi]) => 0x7F < hi)) return false
+    }
     // A literal, fixed or guarded (`^option(?![A-Za-z0-9_])`), covers
     // its first character exactly whatever follows it in the matcher.
     if (literalByToken.has(tok)) return true
-    const re = matchTokens[tok]
-    if (null == re) return true
     let src = re.source.replace(/^\^/, '')
     const m = /^\(\?:(.*)\)$/.exec(src)
     if (m) src = m[1]
     const end = regexHeadAtomEnd(src)
     if (end < 0) return false
     const rest = src.slice(end)
-    return '' === rest || '+' === rest
+    return ('' === rest || '+' === rest) && null != tokenRangesOf(tok)
   }
   const contestCache = new Map<string, boolean>()
   const headsContest = (a: string, b: string): boolean => {
@@ -3514,8 +3558,10 @@ function emitGrammarSpec(
     const la = literalByToken.get(a)
     const lb = literalByToken.get(b)
     if (null != ma || null != mb) {
-      // A set meets what any member meets; the members themselves are
-      // never sets.
+      // A set meets what any member meets. The members are never sets
+      // (tokenClassNames), and the provisional answer, the conservative
+      // one, would end the expansion if one were.
+      contestCache.set(key, true)
       const xs = null != ma ? ma : [a]
       const ys = null != mb ? mb : [b]
       for (const x of xs) {
@@ -3596,8 +3642,8 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap, headsContest, classSets, valuePlan, arrayHelpers,
-      valueRules, prov,
+      tokensOverlap, headsContest, classSets, classMembers, valuePlan,
+      arrayHelpers, valueRules, prov,
     )
   }
 
@@ -4059,6 +4105,8 @@ function emitProduction(
   headsContest: (a: string, b: string) => boolean,
   // The token classes as sets; see `ConvertOptions.tokenClasses`.
   classSets: Map<string, string>,
+  // Each class's set name to the tokens it holds.
+  classMembers: Map<string, string[]>,
   valuePlan: Map<string, boolean[]>,
   // The helpers of an annotated array, and the rules that build a value.
   // Together they say, for any link that pushes: does the pushed rule
@@ -4155,10 +4203,31 @@ function emitProduction(
     return [...seconds].map((u) => ({ ...o, s: f + ' ' + u, b: 2 - consumed }))
   }
 
+  // What a literal head covers: a literal its first character; a token
+  // class's set what its literal members cover, since an engine token
+  // among them (`#TX`) meets no character class here, as it would not
+  // as a head of its own.
+  const literalHeadRangesOf = (tok: string): Array<[number, number]> | null => {
+    const members = classMembers.get(tok)
+    if (null == members) return tokenRangesOf(tok)
+    let out: Array<[number, number]> | null = null
+    for (const m of members) {
+      const r = tokenRangesOf(m)
+      if (null == r) continue
+      if (null == out) out = []
+      for (const span of r) out.push(span)
+    }
+    return out
+  }
+
   const reorderKeywordShadow = (
     entries: Array<{ o: any; alt: Sequence | null }>,
   ): any[] => {
-    const litToks = new Set(literals.values())
+    // A token class's set is a literal head here: its members are
+    // literals and engine tokens, never a character class
+    // (tokenClassNames), and with the option off those members are
+    // literal heads this ordering places, each one.
+    const litToks = new Set([...literals.values(), ...classSets.values()])
     const classToks = new Set(regexTokens.values())
 
     // Head token and lookahead length, resolved ONCE per entry. A
@@ -4212,7 +4281,7 @@ function emitProduction(
     for (let i = 0; i < N; i++) {
       const { o, alt } = entries[i]
       const f = heads[i]
-      const fr = null != f && litToks.has(f) ? tokenRangesOf(f) : null
+      const fr = null != f && litToks.has(f) ? literalHeadRangesOf(f) : null
 
       // First and last contesting class entry, in one pass.
       let firstC = -1
@@ -5608,7 +5677,9 @@ function regexHeadAtomEnd(src: string): number {
       return 6
     }
     if ('x' === m) return 4
-    if ('dDwWsSbB'.includes(m)) return -1
+    // Exactly the escapes patternCharRanges declines to name: a head
+    // this calls one atom must be one whose coverage is known.
+    if ('dDwWsSbB0nrtfv'.includes(m)) return -1
     return 2
   }
   if ('(.|)?*+{'.includes(c)) return -1

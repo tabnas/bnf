@@ -90,3 +90,32 @@ fn the_any_token_contests_every_head() {
     assert!(parses(&spec, "b,,..", false));
     assert!(parses(&spec, "z..,,", false));
 }
+
+#[test]
+fn a_regex_head_whose_first_character_the_coverage_cannot_name_contests() {
+    // `\n`, `\t` and `\v` are one atom each, but `pattern_char_ranges`
+    // declines to name what a control escape covers, so nothing says the
+    // literal character is not what the pattern matches.
+    for (pattern, literal) in [(r"\n", "\n"), (r"\t", "\t"), (r"\v", "\u{b}")] {
+        let spec =
+            emit_grammar_spec(&grammar(rx(pattern, ""), sens_term(literal)), &opts(false)).unwrap();
+        assert_eq!(depths(&spec), [2, 2], "{pattern}");
+    }
+    let spec =
+        emit_grammar_spec(&grammar(rx(r"\v", ""), sens_term("\u{b}")), &opts(false)).unwrap();
+    assert!(parses(&spec, "\u{b}..,,", true));
+    assert!(parses(&spec, "\u{b},,..", true));
+}
+
+#[test]
+fn a_case_insensitive_head_beyond_ascii_contests_what_unicode_folding_lets_it_meet() {
+    // `(?i)[Σ]` takes `ς`, and the coverage folds ASCII letters alone.
+    let spec = emit_grammar_spec(&grammar(rx("[Σ]", "i"), sens_term("ς")), &opts(false)).unwrap();
+    assert_eq!(depths(&spec), [2, 2]);
+    for src in ["ς..,,", "Σ..,,", "ς,,.."] {
+        assert!(parses(&spec, src, true), "{src}");
+    }
+    // Within ASCII the folded coverage stays exact: `(?i)[b]` meets no `a`.
+    let ascii = emit_grammar_spec(&grammar(rx("[b]", "i"), sens_term("a")), &opts(false)).unwrap();
+    assert_eq!(depths(&ascii), [1, 1]);
+}

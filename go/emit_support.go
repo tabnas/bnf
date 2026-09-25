@@ -447,8 +447,10 @@ func tokenClassNames(grammar *Grammar) map[string]bool {
 		// The class's set is named after it (#ident), and a reference the
 		// substitution pass consumes as that token has to resolve to the
 		// set: a production named like an engine token (TX, ZZ) cannot
-		// take its own name, so it is not a class.
-		if isEngineOwnedToken("#" + prod.Name) {
+		// take its own name, and an empty name has none to take
+		// (allocTokenName names the set after its content instead), so
+		// neither is a class.
+		if prod.Name == "" || isEngineOwnedToken("#"+prod.Name) {
 			continue
 		}
 		all := true
@@ -460,6 +462,24 @@ func tokenClassNames(grammar *Grammar) map[string]bool {
 		}
 		if all {
 			out[prod.Name] = true
+		}
+	}
+	// A token the grammar spells under a class's set name would be read
+	// as the set, and a class with its own set, or another class's, among
+	// its members would be a set of sets, which the engine cannot resolve
+	// and whose expansion never ends (`C = #C / "a"`). Such a class stays
+	// a plain production, as it is with the option off.
+	if len(out) > 0 {
+		spelled := map[string]bool{}
+		for _, prod := range grammar.Productions {
+			for _, alt := range prod.Alts {
+				tokensIn(alt, spelled)
+			}
+		}
+		for name := range out {
+			if spelled["#"+name] {
+				delete(out, name)
+			}
 		}
 	}
 	return out

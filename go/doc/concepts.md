@@ -86,7 +86,7 @@ normalised.
 | `desugar` | Turns repetition and grouping into helper productions. |
 | `resolveSuffixDebts` | Confirms or drops the counter guarding a tail loop whose greediness contests an enclosing suffix. |
 | `computeFollowSets` | Works out what may follow a repetition, so an empty terminating alternative can be guarded by a peek. |
-| `tokenClassNames` | Under `TokenClasses`, names the productions whose alternatives are all single literals or tokens; each becomes one engine token set. The left-recursion substitution consumes a leading reference to one as that single token rather than inlining its alternatives, so the tree is unchanged and the fan-out is gone. |
+| `tokenClassNames` | Under `TokenClasses`, names the productions whose alternatives are all single literals or tokens; each becomes one engine token set. It skips a production named like an engine token, one with an empty name, or one whose set name the grammar already spells as a token, so no set is ever a member of a set. The left-recursion substitution consumes a leading reference to one as that single token rather than inlining its alternatives, so the tree is unchanged and the fan-out is gone. |
 
 Then the emitter walks the normalised grammar and writes alternates. A
 choice dispatches on the first token of each alternative

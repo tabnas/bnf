@@ -17,7 +17,7 @@ const { Tabnas } = require('@tabnas/parser')
 
 const lit = (s) => ({ kind: 'term', literal: s, caseSensitive: true })
 const ilit = (s) => ({ kind: 'term', literal: s })
-const rx = (pattern) => ({ kind: 'regex', pattern, flags: '' })
+const rx = (pattern, flags) => ({ kind: 'regex', pattern, flags: flags || '' })
 const tok = (name) => ({ kind: 'token', name })
 const ref = (name) => ({ kind: 'ref', name })
 const prod = (name, ...alts) => ({ name, alts })
@@ -89,6 +89,32 @@ describe('contest', () => {
     assert.deepEqual(spec.rule.x.open.map((o) => o.s.split(' ').length), [2, 2])
     assert.ok(parses(spec, 'b,,..'))
     assert.ok(parses(spec, 'z..,,'))
+  })
+
+
+  it('a regex head whose first character the coverage cannot name contests', () => {
+    // `\n`, `\t` and `\v` are one atom each, but patternCharRanges declines
+    // to name what a control escape covers, so nothing says the literal
+    // character is not what the pattern matches.
+    for (const [pattern, literal] of [['\\n', '\n'], ['\\t', '\t'], ['\\v', '\v']]) {
+      const spec = emitGrammarSpec(grammar(rx(pattern), lit(literal)), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(spec.rule.x.open.map((o) => o.s.split(' ').length), [2, 2], pattern)
+    }
+    const spec = emitGrammarSpec(grammar(rx('\\v'), lit('\v')), { tag: 'ct', start: 'doc' })
+    assert.ok(parses(spec, '\v..,,', { lex: { relex: true } }))
+    assert.ok(parses(spec, '\v,,..', { lex: { relex: true } }))
+  })
+
+  it('a case-insensitive head beyond ASCII contests what Unicode folding lets it meet', () => {
+    // `/[Σ]/i` takes `ς`, and the coverage folds ASCII letters alone.
+    const spec = emitGrammarSpec(grammar(rx('[Σ]', 'i'), lit('ς')), { tag: 'ct', start: 'doc' })
+    assert.deepEqual(spec.rule.x.open.map((o) => o.s.split(' ').length), [2, 2])
+    for (const src of ['ς..,,', 'Σ..,,', 'ς,,..']) {
+      assert.ok(parses(spec, src, { lex: { relex: true } }), src)
+    }
+    // Within ASCII the folded coverage stays exact: `/[b]/i` meets no `a`.
+    const ascii = emitGrammarSpec(grammar(rx('[b]', 'i'), lit('a')), { tag: 'ct', start: 'doc' })
+    assert.deepEqual(ascii.rule.x.open.map((o) => o.s.split(' ').length), [1, 1])
   })
 
 })

@@ -81,7 +81,9 @@ func regexHeadAtomEnd(src string) int {
 			return 6
 		case m == 'x':
 			return 4
-		case strings.IndexByte("dDwWsSbB", m) >= 0:
+		case strings.IndexByte("dDwWsSbB0nrtfv", m) >= 0:
+			// Exactly the escapes patternCharRanges declines to name: a
+			// head this calls one atom must be one whose coverage is known.
 			return -1
 		default:
 			return 2

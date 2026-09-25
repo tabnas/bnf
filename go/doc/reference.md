@@ -74,7 +74,7 @@ type ConvertOptions struct {
 | `Builtins` | `false` | Emit actions as `@name$` strings rather than closures. Required by `ToPureSpec`. |
 | `Marks` | `false` | Record a mark on each user alternate, so semantic actions can bind to it. |
 | `WordKeywords` | `false` | Append a `\b` guard to a literal ending in a word character, so `option` does not match inside `optional`. |
-| `TokenClasses` | `false` | Compile a production whose alternatives are all single literals or tokens to one engine token set, named after it, that stands as one token at lookahead positions. The tree is unchanged: a leading reference the plain compile would inline is consumed as the one token, and the rule keeps its alternates and its node everywhere else. |
+| `TokenClasses` | `false` | Compile a production whose alternatives are all single literals or tokens to one engine token set, named after it, that stands as one token at lookahead positions. The tree is unchanged: a leading reference the plain compile would inline is consumed as the one token, and the rule keeps its alternates and its node everywhere else. A production named like an engine token, one with an empty name, or one whose set name the grammar already spells as a token stays a plain production. |
 | `Provenance` | on | Emit `Meta["provenance"]`. A pointer, so absent means on and only an explicit `false` turns it off. |
 
 The Go `WordKeywords` uses `\b` where TypeScript uses a
