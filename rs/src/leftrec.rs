@@ -147,14 +147,22 @@ pub(crate) fn eliminate_left_recursion_keeping(
             for _ in 0..guard {
                 let mut changed = false;
                 for j in 0..i {
-                    if keep.contains(&prods[j].name) {
-                        continue;
-                    }
                     if !has_leading_ref_to(&prods[i], &prods[j].name) {
                         continue;
                     }
-                    let source = prods[j].clone();
-                    prods[i] = substitute_leading_ref(&prods[i], &source);
+                    if keep.contains(&prods[j].name) {
+                        // A token class: substituted, exactly where any
+                        // other leading reference is, by ONE token element
+                        // naming its set (`#ident`) rather than by its
+                        // alternatives. The tree is the one the plain
+                        // substitution gives (the token consumed, no node)
+                        // without the one-alternate-per-member fan-out.
+                        let class_name = prods[j].name.clone();
+                        prods[i] = substitute_leading_ref_by_token(&prods[i], &class_name);
+                    } else {
+                        let source = prods[j].clone();
+                        prods[i] = substitute_leading_ref(&prods[i], &source);
+                    }
                     changed = true;
                 }
                 if !changed {
@@ -411,6 +419,26 @@ fn substitute_leading_ref(target: &Production, source: &Production) -> Productio
             new_alts.push(alt.clone());
         }
     }
+    target.rebuilt(new_alts)
+}
+
+/// Replace a leading reference to a token class by the token element
+/// naming the class's set (`ident` -> `#ident`). The set is minted by
+/// `emit_grammar_spec` under exactly that name; see `token_class_names`.
+fn substitute_leading_ref_by_token(target: &Production, class_name: &str) -> Production {
+    let new_alts: Vec<Sequence> = target
+        .alts
+        .iter()
+        .map(|alt| {
+            if alt.first().is_some_and(|el| el.is_ref_to(class_name)) {
+                let mut combined = vec![Element::token(format!("#{class_name}"))];
+                combined.extend(alt[1..].iter().cloned());
+                combined
+            } else {
+                alt.clone()
+            }
+        })
+        .collect();
     target.rebuilt(new_alts)
 }
 

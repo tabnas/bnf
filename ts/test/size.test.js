@@ -89,6 +89,23 @@ describe('size', () => {
     assert.throws(() => tn.parse('{k1}'))
   })
 
+  it('a token class leaves the tree exactly as the option-off compile does', () => {
+    // A leading reference to the class is consumed as its one token where
+    // the plain compile inlines the class's alternatives, and stays a
+    // node where the plain compile keeps the reference: the same parse
+    // result, node for node, with the option on or off.
+    const grammar = { productions: starred(26) }
+    const off = new Tabnas().grammar(
+      emitGrammarSpec(grammar, { tag: 'rp', start: 'doc', wordKeywords: true }))
+    const on = new Tabnas().grammar(
+      emitGrammarSpec(grammar, { tag: 'rp', start: 'doc', wordKeywords: true, tokenClasses: true }))
+    for (const src of ['{k1 k2 k26 k1}', '{}', '{k3 k3}']) {
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(on.parse(src))),
+        JSON.parse(JSON.stringify(off.parse(src))), src)
+    }
+  })
+
   it('the emitted grammar installs and parses at N=26 either way', () => {
     const spec = emitGrammarSpec(
       { productions: starred(26) }, { tag: 'rp', start: 'doc', wordKeywords: true })

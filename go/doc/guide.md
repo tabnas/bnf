@@ -177,9 +177,13 @@ spec, _ := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
 // alternate that peeks an identifier carries `s: "#ident"`.
 ```
 
-The rule itself is unchanged: it keeps one alternate per member and
-still builds its node, so a walk sees the same tree with the option on
-or off. Only the size of what the rules around it dispatch on changes.
+The tree is the same with the option on or off. Where the plain compile
+keeps a reference to the class (a non-leading position), the rule keeps
+one alternate per member and builds its node as before; where the plain
+compile inlines it (a leading reference, which Paull's substitution
+expands into one alternative per member), the one set token is consumed
+instead, which is the same tree without the fan-out. Only the size of
+what the rules around it dispatch on changes.
 
 ## Control literal case sensitivity
 

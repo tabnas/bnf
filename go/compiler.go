@@ -257,13 +257,20 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 			for round := 0; round < guard; round++ {
 				changed := false
 				for j := 0; j < i; j++ {
-					if keep[prods[j].Name] {
-						continue
-					}
 					if !hasLeadingRefTo(prods[i], prods[j].Name) {
 						continue
 					}
-					prods[i] = substituteLeadingRef(prods[i], prods[j])
+					if keep[prods[j].Name] {
+						// A token class: substituted, exactly where any other
+						// leading reference is, by ONE token element naming
+						// its set (#ident) rather than by its alternatives.
+						// The tree is the one the plain substitution gives
+						// (the token consumed, no node) without the
+						// one-alternate-per-member fan-out.
+						prods[i] = substituteLeadingRefByToken(prods[i], prods[j].Name)
+					} else {
+						prods[i] = substituteLeadingRef(prods[i], prods[j])
+					}
 					changed = true
 				}
 				if !changed {
@@ -445,6 +452,30 @@ func substituteLeadingRef(target, source *Production) *Production {
 				combined := append(append(Sequence{}, srcAlt...), tail...)
 				newAlts = append(newAlts, combined)
 			}
+		} else {
+			newAlts = append(newAlts, alt)
+		}
+	}
+	return &Production{
+		Name:     target.Name,
+		Alts:     newAlts,
+		NodeKind: target.NodeKind,
+		Origin:   target.Origin,
+		Sp:       target.Sp,
+		Value:    target.Value,
+	}
+}
+
+// substituteLeadingRefByToken replaces a leading reference to a token
+// class by the token element naming the class's set (ident -> #ident).
+// The set is minted by EmitGrammarSpec under exactly that name; see
+// tokenClassNames.
+func substituteLeadingRefByToken(target *Production, className string) *Production {
+	newAlts := []Sequence{}
+	for _, alt := range target.Alts {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == className {
+			combined := append(Sequence{&Element{Kind: KindToken, Name: "#" + className}}, alt[1:]...)
+			newAlts = append(newAlts, combined)
 		} else {
 			newAlts = append(newAlts, alt)
 		}

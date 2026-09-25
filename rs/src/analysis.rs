@@ -691,6 +691,13 @@ pub(crate) fn token_class_names(grammar: &Grammar) -> IndexSet<String> {
         if prod.value.is_some() || prod.alts.len() < 2 {
             continue;
         }
+        // The class's set is named after it (`#ident`), and a reference
+        // the substitution pass consumes as that token has to resolve to
+        // the set: a production named like an engine token (`TX`, `ZZ`)
+        // cannot take its own name, so it is not a class.
+        if crate::emit::is_engine_owned_token(&format!("#{}", prod.name)) {
+            continue;
+        }
         let all = prod.alts.iter().all(|alt| {
             alt.len() == 1 && matches!(alt[0].kind, Kind::Term { .. } | Kind::Token { .. })
         });

@@ -994,10 +994,14 @@ function expandNullableLeftPrefixes(prods: Production[]): Production[] {
 
 function eliminateLeftRecursion(
   grammar: Grammar,
-  // Productions that are never substituted into the alternatives they
-  // lead: the token classes of `ConvertOptions.tokenClasses`. A class
-  // holds no reference, so no left-recursive cycle can run through it,
-  // and Paull's invariant is unaffected by leaving it in place.
+  // The token classes (`ConvertOptions.tokenClasses`). A leading
+  // reference to one is substituted, exactly where any other leading
+  // reference is, by ONE token element naming the class's set (`#ident`)
+  // rather than by its alternatives: the set is what the engine matches
+  // there, so the tree is the one the plain substitution gives (the
+  // token consumed, no node) without the one-alternate-per-member
+  // fan-out that made the substitution the multiplier tabnas/bnf#71
+  // measured. Elsewhere the class stays a reference, and a node.
   keep: Set<string> = new Set(),
 ): Grammar {
   const originalOrder = grammar.productions.map((p) => p.name)
@@ -1071,9 +1075,10 @@ function eliminateLeftRecursion(
       for (let round = 0; round < guard; round++) {
         let changed = false
         for (let j = 0; j < i; j++) {
-          if (keep.has(prods[j].name)) continue
           if (!hasLeadingRefTo(prods[i], prods[j].name)) continue
-          prods[i] = substituteLeadingRef(prods[i], prods[j])
+          prods[i] = keep.has(prods[j].name)
+            ? substituteLeadingRefByToken(prods[i], prods[j].name)
+            : substituteLeadingRef(prods[i], prods[j])
           changed = true
         }
         if (!changed) break
@@ -1232,6 +1237,28 @@ function substituteLeadingRef(
       newAlts.push(alt)
     }
   }
+  return {
+    name: target.name,
+    alts: newAlts,
+    nodeKind: target.nodeKind,
+    origin: target.origin,
+    sp: target.sp,
+    value: target.value,
+  }
+}
+
+
+// Replace a leading reference to a token class by the token element
+// naming the class's set (`ident` -> `#ident`). The set is minted by
+// emitGrammarSpec under exactly that name; see tokenClassNames.
+function substituteLeadingRefByToken(
+  target: Production,
+  className: string,
+): Production {
+  const newAlts: Sequence[] = target.alts.map((alt) =>
+    alt.length > 0 && alt[0].kind === 'ref' && alt[0].name === className
+      ? [{ kind: 'token', name: '#' + className } as Element, ...alt.slice(1)]
+      : alt)
   return {
     name: target.name,
     alts: newAlts,
@@ -3114,6 +3141,11 @@ function tokenClassNames(grammar: Grammar): Set<string> {
   for (const prod of grammar.productions) {
     if (prod.probeHelper || prod.probeDispatch || prod.tailRepeat) continue
     if (null != prod.value || prod.alts.length < 2) continue
+    // The class's set is named after it (`#ident`), and a reference the
+    // substitution pass consumes as that token has to resolve to the
+    // set: a production named like an engine token (`TX`, `ZZ`) cannot
+    // take its own name, so it is not a class.
+    if (isEngineOwnedToken('#' + prod.name)) continue
     if (prod.alts.every((alt) => 1 === alt.length &&
       ('term' === alt[0].kind || 'token' === alt[0].kind))) {
       out.add(prod.name)
@@ -3214,6 +3246,16 @@ function emitGrammarSpec(
   const literals = new Map<string, string>()        // literal-key -> token name
   const regexTokens = new Map<string, string>()     // regex key -> token name
   const usedNames = new Set<string>()
+  // The token classes take their names first (`#ident` for the class
+  // `ident`): the substitution pass has already written token elements
+  // under those names, so nothing allocated below may take one. The
+  // members are filled in once the tokens they are exist.
+  const classSets = new Map<string, string>()
+  for (const prod of grammar.productions) {
+    if (classNames.has(prod.name)) {
+      classSets.set(prod.name, allocTokenName(prod.name, usedNames, prod.name))
+    }
+  }
   // Token tables are keyed by grammar-supplied names too.
   const fixedTokens: Record<string, string> = Object.create(null)
   const matchTokens: Record<string, RegExp> = Object.create(null)
@@ -3337,14 +3379,14 @@ function emitGrammarSpec(
   // grammar with hundreds of entries per rule asks the same handful of
   // questions over and over.
   // The token classes as engine token sets (`ConvertOptions.tokenClasses`):
-  // one set per class, named after the production, holding the tokens
-  // its alternatives are. `classSets` maps the production to its set,
-  // `classMembers` the set to its tokens. Minted after the tokens, since
-  // the members must exist, and before FIRST, whose sets name them.
-  const classSets = new Map<string, string>()
+  // one set per class, under the name allocated above, holding the
+  // tokens its alternatives are. `classSets` maps the production to its
+  // set, `classMembers` the set to its tokens. Filled after the tokens,
+  // since the members must exist, and before FIRST, whose sets name them.
   const classMembers = new Map<string, string[]>()
   for (const prod of grammar.productions) {
-    if (!classNames.has(prod.name)) continue
+    const name = classSets.get(prod.name)
+    if (null == name) continue
     const members: string[] = []
     for (const alt of prod.alts) {
       const el = alt[0]
@@ -3353,10 +3395,7 @@ function emitGrammarSpec(
         : (el as { name: string }).name
       if (!members.includes(tok)) members.push(tok)
     }
-    if (members.length < 2) continue
-    const name = allocTokenName(prod.name, usedNames, prod.name)
     tokenSets[name.replace(/^#/, '')] = members
-    classSets.set(prod.name, name)
     classMembers.set(name, members)
     // The class covers what its members cover, when that is known for
     // every member; an engine token among them (`#TX`) leaves it

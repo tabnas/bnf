@@ -324,6 +324,16 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	literals := map[string]string{}    // literal-key -> token name
 	regexTokens := map[string]string{} // regex key -> token name
 	usedNames := map[string]bool{}
+	// The token classes take their names first (#ident for the class
+	// ident): the substitution pass has already written token elements
+	// under those names, so nothing allocated below may take one. The
+	// members are filled in once the tokens they are exist.
+	classSetNames := map[string]string{}
+	for _, prod := range grammar.Productions {
+		if classNames[prod.Name] {
+			classSetNames[prod.Name] = allocTokenName(prod.Name, usedNames, prod.Name)
+		}
+	}
 	fixedTokens := map[string]*string{}
 	matchTokens := map[string]*regexp.Regexp{}
 	matchEager := map[string]bool{}
@@ -517,11 +527,12 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	}
 
 	// The token classes as engine token sets (ConvertOptions.TokenClasses):
-	// one set per class, named after the production, holding the tokens
-	// its alternatives are. Minted after the tokens, since the members
-	// must exist, and before FIRST, whose sets name them. Mirrors TS.
+	// one set per class, under the name allocated above, holding the
+	// tokens its alternatives are. Filled after the tokens, since the
+	// members must exist, and before FIRST, whose sets name them. Mirrors TS.
 	for _, prod := range grammar.Productions {
-		if !classNames[prod.Name] {
+		name, isClass := classSetNames[prod.Name]
+		if !isClass {
 			continue
 		}
 		members := []string{}
@@ -538,10 +549,6 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				members = append(members, tok)
 			}
 		}
-		if len(members) < 2 {
-			continue
-		}
-		name := allocTokenName(prod.Name, usedNames, prod.Name)
 		tokenSets[strings.TrimPrefix(name, "#")] = members
 		cc.classSets[prod.Name] = name
 		cc.classMembers[name] = members

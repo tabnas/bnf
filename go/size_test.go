@@ -10,6 +10,7 @@ package bnf
 // four positions. Every count is exact and pinned.
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -109,6 +110,43 @@ func TestSizeRepeatedEntryDispatchesOnHeads(t *testing.T) {
 		helper := szRule(t, spec, `star_entry$`)
 		if got := szOpens(t, spec, helper); got != n+2 {
 			t.Errorf("N=%d: %s has %d open alternates, want %d", n, helper, got, n+2)
+		}
+	}
+}
+
+// A leading reference to the class is consumed as its one token where the
+// plain compile inlines the class's alternatives, and stays a node where
+// the plain compile keeps the reference: the same parse result, node for
+// node, with the option on or off.
+func TestSizeTokenClassLeavesTheTreeAsTheOptionOffCompileDoes(t *testing.T) {
+	off, err := EmitGrammarSpec(szStarred(26), &ConvertOptions{Tag: "rp", Start: "doc", WordKeywords: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	on, err := EmitGrammarSpec(szStarred(26), &ConvertOptions{Tag: "rp", Start: "doc", WordKeywords: true, TokenClasses: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joff, jon := tabnas.Make(), tabnas.Make()
+	if err := joff.Grammar(off); err != nil {
+		t.Fatal(err)
+	}
+	if err := jon.Grammar(on); err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{"{k1 k2 k26 k1}", "{}", "{k3 k3}"} {
+		a, err := joff.Parse(src)
+		if err != nil {
+			t.Fatalf("%s: off: %v", src, err)
+		}
+		b, err := jon.Parse(src)
+		if err != nil {
+			t.Fatalf("%s: on: %v", src, err)
+		}
+		ja, _ := json.Marshal(a)
+		jb, _ := json.Marshal(b)
+		if string(ja) != string(jb) {
+			t.Fatalf("%s: trees differ\n off: %s\n on:  %s", src, ja, jb)
 		}
 	}
 }

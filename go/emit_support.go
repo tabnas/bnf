@@ -444,6 +444,13 @@ func tokenClassNames(grammar *Grammar) map[string]bool {
 		if prod.Value != nil || len(prod.Alts) < 2 {
 			continue
 		}
+		// The class's set is named after it (#ident), and a reference the
+		// substitution pass consumes as that token has to resolve to the
+		// set: a production named like an engine token (TX, ZZ) cannot
+		// take its own name, so it is not a class.
+		if isEngineOwnedToken("#" + prod.Name) {
+			continue
+		}
 		all := true
 		for _, alt := range prod.Alts {
 			if len(alt) != 1 || (alt[0].Kind != KindTerm && alt[0].Kind != KindToken) {

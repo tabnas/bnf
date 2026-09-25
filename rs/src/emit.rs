@@ -155,7 +155,7 @@ fn js_regex_source(pattern: &str) -> String {
 /// Token names the engine's own matchers own. A lifted literal that would
 /// land on one must be renamed instead: the engine refuses a fixed-token
 /// entry under a matcher-owned name.
-fn is_engine_owned_token(name: &str) -> bool {
+pub(crate) fn is_engine_owned_token(name: &str) -> bool {
     builtin_token(name.trim_start_matches('#')).is_some()
         || matches!(name, "#BD" | "#ZZ" | "#UK" | "#AA" | "#SP" | "#LN" | "#CM")
 }
@@ -584,6 +584,17 @@ pub fn emit_grammar_spec(
     // for each unique regex terminal.
     let mut tokens = Tokens::default();
     let mut used_names: IndexSet<String> = IndexSet::new();
+    // The token classes take their names first (`#ident` for the class
+    // `ident`): the substitution pass has already written token elements
+    // under those names, so nothing allocated below may take one. The
+    // members are filled in once the tokens they are exist.
+    let mut class_set_names: IndexMap<String, String> = IndexMap::new();
+    for prod in &grammar.productions {
+        if class_names.contains(&prod.name) {
+            let name = alloc_token_name(&prod.name, &mut used_names, Some(&prod.name));
+            class_set_names.insert(prod.name.clone(), name);
+        }
+    }
     let mut fixed_tokens: IndexMap<String, Option<String>> = IndexMap::new();
     let mut match_tokens: IndexMap<String, MatchToken> = IndexMap::new();
     let mut token_sets: IndexMap<String, Vec<String>> = IndexMap::new();
@@ -695,13 +706,13 @@ pub fn emit_grammar_spec(
     }
 
     // The token classes as engine token sets (`ConvertOptions::token_classes`):
-    // one set per class, named after the production, holding the tokens
-    // its alternatives are. Minted after the tokens, since the members
-    // must exist, and before FIRST, whose sets name them.
+    // one set per class, under the name allocated above, holding the
+    // tokens its alternatives are. Filled after the tokens, since the
+    // members must exist, and before FIRST, whose sets name them.
     for prod in &grammar.productions {
-        if !class_names.contains(&prod.name) {
+        let Some(name) = class_set_names.get(&prod.name).cloned() else {
             continue;
-        }
+        };
         let mut members: Vec<String> = Vec::new();
         for alt in &prod.alts {
             let tok = tokens.name(&alt[0]);
@@ -709,10 +720,6 @@ pub fn emit_grammar_spec(
                 members.push(tok);
             }
         }
-        if members.len() < 2 {
-            continue;
-        }
-        let name = alloc_token_name(&prod.name, &mut used_names, Some(&prod.name));
         token_sets.insert(name.trim_start_matches('#').to_string(), members.clone());
         contest.class_sets.insert(prod.name.clone(), name.clone());
         // The class covers what its members cover, when that is known for

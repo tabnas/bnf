@@ -134,6 +134,25 @@ fn a_token_class_is_one_lookahead_token() {
 }
 
 #[test]
+fn a_token_class_leaves_the_tree_as_the_option_off_compile_does() {
+    // A leading reference to the class is consumed as its one token where
+    // the plain compile inlines the class's alternatives, and stays a
+    // node where the plain compile keeps the reference: the same parse
+    // result, node for node, with the option on or off.
+    let off = emit_grammar_spec(&starred(26), &opts()).expect("emit");
+    let on = emit_grammar_spec(&starred(26), &opts().token_classes(true)).expect("emit");
+    let mut poff = tabnas::Tabnas::new();
+    off.install(&mut poff).expect("install");
+    let mut pon = tabnas::Tabnas::new();
+    on.install(&mut pon).expect("install");
+    for src in ["{k1 k2 k26 k1}", "{}", "{k3 k3}"] {
+        let a = poff.parse(src).expect("off");
+        let b = pon.parse(src).expect("on");
+        assert_eq!(a.to_json(), b.to_json(), "{src}");
+    }
+}
+
+#[test]
 fn the_emitted_grammar_installs_and_parses_at_n26_either_way() {
     let spec = emit_grammar_spec(&starred(26), &opts()).expect("emit");
     assert!(parses(&spec, "{k1 k2 k2 k1}"));
