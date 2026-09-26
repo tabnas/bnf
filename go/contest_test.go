@@ -387,3 +387,57 @@ func TestContestEscapeIsReadAsRE2ReadsIt(t *testing.T) {
 		}
 	}
 }
+
+// TestContestCodeUnitLeadSurrogateMeetsAstralHead pins that a head the
+// canonical matcher reads in code units (no `u` or `v`) and that names a
+// lead surrogate meets every astral character that surrogate begins:
+// there it takes U+D800 as the first half of U+10000. Compared as code
+// points the heads were disjoint, the decision stayed one token deep, and
+// the first branch took the input the second accepts. RE2 never meets a
+// surrogate, but this port decides alike, so the three ports emit the
+// same grammar (tabnas/bnf#75 review). The TS test's lone-surrogate
+// literal has no Go spelling: a Go string cannot hold one.
+func TestContestCodeUnitLeadSurrogateMeetsAstralHead(t *testing.T) {
+	rx := func(p, f string) *Element { return &Element{Kind: KindRegex, Pattern: p, Flags: f} }
+	astral := rx(`\x{10000}`, "u")
+	emit := func(g *Grammar) *tabnas.GrammarSpec {
+		spec, err := EmitGrammarSpec(g, &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return spec
+	}
+	for _, c := range []struct {
+		label string
+		a, b  *Element
+	}{
+		{"escape", rx(`\x{d800}`, ""), astral},
+		{"class", rx(`[\x{d800}-\x{dbff}]`, ""), rx(`[\x{10000}-\x{10ffff}]`, "u")},
+		{"astral literal", rx(`\x{d800}`, ""), ctLit("\U00010000")},
+	} {
+		spec := emit(ctSemi(c.a, c.b))
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Errorf("%s: depths %v, want [2 2]", c.label, d)
+		}
+		if !ctParses(t, spec, "\U00010000!!;;", true) {
+			t.Errorf("%s: U+10000 then !!;; should parse", c.label)
+		}
+	}
+	// Read in code points a lead surrogate is only ever one standing
+	// alone, and meets no astral character, whether the class keeps its
+	// own matcher or is laid over the partition, whose atoms read as the
+	// classes they stand for.
+	lone := rx(`[\x{d800}]`, "u")
+	contested := ctSemi(lone, astral)
+	contested.Productions[0].Alts = append(contested.Productions[0].Alts,
+		Sequence{rx(`[\x{d800}-\x{dbff}]`, "u")})
+	for label, g := range map[string]*Grammar{"alone": ctSemi(lone, astral), "partitioned": contested} {
+		spec := emit(g)
+		if partitioned := len(spec.Options.TokenSet) > 0; partitioned != (label == "partitioned") {
+			t.Fatalf("%s: token sets %v", label, spec.Options.TokenSet)
+		}
+		if d := ctDepths(t, spec); d[0] != 1 || d[1] != 1 {
+			t.Errorf("%s: depths %v, want [1 1]", label, d)
+		}
+	}
+}

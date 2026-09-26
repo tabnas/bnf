@@ -236,6 +236,51 @@ func patternCharRanges(pattern string) []charRange {
 	return comp
 }
 
+// codeUnitReach is a matcher's first-character coverage in the code
+// points the contest checks compare. Under `u` or `v` the canonical
+// matcher reads code points, and a lead surrogate it names is one
+// standing alone. Without either it reads UTF-16 code units and takes a
+// lead surrogate wherever it stands, the first half of an astral
+// character included, so it can start on every astral character that
+// surrogate begins. RE2 never meets a surrogate in UTF-8 text, but this
+// port widens the same coverage, so the three ports emit the same
+// grammar. A literal is matched in code units there too. Mirrors TS
+// codeUnitReach (tabnas/bnf#75 review).
+func codeUnitReach(r []charRange, flags string) []charRange {
+	if strings.ContainsAny(flags, "uv") {
+		return r
+	}
+	out := append([]charRange{}, r...)
+	for _, span := range r {
+		a, b := max(span.lo, 0xD800), min(span.hi, 0xDBFF)
+		if a <= b {
+			out = append(out, charRange{0x10000 + (a-0xD800)<<10, 0x10000 + (b-0xD800)<<10 + 0x3FF})
+		}
+	}
+	return out
+}
+
+// leadSurrogates is the part of sorted, merged ranges that names a lead
+// surrogate, U+D800 to U+DBFF, still sorted and merged.
+func leadSurrogates(r []charRange) []charRange {
+	var out []charRange
+	for _, span := range r {
+		if span.lo <= 0xDBFF && 0xD800 <= span.hi {
+			out = append(out, charRange{max(span.lo, 0xD800), min(span.hi, 0xDBFF)})
+		}
+	}
+	return out
+}
+
+// atomReadsCodePoints reports whether the canonical compiler compiles
+// an atom with `u`: an astral one always, and one naming a lead
+// surrogate when the classes it stands for read code points. RE2 has no
+// such flag, but the contest checks read coverage by it (codeUnitReach).
+// Mirrors TS classPattern.
+func atomReadsCodePoints(lo, hi rune, codePoints bool) bool {
+	return hi > 0xFFFF || codePoints && lo <= 0xDBFF && 0xD800 <= hi
+}
+
 // foldCaseRanges widens ranges to cover both cases of every ASCII
 // letter in them, for matchers carrying the `i` flag.
 //

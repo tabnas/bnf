@@ -224,3 +224,49 @@ fn an_escape_is_read_as_the_regex_crate_reads_it() {
         assert!(parses(&spec, "\x07!!;;", true), "{pattern}");
     }
 }
+
+// A head the canonical matcher reads in code units (no `u` or `v`) that
+// names a lead surrogate meets every astral character that surrogate
+// begins: there it takes U+D800 as the first half of U+10000. Compared as
+// code points the heads were disjoint and the decision stayed one token
+// deep. The crate never meets a surrogate, but this port decides alike,
+// so the three ports emit the same grammar (tabnas/bnf#75 review). The
+// crate spells no surrogate, so the head names the lead surrogates by
+// spanning them, and the TS lone-surrogate literal has no spelling here.
+#[test]
+fn a_head_read_in_code_units_naming_a_lead_surrogate_meets_an_astral_head() {
+    let emit =
+        |g: Grammar| emit_grammar_spec(&g, &ConvertOptions::tag("ct").start("doc")).expect("emit");
+    let spanning = r"[\x{D7FF}-\x{E000}]";
+    let astral = || rx(r"\x{10000}", "u");
+    for (label, b) in [
+        ("escape", astral()),
+        ("class", rx(r"[\x{10000}-\x{10FFFF}]", "u")),
+        ("astral literal", sens_term("\u{10000}")),
+    ] {
+        let spec = emit(semi(rx(spanning, ""), b));
+        assert_eq!(depths(&spec), [2, 2], "{label}");
+        assert!(parses(&spec, "\u{10000}!!;;", true), "{label}");
+    }
+    // Read in code points a lead surrogate is only ever one standing
+    // alone, and meets no astral character, whether the class keeps its
+    // own matcher or is laid over the partition, whose atoms read as the
+    // classes they stand for.
+    let alone = emit(semi(rx(spanning, "u"), astral()));
+    let mut contested = semi(rx(spanning, "u"), astral());
+    contested.productions[0]
+        .alts
+        .push(vec![rx(r"[\x{D000}-\x{E000}]", "u")]);
+    let contested = emit(contested);
+    let sets = |spec: &GrammarSpec| {
+        spec.options
+            .get("tokenSet")
+            .is_some_and(|s| s.as_object().is_some_and(|o| !o.is_empty()))
+    };
+    assert!(!sets(&alone), "alone");
+    assert!(sets(&contested), "partitioned");
+    for (label, spec) in [("alone", alone), ("partitioned", contested)] {
+        assert_eq!(depths(&spec), [1, 1], "{label}");
+        assert!(parses(&spec, "\u{10000}!!;;", false), "{label}");
+    }
+}

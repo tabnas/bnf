@@ -40,8 +40,8 @@ use crate::prose::{
     lift_literal_tokens, normalize_builtin_tokens, nullable_rules, resolve_prose_terminals,
 };
 use crate::ranges::{
-    char_ranges_overlap, class_analysis, class_pattern, fold_case_ranges, normalize_ranges,
-    pattern_char_ranges, CharRange,
+    char_ranges_overlap, class_analysis, class_pattern, code_unit_reach, fold_case_ranges,
+    normalize_ranges, pattern_char_ranges, CharRange,
 };
 use crate::spec::{AltSpec, GrammarSpec, RefAction, RuleSpec};
 
@@ -255,7 +255,7 @@ impl ContestCtx {
             let mut r: Option<Vec<CharRange>> = None;
             if let Some(Some(lit)) = self.fixed_tokens.get(tok) {
                 if let Some(c) = lit.chars().next() {
-                    r = Some(vec![(c as u32, c as u32)]);
+                    r = Some(code_unit_reach(&[(c as u32, c as u32)], ""));
                 }
             } else if let Some(re) = self.match_tokens.get(tok) {
                 // Strip the emitter's own `^` anchor (and grouping) so the
@@ -274,6 +274,7 @@ impl ContestCtx {
                         r = Some(fold_case_ranges(rr));
                     }
                 }
+                r = r.map(|rr| code_unit_reach(&rr, &re.flags));
             }
             r.map(|r| normalize_ranges(&r))
         };
@@ -1187,11 +1188,17 @@ fn emit_class_token(
     let name = alloc_token_name(&format!("rx_{pattern}"), used_names, None);
     tokens.regex_tokens.insert(key.to_string(), name.clone());
 
+    // Compiled whether or not the partition replaces it, so a pattern the
+    // engine refuses is refused whether or not another class overlaps it.
+    // Laid over the partition unchecked, `[z-a]` beside `[a-z]` became an
+    // empty set and the grammar was accepted (tabnas/bnf#75 review).
+    let own = eager(pattern, flags, &name)?;
     if !classes.contested.contains(key) {
-        match_tokens.insert(name.clone(), eager(pattern, flags, &name)?);
+        match_tokens.insert(name.clone(), own);
         return Ok(());
     }
 
+    let code_points = flags.contains(['u', 'v']);
     let mine = classes.coverage[key].clone();
     let mut members: Vec<String> = Vec::new();
     let atoms = classes.atoms.clone();
@@ -1203,14 +1210,14 @@ fn emit_class_token(
         let atom = match classes.atom_tokens.get(&span_key) {
             Some(atom) => atom.clone(),
             None => {
-                let (atom_pattern, astral) = class_pattern(span.0, span.1);
+                let (atom_pattern, unicode) = class_pattern(span.0, span.1, code_points);
                 // `rxa_`, not `rx_`: an atom is synthetic, and a name
                 // minted from `rx_` collides with the natural name of any
                 // class spelling the same span.
                 let atom = alloc_token_name(&format!("rxa_{atom_pattern}"), used_names, None);
                 match_tokens.insert(
                     atom.clone(),
-                    eager(&atom_pattern, if astral { "u" } else { "" }, &atom)?,
+                    eager(&atom_pattern, if unicode { "u" } else { "" }, &atom)?,
                 );
                 classes.atom_tokens.insert(span_key, atom.clone());
                 atom
@@ -1224,7 +1231,7 @@ fn emit_class_token(
     // underneath it. Keyed WITHOUT the leading `#`, which is how the
     // engine looks a set up.
     token_sets.insert(name.trim_start_matches('#').to_string(), members);
-    set_ranges.insert(name, mine);
+    set_ranges.insert(name, code_unit_reach(&mine, flags));
     Ok(())
 }
 

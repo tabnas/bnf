@@ -182,6 +182,41 @@ pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
     Some(out)
 }
 
+/// A matcher's first-character coverage in the code points the contest
+/// checks compare. Under `u` or `v` the canonical matcher reads code
+/// points, and a lead surrogate it names is one standing alone. Without
+/// either it reads UTF-16 code units and takes a lead surrogate wherever
+/// it stands, the first half of an astral character included, so it can
+/// start on every astral character that surrogate begins. The `regex`
+/// crate never meets a surrogate, but this port widens the same coverage,
+/// so the three ports emit the same grammar. A literal is matched in code
+/// units there too. Mirrors TS `codeUnitReach` (tabnas/bnf#75 review).
+pub fn code_unit_reach(r: &[CharRange], flags: &str) -> Vec<CharRange> {
+    let mut out = r.to_vec();
+    if flags.contains(['u', 'v']) {
+        return out;
+    }
+    for &(lo, hi) in r {
+        let (a, b) = (lo.max(0xD800), hi.min(0xDBFF));
+        if a <= b {
+            out.push((
+                0x10000 + ((a - 0xD800) << 10),
+                0x10000 + ((b - 0xD800) << 10) + 0x3FF,
+            ));
+        }
+    }
+    out
+}
+
+/// The part of sorted, merged ranges that names a lead surrogate, U+D800
+/// to U+DBFF, still sorted and merged.
+fn lead_surrogates(r: &[CharRange]) -> Vec<CharRange> {
+    r.iter()
+        .filter(|&&(lo, hi)| lo <= 0xDBFF && 0xD800 <= hi)
+        .map(|&(lo, hi)| (lo.max(0xD800), hi.min(0xDBFF)))
+        .collect()
+}
+
 /// Widen character ranges to cover both cases of every ASCII letter in
 /// them, for matchers carrying the `i` flag. ASCII only: both sides of
 /// the contest this feeds are ASCII in every notation this compiler
@@ -391,18 +426,24 @@ pub fn partition_ranges(coverages: &[Vec<CharRange>]) -> Vec<CharRange> {
 }
 
 /// A regex character class matching exactly one span, for the atom
-/// matchers. Returns the pattern and whether it needs the `u` flag
-/// (astral bounds).
-pub fn class_pattern(lo: u32, hi: u32) -> (String, bool) {
-    let astral = lo > 0xffff || hi > 0xffff;
+/// matchers. Returns the pattern and whether it is compiled with `u`: an
+/// astral span is, and so is a span naming a lead surrogate when the
+/// classes it stands for read code points (`code_points`), since without
+/// `u` the canonical matcher would take the first half of an astral
+/// character where they take only a lead surrogate standing alone. An
+/// atom compiled with `u` spells its bounds in braces, so its name says
+/// which reading it has. Mirrors TS `classPattern` (tabnas/bnf#75
+/// review).
+pub fn class_pattern(lo: u32, hi: u32, code_points: bool) -> (String, bool) {
+    let unicode = hi > 0xffff || (code_points && lo <= 0xDBFF && 0xD800 <= hi);
     let esc = |cp: u32| {
-        if astral {
+        if unicode {
             format!("\\u{{{:X}}}", cp)
         } else {
             format!("\\u{:04X}", cp)
         }
     };
-    (format!("[{}-{}]", esc(lo), esc(hi)), astral)
+    (format!("[{}-{}]", esc(lo), esc(hi)), unicode)
 }
 
 /// What every character class in the grammar covers, which of them
@@ -425,6 +466,9 @@ pub struct ClassAnalysis {
 
 pub fn class_analysis(terminals: &[Element]) -> ClassAnalysis {
     let mut coverage: IndexMap<String, Vec<CharRange>> = IndexMap::new();
+    // The classes the canonical matcher reads in UTF-16 code units: no
+    // `u` or `v`.
+    let mut code_units: IndexSet<String> = IndexSet::new();
     for el in terminals {
         let Kind::Regex { pattern, flags } = &el.kind else {
             continue;
@@ -438,9 +482,32 @@ pub fn class_analysis(terminals: &[Element]) -> ClassAnalysis {
         // one-character atoms, so anything that could match more would
         // lose the rest.
         if let Some(r) = single_code_point_ranges(pattern, flags) {
+            if !flags.contains(['u', 'v']) {
+                code_units.insert(key.clone());
+            }
             coverage.insert(key, normalize_ranges(&r));
         }
     }
+
+    // A lead surrogate means one thing to a class read in code points, a
+    // lead surrogate standing alone, and another to a class read in code
+    // units, which also takes it as the first half of every astral
+    // character it begins. No one atom can be both, so a class read in
+    // code units that names a lead surrogate some class read in code
+    // points names as well is left out, and keeps its own matcher. The
+    // `regex` crate reads code points whatever the flags say, but this
+    // port leaves the same classes out, so the three ports emit the same
+    // grammar. Mirrors TS `classAnalysis` (tabnas/bnf#75 review).
+    let point_leads = normalize_ranges(
+        &coverage
+            .iter()
+            .filter(|(key, _)| !code_units.contains(*key))
+            .flat_map(|(_, r)| lead_surrogates(r))
+            .collect::<Vec<_>>(),
+    );
+    coverage.retain(|key, r| {
+        !(code_units.contains(key) && char_ranges_overlap(&lead_surrogates(r), &point_leads))
+    });
 
     let mut contested = IndexSet::new();
     for (key, mine) in &coverage {
@@ -570,12 +637,26 @@ mod tests {
     #[test]
     fn class_pattern_spells_the_span_as_the_canonical_compiler_does() {
         assert_eq!(
-            class_pattern(b'0' as u32, b'9' as u32),
+            class_pattern(b'0' as u32, b'9' as u32, false),
             ("[\\u0030-\\u0039]".to_string(), false)
         );
         assert_eq!(
-            class_pattern(0x1F600, 0x1F64F),
+            class_pattern(0x1F600, 0x1F64F, false),
             (r"[\u{1F600}-\u{1F64F}]".to_string(), true)
+        );
+        // A span naming a lead surrogate is compiled in the reading of the
+        // classes it stands for; a trail surrogate reads alike either way.
+        assert_eq!(
+            class_pattern(0xD000, 0xD800, true),
+            (r"[\u{D000}-\u{D800}]".to_string(), true)
+        );
+        assert_eq!(
+            class_pattern(0xD000, 0xD800, false),
+            ("[\\uD000-\\uD800]".to_string(), false)
+        );
+        assert_eq!(
+            class_pattern(0xDC00, 0xDFFF, true),
+            ("[\\uDC00-\\uDFFF]".to_string(), false)
         );
     }
 

@@ -28,8 +28,9 @@ Registered by `the_word_keyword_guard_is_a_word_boundary`.
 
 ### Regular expression terminals are refused at emit time
 
-Both compilers construct the matcher when the token is allocated, so an
-invalid pattern fails the emit in each; the dialects differ. A pattern
+Both compilers construct the matcher when the token is allocated, a
+class the overlap partition replaces with atoms included, so an invalid
+pattern fails the emit in each; the dialects differ. A pattern
 JavaScript accepts and the `regex` crate does not (lookaround,
 backreferences) is refused by the Rust port with the token named, where
 TypeScript emits it and the Rust engine refuses it at install.

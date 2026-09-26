@@ -1610,12 +1610,14 @@ function firstCharRangesOfElement(
         const c = String.fromCodePoint(cp)
         const lo = c.toLowerCase().codePointAt(0) as number
         const up = c.toUpperCase().codePointAt(0) as number
-        return lo === up ? [[cp, cp]] : [[lo, lo], [up, up]]
+        return codeUnitReach(lo === up ? [[cp, cp]] : [[lo, lo], [up, up]], '')
       }
-      return [[cp, cp]]
+      return codeUnitReach([[cp, cp]], '')
     }
-    case 'regex':
-      return patternCharRanges(el.pattern, el.flags)
+    case 'regex': {
+      const r = patternCharRanges(el.pattern, el.flags)
+      return null == r ? null : codeUnitReach(r, el.flags)
+    }
     case 'ref': {
       if (visited.has(el.name)) return null
       const target = grammar.productions.find((p) => p.name === el.name)
@@ -3390,7 +3392,7 @@ function emitGrammarSpec(
     const lit = fixedTokens[tok]
     if ('string' === typeof lit && 0 < lit.length) {
       const cp = lit.codePointAt(0) as number
-      r = [[cp, cp]]
+      r = codeUnitReach([[cp, cp]], '')
     } else {
       const re = matchTokens[tok]
       if (null != re) {
@@ -3410,6 +3412,7 @@ function emitGrammarSpec(
         if (null != r && re.flags.includes('i')) {
           r = foldCaseRanges(r)
         }
+        if (null != r) r = codeUnitReach(r, re.flags)
       }
     }
     rangeCache.set(tok, null == r ? null : normalizeRanges(r))
@@ -5849,6 +5852,43 @@ function patternCharRanges(
 }
 
 
+// A matcher's first-character coverage in the code points the contest
+// checks compare. Under `u` or `v` a matcher reads code points, and a
+// lead surrogate it names is one standing alone. Without either it reads
+// UTF-16 code units and takes a lead surrogate wherever it stands, the
+// first half of an astral character included, so it can start on every
+// astral character that surrogate begins. Read as the bare code unit,
+// `\uD800` and `\u{10000}` were disjoint heads: both took U+10000, and a
+// one-token dispatch committed to the first (tabnas/bnf#75 review). A
+// literal is matched in code units too.
+function codeUnitReach(
+  r: Array<[number, number]>,
+  flags: string,
+): Array<[number, number]> {
+  if (/[uv]/.test(flags)) return r
+  const out: Array<[number, number]> = [...r]
+  for (const [lo, hi] of r) {
+    const a = Math.max(lo, 0xD800)
+    const b = Math.min(hi, 0xDBFF)
+    if (a <= b) {
+      out.push([0x10000 + ((a - 0xD800) << 10), 0x10000 + ((b - 0xD800) << 10) + 0x3FF])
+    }
+  }
+  return out
+}
+
+
+// The lead surrogates, U+D800 to U+DBFF, in sorted and merged ranges,
+// which stay so.
+function leadSurrogates(
+  r: Array<[number, number]>,
+): Array<[number, number]> {
+  return r
+    .filter(([lo, hi]) => lo <= 0xDBFF && 0xD800 <= hi)
+    .map(([lo, hi]) => [Math.max(lo, 0xD800), Math.min(hi, 0xDBFF)])
+}
+
+
 // Widen character ranges to cover both cases of every ASCII letter in
 // them, for matchers carrying the `i` flag. ASCII only: the ranges feed
 // contest detection between a keyword and a character class, and both
@@ -5899,6 +5939,8 @@ type ClassAnalysis = {
 
 function classAnalysis(terminals: Element[]): ClassAnalysis {
   const coverage = new Map<string, Array<[number, number]>>()
+  // The classes read in UTF-16 code units: no `u` or `v`.
+  const codeUnits = new Set<string>()
   for (const el of terminals) {
     if (el.kind !== 'regex') continue
     const key = regexKey(el)
@@ -5909,7 +5951,26 @@ function classAnalysis(terminals: Element[]): ClassAnalysis {
     // out contributes no coverage, and so neither contests nor is
     // contested — it keeps the single token it has always had.
     const r = singleCodePointRanges(el.pattern, el.flags)
-    if (null != r) coverage.set(key, normalizeRanges(r))
+    if (null != r) {
+      coverage.set(key, normalizeRanges(r))
+      if (!/[uv]/.test(el.flags)) codeUnits.add(key)
+    }
+  }
+
+  // A lead surrogate means one thing to a class read in code points, a
+  // lead surrogate standing alone, and another to a class read in code
+  // units, which also takes it as the first half of every astral
+  // character it begins. No one atom can be both, so a class read in code
+  // units that names a lead surrogate some class read in code points
+  // names as well is left out, and keeps its own matcher. Where only one
+  // reading names a lead surrogate, its atoms are compiled in that
+  // reading (classPattern).
+  const pointLeads = normalizeRanges([...coverage]
+    .filter(([key]) => !codeUnits.has(key))
+    .flatMap(([, r]) => leadSurrogates(r)))
+  for (const key of codeUnits) {
+    const leads = leadSurrogates(coverage.get(key) as Array<[number, number]>)
+    if (charRangesOverlap(leads, pointLeads)) coverage.delete(key)
   }
 
   const contested = new Set<string>()
@@ -5977,11 +6038,18 @@ function emitClassToken(
   const name = allocTokenName('rx_' + el.pattern, usedNames)
   regexTokens.set(key, name)
 
+  // Compiled whether or not the partition replaces it, so a pattern the
+  // engine refuses is refused whether or not another class overlaps it.
+  // Laid over the partition unchecked, `[z-a]` beside `[a-z]` became an
+  // empty set and the grammar was accepted, where alone it is `Range out
+  // of order` (tabnas/bnf#75 review).
+  const own = eager(el.pattern, el.flags)
   if (!classes.contested.has(key)) {
-    matchTokens[name] = eager(el.pattern, el.flags)
+    matchTokens[name] = own
     return
   }
 
+  const codePoints = /[uv]/.test(el.flags)
   const mine = classes.coverage.get(key) as Array<[number, number]>
   const members: string[] = []
   for (const span of classes.atoms) {
@@ -5989,7 +6057,7 @@ function emitClassToken(
     const spanKey = span[0] + '-' + span[1]
     let atom = classes.atomTokens.get(spanKey)
     if (null == atom) {
-      const { pattern, astral } = classPattern(span[0], span[1])
+      const { pattern, unicode } = classPattern(span[0], span[1], codePoints)
       // `rxa_`, not `rx_`: an atom is synthetic, and a name minted from
       // `rx_` collides with the natural name of any class spelling the
       // same span. It did — `%x31-39`'s atom took `#RX___U0031__U0039`
@@ -5997,7 +6065,7 @@ function emitClassToken(
       // and every name derived from it moved, which is the instability
       // the one-member set above exists to prevent.
       atom = allocTokenName('rxa_' + pattern, usedNames)
-      matchTokens[atom] = eager(pattern, astral ? 'u' : '')
+      matchTokens[atom] = eager(pattern, unicode ? 'u' : '')
       classes.atomTokens.set(spanKey, atom)
     }
     members.push(atom)
@@ -6019,7 +6087,7 @@ function emitClassToken(
   // the name to nothing and left every alternate keyed on the class
   // unmatchable.
   tokenSets[name.replace(/^#/, '')] = members
-  setRanges.set(name, mine)
+  setRanges.set(name, codeUnitReach(mine, el.flags))
 }
 
 
@@ -6164,13 +6232,27 @@ function partitionRanges(
 // A regex character class matching exactly one span. Used for the atom
 // matchers, whose spans come from classes the grammar already wrote, so
 // the only escaping that matters is making the bounds unambiguous.
-function classPattern(lo: number, hi: number): { pattern: string; astral: boolean } {
-  const astral = 0xffff < lo || 0xffff < hi
+//
+// `unicode` says the atom is compiled with `u`. An astral span must be.
+// So must a span naming a lead surrogate when the classes it stands for
+// read code points (`codePoints`): without `u` it would take the first
+// half of an astral character, where they take only a lead surrogate
+// standing alone, and `[\uD800]/u` laid over the partition took U+10000,
+// which it refuses alone (tabnas/bnf#75 review). Every class an atom
+// stands for reads a lead surrogate the same way (classAnalysis). An atom
+// compiled with `u` spells its bounds in braces, as an astral one always
+// has, so its name says which reading it has.
+function classPattern(
+  lo: number,
+  hi: number,
+  codePoints: boolean,
+): { pattern: string; unicode: boolean } {
+  const unicode = 0xffff < hi || (codePoints && lo <= 0xDBFF && 0xD800 <= hi)
   const esc = (cp: number): string =>
-    astral
+    unicode
       ? '\\u{' + cp.toString(16).toUpperCase() + '}'
       : '\\u' + cp.toString(16).toUpperCase().padStart(4, '0')
-  return { pattern: '[' + esc(lo) + '-' + esc(hi) + ']', astral }
+  return { pattern: '[' + esc(lo) + '-' + esc(hi) + ']', unicode }
 }
 
 

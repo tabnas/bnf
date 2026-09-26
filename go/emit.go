@@ -382,6 +382,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// and the character coverage of each.
 	tokenSets := map[string][]string{}
 	setRanges := map[string][]charRange{}
+	// The match tokens compiled with `u` or `v`, for the contest checks.
+	codePointTokens := map[string]bool{}
 
 	allocRegex := func(el *Element) {
 		key := regexKey(el)
@@ -396,7 +398,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		// alt slot). Marking range regexes eager makes them fire at any
 		// lookahead position — equivalent coverage; the parser still
 		// rejects a token it doesn't expect at the current slot.
-		emit := func(n, pattern, flags string) {
+		compile := func(n, pattern, flags string) *regexp.Regexp {
 			re, err := goRegex(pattern, flags)
 			if err != nil {
 				// The grammar's error, not this compiler's: an IR pattern
@@ -410,15 +412,29 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 					Cause: err,
 				})
 			}
-			matchTokens[n] = re
+			return re
+		}
+		emit := func(n, pattern, flags string) {
+			matchTokens[n] = compile(n, pattern, flags)
 			matchEager[n] = true
 			matchOrder = append(matchOrder, n)
+			if strings.ContainsAny(flags, "uv") {
+				codePointTokens[n] = true
+			}
 		}
 
 		if classes == nil || !classes.contested[key] {
 			emit(name, el.Pattern, el.Flags)
 			return
 		}
+		// Compiled whether or not the partition replaces it, so a pattern
+		// the engine refuses is refused whether or not another class
+		// overlaps it. Laid over the partition unchecked, `[z-a]` beside
+		// `[a-z]` became an empty set and the grammar was accepted, where
+		// alone it is an invalid character class range (tabnas/bnf#75
+		// review).
+		compile(name, el.Pattern, el.Flags)
+		codePoints := strings.ContainsAny(el.Flags, "uv")
 
 		// Contested: lay the class over the shared partition. Each atom
 		// it covers gets its own match token (minted here if this is the
@@ -454,7 +470,14 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				// is the instability the one-member set below exists to
 				// prevent.
 				atom = allocTokenName("rxa_"+pattern, usedNames, "")
-				emit(atom, pattern, "")
+				// The flag the canonical compiler compiles the atom with,
+				// which the contest checks read (codeUnitReach); RE2
+				// ignores it.
+				flags := ""
+				if atomReadsCodePoints(span.lo, span.hi, codePoints) {
+					flags = "u"
+				}
+				emit(atom, pattern, flags)
 				classes.atomTokens[spanKey] = atom
 			}
 			members = append(members, atom)
@@ -477,7 +500,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		// which resolved the name to nothing and left every alternate
 		// keyed on the class unmatchable.
 		tokenSets[strings.TrimPrefix(name, "#")] = members
-		setRanges[name] = mine
+		setRanges[name] = codeUnitReach(mine, el.Flags)
 	}
 
 	// Gather every terminal first. Probe-helper productions store their vocab
@@ -531,6 +554,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		knownRules[p.Name] = true
 	}
 	cc := newContestCtx(fixedTokens, matchTokens, setRanges)
+	cc.codePoints = codePointTokens
 	cc.tokenSets = tokenSets
 	cc.wordKeywords = opts.WordKeywords
 	for key, name := range literals {

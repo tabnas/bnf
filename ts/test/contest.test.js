@@ -193,6 +193,40 @@ describe('contest', () => {
     assert.deepEqual(depthsOf(exact), [1, 1])
   })
 
+  it('a head read in code units that names a lead surrogate meets an astral head', () => {
+    // Without `u` or `v` a matcher reads UTF-16 code units, and takes
+    // U+D800 as the first half of U+10000 as well as standing alone, so
+    // `\uD800` and `\u{10000}/u` both take U+10000. Compared as code
+    // points they were disjoint, the decision stayed one token deep, and
+    // the first branch took the first half of U+10000 and refused input
+    // the second accepts (tabnas/bnf#75 review). A literal is matched in
+    // code units too.
+    const astral = rx('\\u{10000}', 'u')
+    for (const [label, a, b] of [
+      ['escape', rx('\\uD800'), astral],
+      ['class', rx('[\\uD800-\\uDBFF]'), rx('[\\u{10000}-\\u{10FFFF}]', 'u')],
+      ['literal', lit('\uD800'), astral],
+      ['astral literal', rx('\\uD800'), lit('\u{10000}')],
+    ]) {
+      const spec = emitGrammarSpec(semi(a, b), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], label)
+      assert.ok(parses(spec, '\u{10000}!!;;', { lex: { relex: true } }), label)
+    }
+    // Under `u` a lead surrogate is only ever one standing alone, and
+    // meets no astral character, whether the class keeps its own matcher
+    // or is laid over the partition, whose atoms read as the classes they
+    // stand for.
+    const lone = rx('[\\uD800]', 'u')
+    const contested = semi(lone, astral)
+    contested.productions[0].alts.push([rx('[\\uD800-\\uDBFF]', 'u')])
+    for (const [label, g] of [['alone', semi(lone, astral)], ['partitioned', contested]]) {
+      const spec = emitGrammarSpec(g, { tag: 'ct', start: 'doc' })
+      assert.equal(0 < Object.keys(spec.options.tokenSet ?? {}).length, 'partitioned' === label, label)
+      assert.deepEqual(depthsOf(spec), [1, 1], label)
+      assert.ok(parses(spec, '\u{10000}!!;;'), label)
+    }
+  })
+
   it('a repetition ending on a surrogate escape keeps its exit guard', () => {
     // doc = *[\u0041-\ud800] "A" ";" -- ABNF `*%x41-D800 %x41 %x3B`. The
     // class covers the `A` the tail needs, so the loop carries a two-token

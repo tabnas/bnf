@@ -134,32 +134,32 @@ fn flags_are_emitted_in_the_canonical_order() {
 }
 
 // Where a class overlaps another it is replaced by a token SET over
-// one-character atoms, and its own flags never reach a matcher — so the
-// canonical compiler never constructs that `RegExp` and never sees the
-// bad flag. Checking the flags anywhere but at the matcher would refuse
-// a grammar TypeScript emits. (`ii` is still refused here, because case
-// folding takes the class out of the contest and back to a matcher of
-// its own.)
+// one-character atoms, but its own matcher is built first all the same,
+// as the canonical compiler now builds it, so a flag string that matcher
+// refuses is refused whether or not another class overlaps the class.
+// Before, a contested class's own flags never reached a matcher and a
+// bad one went unchecked in both compilers, as a reversed range did
+// (tabnas/bnf#75 review).
 #[test]
-fn a_flag_that_never_reaches_a_matcher_is_not_checked() {
+fn a_contested_class_has_its_flags_checked_as_a_lone_one_does() {
     let contested = |flags: &str| {
         emit(vec![prod(
             "top",
             vec![vec![rx("[a-z]", flags)], vec![rx("[a-m]", "")]],
         )])
     };
-    let tokens =
-        contested("q").expect("a contested class drops its own matcher, bad flags and all");
+    for flags in ["q", "ii", "uv"] {
+        let err = contested(flags).expect_err(&format!("flags {flags:?} should be refused"));
+        assert!(
+            err.to_string().contains("invalid regular expression flags"),
+            "flags {flags:?}: unexpected refusal: {err}"
+        );
+    }
+    let tokens = contested("").expect("a contested class with good flags emits");
     assert!(
         tokens.iter().all(|(name, _)| name.starts_with("#RXA")),
         "expected only partition atoms, got {tokens:?}"
     );
-    assert_eq!(
-        contested("q").unwrap(),
-        contested("").unwrap(),
-        "the unused flag should not change the partition"
-    );
-    contested("ii").expect_err("case folding keeps the class, so its flags are checked");
 }
 
 // The literal path builds a matcher too (case-insensitive literals, and

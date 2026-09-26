@@ -110,6 +110,27 @@ describe('overlapping-class partition: what it may touch', () => {
     assert.ok(!parses(unicode, '\u{1F600};'))
   })
 
+  it('refuses a pattern whether or not another class overlaps it', () => {
+    // Partitioning replaces a class's matcher with atoms, and the class's
+    // own matcher went unbuilt: `[z-a]` beside `[a-z]` became an empty set
+    // and the grammar was accepted, where alone it is `Range out of
+    // order`. A flag string the constructor refuses went the same way
+    // (tabnas/bnf#75 review).
+    for (const [pattern, flags] of [['[z-a]', ''], ['[\\u-a]', ''], ['[a-z]', 'q']]) {
+      const refusal = (alts) => {
+        try {
+          emit([{ name: 'top', alts }])
+        } catch (e) {
+          return e.message
+        }
+        return null
+      }
+      const alone = refusal([[rx(pattern, flags)]])
+      assert.ok(null != alone, pattern + ' alone')
+      assert.equal(refusal([[rx(pattern, flags)], [rx('[a-z]')]]), alone, pattern)
+    }
+  })
+
   it('still partitions two plain single-code-point classes', () => {
     // The guard above must not have disarmed the fix itself.
     const spec = emit([
@@ -265,10 +286,52 @@ describe('overlapping-class partition: the escapes it reads', () => {
     assert.equal(alternates, 92)
     assert.equal(Object.keys(spec.options.tokenSet).length, 6)
     assert.equal(Object.keys(spec.options.match.token).length, 16)
+    // The negated class reads code points, so its surrogate atom does too:
+    // compiled without `u`, it took the first half of U+1F600, which the
+    // class takes whole (tabnas/bnf#75 review).
     assert.ok(Object.values(spec.options.match.token).map(String)
-      .includes('/^[\\uD800-\\uDFFF]/'), 'the surrogate atom is minted')
-    for (const src of ['<a>hi</a>', '<a></a>', '<a><b>c</b></a>', 'hi', '<a>\u{1F600}</a>']) {
+      .includes('/^[\\u{D800}-\\u{DFFF}]/u'), 'the surrogate atom is minted')
+    for (const src of ['<a>hi</a>', '<a></a>', '<a><b>c</b></a>', 'hi', '<a>\u{1F600}</a>', '<a>\uD800</a>']) {
       assert.equal(new Tabnas().grammar(spec).parse(src).rule, 'document', src)
     }
+  })
+
+  it('compiles an atom naming a lead surrogate as its classes read it', () => {
+    // Under `u` a lead surrogate is one standing alone: `[\uD800]/u` does
+    // not take U+10000, whose first half it is. Laid over the partition
+    // beside `[\uD800-\uDBFF]/u`, its atom was compiled without `u` and
+    // took that first half, and `doc = [\uD800] [\uDC00-\uDFFF] / ...`
+    // accepted U+10000, which it refuses with the class alone (tabnas/bnf#75
+    // review).
+    const lone = rx('[\\uD800]', 'u')
+    const trail = rx('[\\uDC00-\\uDFFF]', 'u')
+    const alone = emit([{ name: 'doc', alts: [[lone, trail]] }], { tag: 'cp', start: 'doc' })
+    const spec = emit([
+      { name: 'doc', alts: [[lone, trail], [rx('[\\uD800-\\uDBFF]', 'u'), lit('!')]] },
+    ], { tag: 'cp', start: 'doc' })
+    assert.deepEqual(matchers(spec), {
+      '#RXA___U_D800___U_D800': '/^[\\u{D800}-\\u{D800}]/u',
+      '#RX___UDC00__UDFFF': '/^[\\uDC00-\\uDFFF]/u',
+      '#RXA___U_D801___U_DBFF': '/^[\\u{D801}-\\u{DBFF}]/u',
+    })
+    assert.ok(!parses(alone, '\u{10000}'))
+    assert.ok(!parses(spec, '\u{10000}'))
+    assert.ok(parses(spec, '\uD801!'))
+  })
+
+  it('leaves out a class read in code units naming a lead surrogate a code-point class names', () => {
+    // `[A-\uD800]` without `u` takes U+D800 as the first half of U+10000
+    // too; `[^a]/u` takes it only standing alone. No one atom reads it
+    // both ways, so the class read in code units keeps its own matcher
+    // and the rest are laid over the partition without it.
+    const spec = emit([{ name: 'top', alts: [
+      [rx('[\\u0041-\\ud800]')], [rx('[^a]', 'u')], [rx('[\\u0041-\\u005a]')],
+    ] }])
+    assert.deepEqual(Object.keys(spec.options.tokenSet).sort(), ['RX___A', 'RX___U0041__U005A'])
+    assert.equal(matchers(spec)['#RX___U0041__UD800'], '/^[\\u0041-\\ud800]/')
+    // A class read in code units that stops short of the lead surrogates
+    // reads the same either way, and stays in.
+    const short = emit([{ name: 'top', alts: [[rx('[\\u0041-\\ud7ff]')], [rx('[^a]', 'u')]] }])
+    assert.deepEqual(Object.keys(short.options.tokenSet).sort(), ['RX___A', 'RX___U0041__UD7FF'])
   })
 })

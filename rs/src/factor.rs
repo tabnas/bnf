@@ -23,7 +23,7 @@ use crate::ir::{
     diag_name, is_effectively_case_sensitive, origin_of, term_key_of, Element, EmitError, Grammar,
     Kind, Production, Sequence,
 };
-use crate::ranges::{char_ranges_overlap, pattern_char_ranges, CharRange};
+use crate::ranges::{char_ranges_overlap, code_unit_reach, pattern_char_ranges, CharRange};
 
 /// How many concrete tokens the multi-alt dispatcher fans each
 /// alternative's prefix out to. Left factoring uses the same bound to
@@ -185,15 +185,20 @@ fn first_char_ranges_of_element(
             if !is_effectively_case_sensitive(literal, *case_sensitive) {
                 let lo = c.to_lowercase().next().unwrap_or(c) as u32;
                 let up = c.to_uppercase().next().unwrap_or(c) as u32;
-                return Some(if lo == up {
-                    vec![(cp, cp)]
-                } else {
-                    vec![(lo, lo), (up, up)]
-                });
+                return Some(code_unit_reach(
+                    &if lo == up {
+                        vec![(cp, cp)]
+                    } else {
+                        vec![(lo, lo), (up, up)]
+                    },
+                    "",
+                ));
             }
-            Some(vec![(cp, cp)])
+            Some(code_unit_reach(&[(cp, cp)], ""))
         }
-        Kind::Regex { pattern, .. } => pattern_char_ranges(pattern),
+        Kind::Regex { pattern, flags } => {
+            pattern_char_ranges(pattern).map(|r| code_unit_reach(&r, flags))
+        }
         Kind::Ref { name, .. } => {
             if visited.contains(name) {
                 return None;
