@@ -705,18 +705,75 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 		}
 	}
 
+	// The depth scan below compares every contested path with every
+	// rival's, position by position, and so asks contest about the same
+	// few pairs of tokens over and over: millions of times for RFC 4291's
+	// IPv6address, each answered from headsContest's cache under a key
+	// built afresh. That took ex_abnf's ipv6.abnf ten times longer to
+	// compile than 0.1.19 did, and the Rust port's debug build past the
+	// 60 s budget abnf's conformance sweep gives one grammar
+	// (tabnas/abnf#95). So the tokens are numbered here, once, and each
+	// ordered pair is asked once and its answer kept in a table; the
+	// answers, and so the output, are the ones contest gives. A decision
+	// too wide for the table asks contest directly, as before. Mirrors TS
+	// dispatchPrefixes.
+	ids := map[string]int{}
+	var names []string
+	intern := func(tokens []string) []int {
+		out := make([]int, len(tokens))
+		for k, t := range tokens {
+			id, ok := ids[t]
+			if !ok {
+				id = len(names)
+				ids[t] = id
+				names = append(names, t)
+			}
+			out[k] = id
+		}
+		return out
+	}
+	deepIDs := make([][][]int, n)
+	for j := range deep {
+		for _, p := range deep[j] {
+			deepIDs[j] = append(deepIDs[j], intern(p.tokens))
+		}
+	}
+	exitIDs := make([][]int, len(exitPaths))
+	for k, e := range exitPaths {
+		exitIDs[k] = intern(e)
+	}
+	width := len(names)
+	// 0 not yet asked, 1 no, 2 yes.
+	var answers []uint8
+	if int64(width)*int64(width) <= memoPairs {
+		answers = make([]uint8, width*width)
+	}
+	meets := func(a, b int) bool {
+		if answers == nil {
+			return contest(names[a], names[b])
+		}
+		slot := a*width + b
+		if answers[slot] == 0 {
+			answers[slot] = 1
+			if contest(names[a], names[b]) {
+				answers[slot] = 2
+			}
+		}
+		return answers[slot] == 2
+	}
+
 	// The depth at which p stops colliding with every rival: the position
 	// after the first one where they differ, over all rivals; or the whole
 	// path when some rival never differs within what both have.
-	depthOf := func(p prefixPath, i int) int {
+	depthOf := func(p []int, i int) int {
 		d := 1
-		against := func(q []string) bool {
-			m := len(p.tokens)
+		against := func(q []int) bool {
+			m := len(p)
 			if len(q) < m {
 				m = len(q)
 			}
 			k := 0
-			for k < m && contest(p.tokens[k], q[k]) {
+			for k < m && meets(p[k], q[k]) {
 				k++
 			}
 			if k == m {
@@ -731,15 +788,15 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 			if j == i {
 				continue
 			}
-			for _, q := range deep[j] {
-				if !against(q.tokens) {
-					return len(p.tokens)
+			for _, q := range deepIDs[j] {
+				if !against(q) {
+					return len(p)
 				}
 			}
 		}
-		for _, e := range exitPaths {
+		for _, e := range exitIDs {
 			if !against(e) {
-				return len(p.tokens)
+				return len(p)
 			}
 		}
 		return d
@@ -762,11 +819,11 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 				push([]string{h})
 				continue
 			}
-			for _, p := range deep[i] {
+			for at, p := range deep[i] {
 				if p.tokens[0] != h {
 					continue
 				}
-				push(p.tokens[:depthOf(p, i)])
+				push(p.tokens[:depthOf(deepIDs[i][at], i)])
 			}
 		}
 		out[i] = dispatchPrefixSet{prefixes: prefixes, nullable: nullable[i]}
@@ -946,3 +1003,9 @@ type nullableImpl struct {
 	fields   map[string]any
 	mark     string
 }
+
+// memoPairs is the most token pairs one decision's contest table in
+// dispatchPrefixes holds, a byte each: four million, four megabytes. A
+// wider decision asks contest for every pair it meets instead, as it did
+// before the table. Mirrors TS MEMO_PAIRS.
+const memoPairs = 1 << 22
