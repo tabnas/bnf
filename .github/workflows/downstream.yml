@@ -82,9 +82,9 @@ jobs:
       # installs it: every dependency from the registry. The script then
       # swaps ONLY @tabnas/bnf for this tree's `npm pack` output, and points
       # each Go module at go/ through a workspace file in a temp dir. Each
-      # install runs through scripts/heartbeat.sh: npm can be quiet for
-      # longer than 30 s on a cold runner, and a quiet step reads as a hung
-      # one.
+      # clone and install runs through scripts/heartbeat.sh: either can be
+      # quiet for longer than 30 s on a slow runner, and a quiet step reads
+      # as a hung one.
       - name: Clone and install the front-ends
         run: |
           set -e
@@ -92,7 +92,8 @@ jobs:
           for p in abnf ebnf gbnf; do
             n=$((n + 1))
             echo "==> front-end $n of 3: $p"
-            git clone --depth 1 "https://github.com/tabnas/$p.git" "$p"
+            bnf/scripts/heartbeat.sh "clone $p" \
+              git clone --depth 1 "https://github.com/tabnas/$p.git" "$p"
             bnf/scripts/heartbeat.sh "npm i ($p)" \
               bash -c 'cd "$1/ts" && npm i --no-audit --no-fund' _ "$p"
           done
@@ -143,14 +144,16 @@ jobs:
       # path, each at its default branch as the front-end's own rust.yml
       # clones them: parser and support for abnf and ebnf, parser and abnf
       # for gbnf. This checkout is the ../bnf that every one of them names.
-      # The installs run through scripts/heartbeat.sh, as in the job above.
+      # The clones and installs run through scripts/heartbeat.sh, as in the
+      # job above.
       - name: Clone the front-end and its sibling crates
         run: |
           set -e
           for p in "$PEER" parser support abnf; do
             if [ ! -d "$p" ]; then
               echo "==> clone $p"
-              git clone --depth 1 "https://github.com/tabnas/$p.git" "$p"
+              bnf/scripts/heartbeat.sh "clone $p" \
+                git clone --depth 1 "https://github.com/tabnas/$p.git" "$p"
             fi
           done
           bnf/scripts/heartbeat.sh "npm i ($PEER)" \

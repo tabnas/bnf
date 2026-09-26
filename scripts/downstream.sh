@@ -64,7 +64,9 @@
 #
 # A sibling that is not checked out FAILS the run rather than being
 # skipped: a gate that passes because it found nothing to run is worse
-# than no gate. So does a Rust half with no cargo to run it.
+# than no gate. So does a requested half that a named sibling does not
+# have (no go/, or no rs/Cargo.toml and ci/rust/run.sh), and a Rust half
+# with no cargo to run it.
 #
 # What each sibling is sitting on is printed, and a checkout behind its
 # own tracking ref is called out. Grading a feature branch is legitimate,
@@ -137,6 +139,21 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
+# A requested half that a sibling lacks would otherwise be skipped, and
+# the run would still report that half green. Refuse it up front instead.
+absent=()
+for p in "${PEERS[@]}"; do
+  if wants go && [ ! -d "$ROOT/../$p/go" ]; then absent+=("$p (go)"); fi
+  if wants rs && { [ ! -f "$ROOT/../$p/rs/Cargo.toml" ] || [ ! -f "$ROOT/../$p/ci/rust/run.sh" ]; }; then
+    absent+=("$p (rs)")
+  fi
+done
+if [ ${#absent[@]} -gt 0 ]; then
+  echo "downstream: nothing to run for ${absent[*]}" >&2
+  echo "downstream: name the siblings that have it, or leave it out of RUNTIMES" >&2
+  exit 1
+fi
+
 if wants rs; then
   if ! command -v cargo >/dev/null 2>&1; then
     echo "downstream: the Rust half needs cargo, and there is none on PATH" >&2
@@ -163,8 +180,8 @@ fi
 total=0
 for p in "${PEERS[@]}"; do
   if wants ts || wants rs; then total=$((total + 1)); fi
-  if wants go && [ -d "$ROOT/../$p/go" ]; then total=$((total + 1)); fi
-  if wants rs && [ -f "$ROOT/../$p/rs/Cargo.toml" ]; then total=$((total + 1)); fi
+  if wants go; then total=$((total + 1)); fi
+  if wants rs; then total=$((total + 1)); fi
 done
 if [ "$total" = 0 ]; then
   echo "downstream: nothing to run for ${PEERS[*]} in RUNTIMES=\"$RUNTIMES\"" >&2
@@ -223,21 +240,16 @@ for p in "${PEERS[@]}"; do
       || failed+=("$p (ts build)")
   fi
 
-  if wants go && [ -d "$peer/go" ]; then
+  if wants go; then
     header "$p (go)$at"; at=""
     printf 'go 1.24.7\n\nuse (\n\t%s/go\n\t%s/go\n)\n' "$ROOT" "$peer" > "$WORK/go.work"
     "$HEARTBEAT" "$p (go)" bash -c 'cd "$1/go" && GOWORK="$2" go test ./...' _ "$peer" "$WORK/go.work" \
       || failed+=("$p (go)")
   fi
 
-  if wants rs && [ -f "$peer/rs/Cargo.toml" ]; then
+  if wants rs; then
     header "$p (rs)$at"; at=""
-    if [ -f "$peer/ci/rust/run.sh" ]; then
-      "$HEARTBEAT" "$p (rs)" bash "$peer/ci/rust/run.sh" || failed+=("$p (rs)")
-    else
-      echo "downstream: $p has a crate but no ci/rust/run.sh to grade it with" >&2
-      failed+=("$p (rs)")
-    fi
+    "$HEARTBEAT" "$p (rs)" bash "$peer/ci/rust/run.sh" || failed+=("$p (rs)")
   fi
 done
 

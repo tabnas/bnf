@@ -238,7 +238,8 @@ order of authority:
    conformance sweep that budgets each compile at 60 s.
 
    A sibling that is not checked out fails the run rather than being
-   skipped. Narrow it deliberately instead:
+   skipped, and so does a requested half that a named sibling does not
+   have. Narrow it deliberately instead:
    `make downstream PEERS="gbnf ebnf"`, or `make downstream
    RUNTIMES="ts go"` to leave the Rust half out. Leaving it out does not
    make a change done: a change to `rs/` needs the Rust half, and the
