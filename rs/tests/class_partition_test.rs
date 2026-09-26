@@ -177,3 +177,38 @@ fn partition_names_atoms_apart_from_classes() {
         assert!(!name.starts_with("RXA"), "set {name} took an atom's name");
     }
 }
+
+// A class without `u` or `v` whose code-point reading reaches past U+FFFF
+// is left out of the partition, as the TypeScript emitter leaves it:
+// JavaScript's matcher reads it in UTF-16 code units, and atoms compiled
+// with `u` would take an astral character whole. The `regex` crate reads
+// code points whatever the flags say, so here the rule keeps the emitted
+// grammar the same as TypeScript's, and the class keeps its own matcher.
+// Under `u` it is still partitioned (tabnas/bnf#75 review).
+#[test]
+fn partition_leaves_out_a_code_unit_class_past_the_bmp() {
+    let grammar = |pattern: &str, flags: &str| {
+        emit_ir(
+            vec![prod(
+                "doc",
+                vec![
+                    vec![rx(pattern, flags), rx(pattern, flags), term(";")],
+                    vec![rx("[b-c]", ""), term("!")],
+                ],
+            )],
+            Some(ConvertOptions::tag("cp").start("doc")),
+        )
+    };
+    for pattern in ["[^a]", r"[\s\S]", "[b\u{1F600}]"] {
+        let sets = token_set_names(&grammar(pattern, ""));
+        assert!(
+            sets.is_empty(),
+            "{pattern}: a class read in code units past U+FFFF must keep its own matcher; got {sets:?}"
+        );
+    }
+    assert_eq!(
+        token_set_names(&grammar("[^a]", "u")).len(),
+        2,
+        "[^a] under u is laid over the partition beside [b-c]"
+    );
+}

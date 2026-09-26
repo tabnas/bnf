@@ -354,6 +354,37 @@ func maxRune(a, b rune) rune {
 // a term, not a regex), and a class left out of the partition simply
 // keeps the single token it has always had.
 func singleCodePointRanges(pattern, flags string) []charRange {
+	r := singleCodePointCoverage(pattern, flags)
+	if r != nil && codeUnitMatcherPastBmp(r, flags) {
+		return nil
+	}
+	return r
+}
+
+// codeUnitMatcherPastBmp reports a class the canonical matcher reads in
+// UTF-16 code units whose code-point coverage reaches past U+FFFF: a
+// negation, `[\s\S]` or an astral literal written without `u` or `v`.
+// JavaScript's matcher takes such a class one code unit at a time, and
+// laid over the partition it would be matched by atoms compiled with
+// `u`, which take an astral character whole, so whether a grammar
+// accepted an emoji turned on whether another class overlapped this one.
+// RE2 reads code points whatever the flags say, but this port leaves the
+// same classes out, so the three ports emit the same grammar: the class
+// keeps its own matcher and gives up only the partition's answer for the
+// characters it shares with an overlapping class.
+func codeUnitMatcherPastBmp(r []charRange, flags string) bool {
+	if strings.ContainsAny(flags, "uv") {
+		return false
+	}
+	for _, span := range r {
+		if span.hi > 0xFFFF {
+			return true
+		}
+	}
+	return false
+}
+
+func singleCodePointCoverage(pattern, flags string) []charRange {
 	if strings.Contains(flags, "i") {
 		return nil
 	}

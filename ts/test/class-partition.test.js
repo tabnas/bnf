@@ -74,6 +74,42 @@ describe('overlapping-class partition: what it may touch', () => {
     assert.deepEqual(spec.options.tokenSet ?? {}, {})
   })
 
+  it('leaves out a class without u or v that reaches past U+FFFF', () => {
+    // Without `u` or `v` a matcher takes one UTF-16 code unit at a time,
+    // so `[^\ud800]` takes an emoji as two characters, its lead and
+    // trail surrogates. Laid over the partition beside the overlapping
+    // `[b-c]`, it became a set whose astral atom was compiled with `u` and
+    // took the emoji whole: `c c ";"` refused `\u{1F600};`, which the
+    // class takes alone, and took `\u{1F600}x;`, which it does not. A
+    // negation, `[\s\S]` and an astral literal each read past U+FFFF
+    // (tabnas/bnf#75 review).
+    const grammar = (pattern, flags) => emit([
+      { name: 'doc', alts: [
+        [rx(pattern, flags), rx(pattern, flags), lit(';')],
+        [rx('[b-c]'), lit('!')],
+      ] },
+    ], { tag: 'cp', start: 'doc' })
+    const parses = (spec, src) => {
+      try {
+        return 'doc' === new Tabnas().grammar(spec).parse(src).rule
+      } catch (e) {
+        return false
+      }
+    }
+    for (const pattern of ['[^\\ud800]', '[^a]', '[\\s\\S]', '[b\u{1F600}]']) {
+      const spec = grammar(pattern, '')
+      assert.deepEqual(spec.options.tokenSet ?? {}, {}, pattern)
+      assert.ok(parses(spec, '\u{1F600};'), pattern)
+      assert.ok(!parses(spec, '\u{1F600}x;'), pattern)
+    }
+    // Under `u` the class reads code points, as its atoms do, so the
+    // partition still takes it.
+    const unicode = grammar('[^a]', 'u')
+    assert.equal(Object.keys(unicode.options.tokenSet ?? {}).length, 2)
+    assert.ok(parses(unicode, '\u{1F600}x;'))
+    assert.ok(!parses(unicode, '\u{1F600};'))
+  })
+
   it('still partitions two plain single-code-point classes', () => {
     // The guard above must not have disarmed the fix itself.
     const spec = emit([

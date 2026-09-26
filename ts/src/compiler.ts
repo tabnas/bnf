@@ -6051,6 +6051,34 @@ function singleCodePointRanges(
   pattern: string,
   flags: string,
 ): Array<[number, number]> | null {
+  const r = singleCodePointCoverage(pattern, flags)
+  return null != r && codeUnitMatcherPastBmp(r, flags) ? null : r
+}
+
+// Without `u` or `v` a matcher works in UTF-16 code units: `[^a]` takes
+// the lead surrogate of an emoji and then the trail surrogate, as two
+// characters. Read in code points, a class like that reaches past U+FFFF
+// (a negation does, `[\s\S]` does, and so does an astral literal), and
+// laid over the partition it would be matched by atoms compiled with
+// `u`, which take an astral character whole: whether a grammar accepted
+// an emoji then turned on whether some other class happened to overlap
+// this one. Such a class keeps its own matcher and its own reading, and
+// gives up only the partition's answer for the characters it shares with
+// an overlapping class. No front-end in the fleet writes one: each sets
+// `u` on a negation and on an astral range. Go and Rust match code
+// points whatever the flags say, and leave the same classes out, so the
+// three emit the same grammar.
+function codeUnitMatcherPastBmp(
+  r: Array<[number, number]>,
+  flags: string,
+): boolean {
+  return !/[uv]/.test(flags) && r.some(([, hi]) => 0xFFFF < hi)
+}
+
+function singleCodePointCoverage(
+  pattern: string,
+  flags: string,
+): Array<[number, number]> | null {
   if (flags.includes('i')) return null
   if ('[\\s\\S]' === pattern) return patternCharRanges(pattern, flags)
 

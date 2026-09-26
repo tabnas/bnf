@@ -256,6 +256,25 @@ pub fn char_ranges_overlap(a: &[CharRange], b: &[CharRange]) -> bool {
 /// matches would lose the rest. A case-insensitive class is refused
 /// outright rather than folded, because the fold covers ASCII only.
 pub fn single_code_point_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRange>> {
+    single_code_point_coverage(pattern, flags).filter(|r| !code_unit_matcher_past_bmp(r, flags))
+}
+
+/// A class the canonical matcher reads in UTF-16 code units whose
+/// code-point coverage reaches past U+FFFF: a negation, `[\s\S]` or an
+/// astral literal written without `u` or `v`. JavaScript's matcher takes
+/// such a class one code unit at a time, and laid over the partition it
+/// would be matched by atoms compiled with `u`, which take an astral
+/// character whole, so whether a grammar accepted an emoji turned on
+/// whether another class overlapped this one. The `regex` crate reads
+/// code points whatever the flags say, but this port leaves the same
+/// classes out, so the three ports emit the same grammar: the class keeps
+/// its own matcher and gives up only the partition's answer for the
+/// characters it shares with an overlapping class.
+fn code_unit_matcher_past_bmp(r: &[CharRange], flags: &str) -> bool {
+    !flags.contains(['u', 'v']) && r.iter().any(|&(_, hi)| hi > 0xFFFF)
+}
+
+fn single_code_point_coverage(pattern: &str, flags: &str) -> Option<Vec<CharRange>> {
     if flags.contains('i') {
         return None;
     }

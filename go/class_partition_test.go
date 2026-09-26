@@ -220,3 +220,30 @@ func TestPartitionNamesAtomsApartFromClasses(t *testing.T) {
 		}
 	}
 }
+
+// A class without u or v whose code-point reading reaches past U+FFFF is
+// left out of the partition, as the TypeScript emitter leaves it:
+// JavaScript's matcher reads it in UTF-16 code units, and atoms compiled
+// with u would take an astral character whole. RE2 reads code points
+// whatever the flags say, so here the rule keeps the emitted grammar the
+// same as TypeScript's, and the class keeps its own matcher. Under u it is
+// still partitioned (tabnas/bnf#75 review).
+func TestPartitionLeavesOutACodeUnitClassPastTheBmp(t *testing.T) {
+	grammar := func(pattern, flags string) *tabnas.GrammarSpec {
+		return emitIR(t, []*Production{
+			{Name: "doc", Alts: []Sequence{
+				{rxEl(pattern, flags), rxEl(pattern, flags), termEl(";")},
+				{rxEl("[b-c]", ""), termEl("!")},
+			}},
+		}, &ConvertOptions{Tag: "cp", Start: "doc"})
+	}
+	for _, pattern := range []string{`[^a]`, `[\s\S]`, "[b\U0001F600]"} {
+		if sets := grammar(pattern, "").Options.TokenSet; len(sets) != 0 {
+			t.Errorf("%q: a class read in code units past U+FFFF must keep its "+
+				"own matcher; got sets %v", pattern, sets)
+		}
+	}
+	if sets := grammar(`[^a]`, "u").Options.TokenSet; len(sets) != 2 {
+		t.Errorf("[^a] under u: want the class and [b-c] laid over the partition, got sets %v", sets)
+	}
+}
