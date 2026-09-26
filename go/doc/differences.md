@@ -34,13 +34,14 @@ tokens claim the same input character?") lives in `go/ranges.go`. Its
 escape reader reads RE2, the dialect Go's regexp compiles every matcher
 in, not JavaScript. The Go emitter writes RE2's `\x{…}` brace form where
 JS writes `\u…`, so the reader takes `\x{…}` and `\xHH` as the code
-points they spell; reading only `\xHH` makes every Go-emitted class's
+points they spell. Reading only `\xHH` makes every Go-emitted class's
 coverage UNKNOWN, which silently switches off every check downstream.
-`\a` is BEL and escaped ASCII punctuation is itself, while JavaScript's
-`\u`, the zero-width `\A` and `\z`, and the quoting `\Q…\E` name no code
-point. Where the two dialects read an escape differently (`\a` is the
-letter `a` to JavaScript), each port reads it as its own matcher does,
-so the same pattern can dispatch at a different depth.
+`\a` is the bell character and escaped punctuation is itself, while
+JavaScript's `\u`, the zero-width `\A` and `\z`, and the quoting `\Q…\E`
+name no code point. Where the two dialects read an escape differently,
+each port reads it as its own matcher does, so the same pattern can
+dispatch at a different depth: `\a` is the letter `a` to JavaScript.
+`DIVERGENCE.md` records the depths.
 
 ### How this was verified
 
