@@ -365,7 +365,7 @@ fn regex_derives_empty(pattern: &str, flags: &str) -> bool {
     }
 }
 
-fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -> bool {
+pub(crate) fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -> bool {
     match &el.kind {
         Kind::Opt { .. } | Kind::Star { .. } => true,
         Kind::Plus { inner } => element_derives_empty(inner, nullable),

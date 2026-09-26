@@ -25,6 +25,23 @@ func refsIn(alt Sequence, out map[string]bool) {
 	}
 }
 
+// tokensIn collects every token element's name in a sequence, nested
+// ones included. Mirrors the TS tokensIn.
+func tokensIn(alt Sequence, out map[string]bool) {
+	for _, el := range alt {
+		switch el.Kind {
+		case KindToken:
+			out[el.Name] = true
+		case KindOpt, KindStar, KindPlus, KindRep:
+			tokensIn(Sequence{el.Inner}, out)
+		case KindGroup:
+			for _, a := range el.Alts {
+				tokensIn(a, out)
+			}
+		}
+	}
+}
+
 // cloneGrammar copies a grammar deeply enough that the emit pipeline cannot
 // disturb the caller's AST. The passes replace Productions, Alts and the
 // individual sequences, but treat elements as immutable (each rewriting walk
@@ -180,6 +197,15 @@ func expandNullableLeftPrefixes(prods []*Production) []*Production {
 }
 
 func eliminateLeftRecursion(grammar *Grammar) *Grammar {
+	return eliminateLeftRecursionKeeping(grammar, nil)
+}
+
+// eliminateLeftRecursionKeeping is eliminateLeftRecursion with a set of
+// productions that are never substituted into the alternatives they
+// lead: the token classes of ConvertOptions.TokenClasses. A class holds
+// no reference, so no left-recursive cycle can run through it, and
+// Paull's invariant is unaffected by leaving it in place.
+func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Grammar {
 	// Suffix-debt counter names handed out across the whole grammar.
 	debtNames := map[string]bool{}
 	originalOrder := make([]string, len(grammar.Productions))
@@ -251,7 +277,17 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 					if !hasLeadingRefTo(prods[i], prods[j].Name) {
 						continue
 					}
-					prods[i] = substituteLeadingRef(prods[i], prods[j])
+					if keep[prods[j].Name] {
+						// A token class: substituted, exactly where any other
+						// leading reference is, by ONE token element naming
+						// its set (#ident) rather than by its alternatives.
+						// The tree is the one the plain substitution gives
+						// (the token consumed, no node) without the
+						// one-alternate-per-member fan-out.
+						prods[i] = substituteLeadingRefByToken(prods[i], prods[j].Name)
+					} else {
+						prods[i] = substituteLeadingRef(prods[i], prods[j])
+					}
 					changed = true
 				}
 				if !changed {
@@ -433,6 +469,30 @@ func substituteLeadingRef(target, source *Production) *Production {
 				combined := append(append(Sequence{}, srcAlt...), tail...)
 				newAlts = append(newAlts, combined)
 			}
+		} else {
+			newAlts = append(newAlts, alt)
+		}
+	}
+	return &Production{
+		Name:     target.Name,
+		Alts:     newAlts,
+		NodeKind: target.NodeKind,
+		Origin:   target.Origin,
+		Sp:       target.Sp,
+		Value:    target.Value,
+	}
+}
+
+// substituteLeadingRefByToken replaces a leading reference to a token
+// class by the token element naming the class's set (ident -> #ident).
+// The set is minted by EmitGrammarSpec under exactly that name; see
+// tokenClassNames.
+func substituteLeadingRefByToken(target *Production, className string) *Production {
+	newAlts := []Sequence{}
+	for _, alt := range target.Alts {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == className {
+			combined := append(Sequence{&Element{Kind: KindToken, Name: "#" + className}}, alt[1:]...)
+			newAlts = append(newAlts, combined)
 		} else {
 			newAlts = append(newAlts, alt)
 		}

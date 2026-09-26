@@ -104,6 +104,18 @@ fn expand_nullable_left_prefixes(prods: Vec<Production>) -> Vec<Production> {
 /// Returns a new grammar carrying only productions, in the caller's
 /// declared order. The input is not modified.
 pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError> {
+    eliminate_left_recursion_keeping(grammar, &IndexSet::new())
+}
+
+/// [`eliminate_left_recursion`] with a set of productions that are never
+/// substituted into the alternatives they lead: the token classes of
+/// `ConvertOptions::token_classes`. A class holds no reference, so no
+/// left-recursive cycle can run through it, and Paull's invariant is
+/// unaffected by leaving it in place.
+pub(crate) fn eliminate_left_recursion_keeping(
+    grammar: &Grammar,
+    keep: &IndexSet<String>,
+) -> Result<Grammar, EmitError> {
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
@@ -138,8 +150,19 @@ pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError>
                     if !has_leading_ref_to(&prods[i], &prods[j].name) {
                         continue;
                     }
-                    let source = prods[j].clone();
-                    prods[i] = substitute_leading_ref(&prods[i], &source);
+                    if keep.contains(&prods[j].name) {
+                        // A token class: substituted, exactly where any
+                        // other leading reference is, by ONE token element
+                        // naming its set (`#ident`) rather than by its
+                        // alternatives. The tree is the one the plain
+                        // substitution gives (the token consumed, no node)
+                        // without the one-alternate-per-member fan-out.
+                        let class_name = prods[j].name.clone();
+                        prods[i] = substitute_leading_ref_by_token(&prods[i], &class_name);
+                    } else {
+                        let source = prods[j].clone();
+                        prods[i] = substitute_leading_ref(&prods[i], &source);
+                    }
                     changed = true;
                 }
                 if !changed {
@@ -396,6 +419,26 @@ fn substitute_leading_ref(target: &Production, source: &Production) -> Productio
             new_alts.push(alt.clone());
         }
     }
+    target.rebuilt(new_alts)
+}
+
+/// Replace a leading reference to a token class by the token element
+/// naming the class's set (`ident` -> `#ident`). The set is minted by
+/// `emit_grammar_spec` under exactly that name; see `token_class_names`.
+fn substitute_leading_ref_by_token(target: &Production, class_name: &str) -> Production {
+    let new_alts: Vec<Sequence> = target
+        .alts
+        .iter()
+        .map(|alt| {
+            if alt.first().is_some_and(|el| el.is_ref_to(class_name)) {
+                let mut combined = vec![Element::token(format!("#{class_name}"))];
+                combined.extend(alt[1..].iter().cloned());
+                combined
+            } else {
+                alt.clone()
+            }
+        })
+        .collect();
     target.rebuilt(new_alts)
 }
 

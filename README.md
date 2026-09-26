@@ -34,6 +34,13 @@ Everything hard about that second arrow lives here, and is shared:
   exceed the engine's bounded lookahead;
 - **literal lifting**, turning single-literal productions (`PL = "+"`)
   into named lexer tokens (`#PL`);
+- **alternate dispatch** on the first token of each alternative, looking
+  one token deeper only under a head two alternatives share, so the
+  emitted table grows with the number of decisions rather than with the
+  product of the tokens that can fill a lookahead window;
+- **token classes** (`tokenClasses`), compiling a production whose
+  alternatives are all single literals or tokens to one engine token set
+  that stands as one token at every lookahead position;
 - **token allocation**, **first-set analysis**, and **chain emission**
   through synthetic `$stepN` continuation rules.
 
@@ -99,6 +106,7 @@ Object.keys(spec.rule).includes('val')   // => true
 | `builtins` | Emit probe dispatch and tree building as engine `$`-builtin refs instead of closures, keeping the spec function-free and serializable. |
 | `marks` | Emit a stable `m` mark per user-rule alt, enabling `@<rule>:o\|c:<mark>` user-action references. |
 | `wordKeywords` | Treat word-like literals as whole-word keywords, so `"option"` does not match the prefix of `optional`. For tokenised, keyword-rich languages; leave off for char-level grammars. |
+| `tokenClasses` | Compile a production whose alternatives are all single literals or tokens (a keyword or operator class) to one engine token set, named after it, that stands as one token wherever a lookahead would otherwise enumerate its members. The tree is unchanged: the rule keeps its per-member alternates and its node wherever the plain compile keeps a reference to it, and where the plain compile expands it in place (a leading reference) the one token is consumed instead. A production stays plain when its name is empty, holds whitespace or matches an engine token, when a member consumes nothing, such as an empty literal, `#ZZ` or `#AA`, or when the grammar already spells its set name as a token. For languages whose identifiers admit keywords. |
 
 ## Runtimes
 

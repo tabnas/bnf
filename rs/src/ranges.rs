@@ -32,6 +32,74 @@ const MAX_CODE_POINT: u32 = 0x10FFFF;
 /// content after the first class is irrelevant: only the FIRST
 /// character's coverage decides whether two tokens can contest one input
 /// position.
+/// Where a pattern's first atom or class ends, in chars, or `None` when
+/// the pattern does not begin with one: a group, an alternation, a
+/// quantifier, `.`, or an escape whose coverage `pattern_char_ranges`
+/// declines to name.
+pub fn regex_head_atom_end(src: &str) -> Option<usize> {
+    let chars: Vec<char> = src.chars().collect();
+    let c = *chars.first()?;
+    if c == '[' {
+        let mut i = 1;
+        if chars.get(i) == Some(&'^') {
+            i += 1;
+        }
+        if chars.get(i) == Some(&']') {
+            i += 1;
+        }
+        while i < chars.len() && chars[i] != ']' {
+            i += if chars[i] == '\\' { 2 } else { 1 };
+        }
+        return (i < chars.len()).then_some(i + 1);
+    }
+    if c == '\\' {
+        // Exactly the escapes `pattern_char_ranges` reads: a head this
+        // calls one atom must be one whose coverage is known.
+        return read_escape(&chars, 0).map(|(n, _)| n);
+    }
+    if "(.|)?*+{".contains(c) {
+        return None;
+    }
+    Some(1)
+}
+
+/// The escape at `chars[at]` read as one code point: its length in chars
+/// and the code point, or `None` when it is not one this can name. A
+/// shorthand class, a control or property escape, a group or back
+/// reference, and a digit escape all bail rather than guess, and so does a
+/// hex escape without its full digits (`\u1` is `u` then `1` without the
+/// `u` flag, not U+0001) or one naming half of a surrogate pair. Unknown
+/// coverage keeps every caller conservative. Mirrors `readEscape` in
+/// `ts/src/compiler.ts`.
+fn read_escape(chars: &[char], at: usize) -> Option<(usize, u32)> {
+    let m = *chars.get(at + 1)?;
+    if m == 'u' && chars.get(at + 2) == Some(&'{') {
+        let e = (at + 3..chars.len()).find(|k| chars[*k] == '}')?;
+        let hex = &chars[at + 3..e];
+        if hex.is_empty() || 6 < hex.len() || !hex.iter().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let cp = u32::from_str_radix(&hex.iter().collect::<String>(), 16).ok()?;
+        return (cp <= MAX_CODE_POINT).then_some((e + 1 - at, cp));
+    }
+    if m == 'u' || m == 'x' {
+        let digits = if m == 'u' { 4 } else { 2 };
+        let hex = chars.get(at + 2..at + 2 + digits)?;
+        if !hex.iter().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let cp = u32::from_str_radix(&hex.iter().collect::<String>(), 16).ok()?;
+        if (0xD800..=0xDFFF).contains(&cp) {
+            return None;
+        }
+        return Some((2 + digits, cp));
+    }
+    if "dDwWsSbBnrtfvckpP0123456789".contains(m) {
+        return None;
+    }
+    Some((2, m as u32))
+}
+
 pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
     if pattern == r"[\s\S]" {
         return Some(vec![(0, MAX_CODE_POINT)]);
@@ -47,33 +115,9 @@ pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
             *i += 1;
             return Some(c as u32);
         }
-        let m = *chars.get(*i + 1)?;
-        if m == 'u' {
-            if chars.get(*i + 2) == Some(&'{') {
-                let e = (*i + 3..chars.len()).find(|k| chars[*k] == '}')?;
-                let hex: String = chars[*i + 3..e].iter().collect();
-                let cp = parse_hex(&hex)?;
-                *i = e + 1;
-                return Some(cp);
-            }
-            let hex: String = chars.iter().skip(*i + 2).take(4).collect();
-            let cp = parse_hex(&hex)?;
-            *i += 6;
-            return Some(cp);
-        }
-        if m == 'x' {
-            let hex: String = chars.iter().skip(*i + 2).take(2).collect();
-            let cp = parse_hex(&hex)?;
-            *i += 4;
-            return Some(cp);
-        }
-        if "dDwWsSbB0nrtfv".contains(m) {
-            // Shorthand classes and control escapes: bail rather than
-            // guess. Unknown coverage keeps the caller conservative.
-            return None;
-        }
-        *i += 2;
-        Some(m as u32)
+        let (n, cp) = read_escape(chars, *i)?;
+        *i += n;
+        Some(cp)
     }
 
     if chars.first() != Some(&'[') {
@@ -121,15 +165,6 @@ pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
         out.push((next, MAX_CODE_POINT));
     }
     Some(out)
-}
-
-/// JavaScript's `parseInt(s, 16)`: a leading hexadecimal run, or NaN.
-fn parse_hex(s: &str) -> Option<u32> {
-    let digits: String = s.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    u32::from_str_radix(&digits, 16).ok()
 }
 
 /// Widen character ranges to cover both cases of every ASCII letter in
@@ -510,6 +545,44 @@ mod tests {
             class_pattern(0x1F600, 0x1F64F),
             (r"[\u{1F600}-\u{1F64F}]".to_string(), true)
         );
+    }
+
+    #[test]
+    fn an_escape_is_one_code_point_only_when_it_can_be_read() {
+        // The head scanner and the coverage reader take an escape the same
+        // way. Mirrors TestContestEscapeWhoseCodePointCannotBeReadIsNotExact
+        // in go/contest_test.go.
+        for p in [
+            r"\u1",
+            r"\x1",
+            r"\u12",
+            r"\uD83D",
+            r"\u{}",
+            r"\u{4g}",
+            r"\u{110000}",
+            r"\cA",
+            r"\p{L}",
+            r"\PL",
+            r"\k<a>",
+            r"\1",
+            r"\0",
+            r"\d",
+        ] {
+            assert_eq!(regex_head_atom_end(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p), None, "{p}");
+        }
+        for p in [r"[\p{L}]", r"[a\1]", r"[\u1]"] {
+            assert_eq!(pattern_char_ranges(p), None, "{p}");
+        }
+        for (p, end, cp) in [
+            (r"\u0041", 6, 0x41),
+            (r"\x41", 4, 0x41),
+            (r"\u{1F600}", 9, 0x1F600),
+            (r"\.", 2, 0x2E),
+        ] {
+            assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
+            assert_eq!(pattern_char_ranges(p), Some(vec![(cp, cp)]), "{p}");
+        }
     }
 
     #[test]

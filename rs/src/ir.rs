@@ -534,6 +534,16 @@ pub struct ConvertOptions {
     /// Emit `meta.provenance`, the map from each generated rule name back
     /// to the author-written production it came from. On by default.
     pub provenance: bool,
+    /// Compile a token class (a production whose every alternative is a
+    /// single literal or engine token, `ident = TX / "message" / "option"`)
+    /// as one engine token SET wherever another rule looks ahead at it,
+    /// and keep it as a rule of its own rather than inlining it into the
+    /// rules it leads. A lookahead position that can hold any of N members
+    /// then costs one alternate rather than N, and a contextual keyword is
+    /// one class member. Off by default: the class is inlined where it
+    /// leads an alternative and its members are enumerated, exactly as
+    /// before. Mirrors the TypeScript `tokenClasses`.
+    pub token_classes: bool,
 }
 
 impl Default for ConvertOptions {
@@ -545,6 +555,7 @@ impl Default for ConvertOptions {
             marks: false,
             word_keywords: false,
             provenance: true,
+            token_classes: false,
         }
     }
 }
@@ -579,6 +590,11 @@ impl ConvertOptions {
 
     pub fn provenance(mut self, on: bool) -> Self {
         self.provenance = on;
+        self
+    }
+
+    pub fn token_classes(mut self, on: bool) -> Self {
+        self.token_classes = on;
         self
     }
 }
@@ -740,6 +756,28 @@ pub const REMOVE_ALL: &str = "all";
 /// its angle brackets, which no ordinary rulename can contain.
 pub fn is_prose_name(name: &str) -> bool {
     name.starts_with('<') && name.ends_with('>')
+}
+
+/// Collect every token element's name in a sequence, nested ones
+/// included. Mirrors the TypeScript `tokensIn`.
+pub fn tokens_in(alt: &[Element], out: &mut IndexSet<String>) {
+    for el in alt {
+        match &el.kind {
+            Kind::Token { name, .. } => {
+                out.insert(name.clone());
+            }
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => tokens_in(std::slice::from_ref(inner), out),
+            Kind::Group { alts } => {
+                for a in alts {
+                    tokens_in(a, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Collect the rule references in a sequence, sugar included.
