@@ -278,17 +278,19 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 	// escape are a control character, a property, a group or a back
 	// reference, none of them the letter after the backslash. Go's regexp
 	// compiles only some of these, so they are pinned on the two readers.
+	// JavaScript's `\u` is not an RE2 escape at all, so even with its full
+	// digits it names nothing here (readEscape reads RE2).
 	for _, p := range []string{`\u1`, `\x1`, `\u12`, `\uD83D`, `\u{}`, `\u{4g}`, `\x{110000}`,
-		`\cA`, `\p{L}`, `\PL`, `\k<a>`, `\1`, `\0`, `\d`} {
+		`\cA`, `\p{L}`, `\PL`, `\k<a>`, `\1`, `\0`, `\d`, `\u0041`, `\u{1F600}`} {
 		if end := regexHeadAtomEnd(p); end != -1 {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
 		}
-		if r := patternCharRanges(p); r != nil {
+		if r := patternCharRanges(p, ""); r != nil {
 			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
 		}
 	}
 	for _, p := range []string{`[\p{L}]`, `[a\1]`, `[\u1]`} {
-		if r := patternCharRanges(p); r != nil {
+		if r := patternCharRanges(p, ""); r != nil {
 			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
 		}
 	}
@@ -297,12 +299,12 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 		end int
 		cp  rune
 	}{
-		{`\u0041`, 6, 'A'}, {`\x41`, 4, 'A'}, {`\x{41}`, 6, 'A'}, {`\u{1F600}`, 9, 0x1F600}, {`\.`, 2, '.'},
+		{`\x41`, 4, 'A'}, {`\x{41}`, 6, 'A'}, {`\x{1F600}`, 9, 0x1F600}, {`\.`, 2, '.'},
 	} {
 		if end := regexHeadAtomEnd(c.p); end != c.end {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
 		}
-		if r := patternCharRanges(c.p); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
+		if r := patternCharRanges(c.p, ""); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
 			t.Errorf("patternCharRanges(%q) = %v, want %U", c.p, r, c.cp)
 		}
 	}
@@ -315,5 +317,165 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 	}
 	if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
 		t.Fatalf(`[\p{L}]: depths %v, want [2 2]`, d)
+	}
+}
+
+func TestContestEscapeIsReadAsRE2ReadsIt(t *testing.T) {
+	// This port compiles every matcher with Go's regexp, so an escape is
+	// read as RE2 reads it, not as JavaScript does. `\a` is BEL, which a
+	// JavaScript matcher reads as the letter `a`; read as `a`, a head `\a`
+	// was held apart from a literal BEL that it takes, and the literal's
+	// branch was never reached. The zero-width `\A` and `\z`, the quoting
+	// `\Q…\E`, `\C` and letters RE2 does not define name no one code point.
+	for _, c := range []struct {
+		p   string
+		end int
+		cp  rune
+	}{
+		{`\a`, 2, 0x07}, {`\x07`, 4, 0x07}, {`\_`, 2, '_'}, {`\-`, 2, '-'},
+	} {
+		if end := regexHeadAtomEnd(c.p); end != c.end {
+			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
+		}
+		if r := patternCharRanges(c.p, ""); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
+			t.Errorf("patternCharRanges(%q) = %v, want %U", c.p, r, c.cp)
+		}
+	}
+	if r := patternCharRanges(`[\a-\x{0d}]`, ""); len(r) != 1 || r[0] != (charRange{0x07, 0x0D}) {
+		t.Errorf(`patternCharRanges([\a-\x{0d}]) = %v, want U+0007-U+000D`, r)
+	}
+	for _, p := range []string{`\A`, `\z`, `\Qa\E`, `\Q+\E`, `\C`, `\E`, `\e`, `\U00000041`} {
+		if end := regexHeadAtomEnd(p); end != -1 {
+			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
+		}
+		if r := patternCharRanges(p, ""); r != nil {
+			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
+		}
+	}
+	// Through the dispatcher: each of these heads can take the input the
+	// literal takes, so the choice looks two tokens deep and both branches
+	// are reached.
+	for _, c := range []struct{ pattern, text string }{
+		{`\a`, "\a"}, {`[\a]`, "\a"}, {`\a+`, "\a"}, {`\Q+\E`, "+"},
+	} {
+		spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: c.pattern}, ctLit(c.text)),
+			&ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Errorf("%s: depths %v, want [2 2]", c.pattern, d)
+		}
+		for _, src := range []string{c.text + ";;!!", c.text + "!!;;"} {
+			if !ctParses(t, spec, src, true) {
+				t.Errorf("%s: %q should parse", c.pattern, src)
+			}
+		}
+	}
+	// A range ending on a hex escape that names a surrogate is read as RE2
+	// reads it, and laid over the partition beside the class it overlaps.
+	// (The TypeScript reader once named no surrogate escape at all, and
+	// lost the second branch to the lexer.)
+	spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: `[\x{0041}-\x{d800}]`},
+		&Element{Kind: KindRegex, Pattern: `[\x{0041}-\x{005a}]`}), &ConvertOptions{Tag: "ct", Start: "doc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{"A;;!!", "A!!;;", "b;;!!"} {
+		if !ctParses(t, spec, src, false) {
+			t.Errorf("%q should parse", src)
+		}
+	}
+}
+
+// TestContestCodeUnitLeadSurrogateMeetsAstralHead pins that a head the
+// canonical matcher reads in code units (no `u` or `v`) and that names a
+// lead surrogate meets every astral character that surrogate begins:
+// there it takes U+D800 as the first half of U+10000. Compared as code
+// points the heads were disjoint, the decision stayed one token deep, and
+// the first branch took the input the second accepts. RE2 never meets a
+// surrogate, but this port decides alike, so the three ports emit the
+// same grammar (tabnas/bnf#75 review). The TS test's lone-surrogate
+// literal has no Go spelling: a Go string cannot hold one.
+func TestContestCodeUnitLeadSurrogateMeetsAstralHead(t *testing.T) {
+	rx := func(p, f string) *Element { return &Element{Kind: KindRegex, Pattern: p, Flags: f} }
+	astral := rx(`\x{10000}`, "u")
+	emit := func(g *Grammar) *tabnas.GrammarSpec {
+		spec, err := EmitGrammarSpec(g, &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return spec
+	}
+	for _, c := range []struct {
+		label string
+		a, b  *Element
+	}{
+		{"escape", rx(`\x{d800}`, ""), astral},
+		{"class", rx(`[\x{d800}-\x{dbff}]`, ""), rx(`[\x{10000}-\x{10ffff}]`, "u")},
+		{"astral literal", rx(`\x{d800}`, ""), ctLit("\U00010000")},
+	} {
+		spec := emit(ctSemi(c.a, c.b))
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Errorf("%s: depths %v, want [2 2]", c.label, d)
+		}
+		if !ctParses(t, spec, "\U00010000!!;;", true) {
+			t.Errorf("%s: U+10000 then !!;; should parse", c.label)
+		}
+	}
+	// Read in code points a lead surrogate is only ever one standing
+	// alone, and meets no astral character, whether the class keeps its
+	// own matcher or is laid over the partition, whose atoms read as the
+	// classes they stand for.
+	lone := rx(`[\x{d800}]`, "u")
+	contested := ctSemi(lone, astral)
+	contested.Productions[0].Alts = append(contested.Productions[0].Alts,
+		Sequence{rx(`[\x{d800}-\x{dbff}]`, "u")})
+	for label, g := range map[string]*Grammar{"alone": ctSemi(lone, astral), "partitioned": contested} {
+		spec := emit(g)
+		if partitioned := len(spec.Options.TokenSet) > 0; partitioned != (label == "partitioned") {
+			t.Fatalf("%s: token sets %v", label, spec.Options.TokenSet)
+		}
+		if d := ctDepths(t, spec); d[0] != 1 || d[1] != 1 {
+			t.Errorf("%s: depths %v, want [1 1]", label, d)
+		}
+	}
+}
+
+// TestContestCodeUnitClassTakesAnAstralCharacterAsTwo pins that a class
+// the canonical matcher reads in code units (no `u` or `v`) holds an
+// astral character written in it as its lead and trail surrogates, so
+// `[😀]` meets a `😁` head through the lead. RE2 reads the code point, but
+// this port adds the units beside it, so the three ports emit the same
+// grammar (tabnas/bnf#75 review). Mirrors the TS test.
+func TestContestCodeUnitClassTakesAnAstralCharacterAsTwo(t *testing.T) {
+	rx := func(p, f string) *Element { return &Element{Kind: KindRegex, Pattern: p, Flags: f} }
+	emit := func(g *Grammar) *tabnas.GrammarSpec {
+		spec, err := EmitGrammarSpec(g, &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return spec
+	}
+	for _, p := range []string{"[\U0001F600]", "[b\U0001F600]"} {
+		spec := emit(ctSemi(rx(p, ""), ctLit("\U0001F601")))
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Errorf("%s: depths %v, want [2 2]", p, d)
+		}
+		if !ctParses(t, spec, "\U0001F601!!;;", true) {
+			t.Errorf("%s: U+1F601 then !!;; should parse", p)
+		}
+	}
+	for _, c := range [][2]string{{"[\U0001F600]", "u"}, {"\U0001F600", ""}} {
+		spec := emit(ctSemi(rx(c[0], c[1]), ctLit("\U0001F601")))
+		if d := ctDepths(t, spec); d[0] != 1 || d[1] != 1 {
+			t.Errorf("%s %s: depths %v, want [1 1]", c[0], c[1], d)
+		}
+	}
+	if r := patternCharRanges("[\U0001F600]", ""); len(r) != 3 {
+		t.Errorf("[😀] in code units: %v, want U+1F600 and its two units", r)
+	}
+	if r := patternCharRanges("[\U0001F600]", "u"); len(r) != 1 {
+		t.Errorf("[😀] under u: %v, want U+1F600 alone", r)
 	}
 }

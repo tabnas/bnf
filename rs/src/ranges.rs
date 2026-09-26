@@ -63,44 +63,59 @@ pub fn regex_head_atom_end(src: &str) -> Option<usize> {
     Some(1)
 }
 
-/// The escape at `chars[at]` read as one code point: its length in chars
-/// and the code point, or `None` when it is not one this can name. A
-/// shorthand class, a control or property escape, a group or back
-/// reference, and a digit escape all bail rather than guess, and so does a
-/// hex escape without its full digits (`\u1` is `u` then `1` without the
-/// `u` flag, not U+0001) or one naming half of a surrogate pair. Unknown
-/// coverage keeps every caller conservative. Mirrors `readEscape` in
-/// `ts/src/compiler.ts`.
+/// The escape at `chars[at]` read as one code point by the `regex` crate's
+/// rules, the dialect every matcher this port emits is compiled in
+/// (`check_regex` in `src/emit.rs`): its length in chars and the code
+/// point, or `None` when it is not one this can name.
+///
+/// A hex escape is the code point it spells, in each of the crate's forms,
+/// `\xHH`, `\uHHHH` and `\UHHHHHHHH` with all their digits and the brace
+/// forms `\x{…}`, `\u{…}` and `\U{…}`, and only when that is a Unicode
+/// scalar value (the crate refuses a surrogate). `\a` is BEL, U+0007, and
+/// escaped ASCII punctuation is the character itself, except `\<` and
+/// `\>`. Everything else bails rather than guess: a shorthand or property
+/// class, a digit escape, the zero-width `\A`, `\z`, `\b`, `\B`, `\<` and
+/// `\>`, and every letter the crate does not define. `\f`, `\n`, `\r`,
+/// `\t` and `\v` bail as well although the crate names them, because the
+/// canonical TypeScript reader declines them, and where the two dialects
+/// agree the two compilers should emit alike; `\u{…}` keeps that reader's
+/// one to six digits for the same reason. Unknown coverage keeps the
+/// dispatcher conservative.
 fn read_escape(chars: &[char], at: usize) -> Option<(usize, u32)> {
     let m = *chars.get(at + 1)?;
-    if m == 'u' && chars.get(at + 2) == Some(&'{') {
-        let e = (at + 3..chars.len()).find(|k| chars[*k] == '}')?;
-        let hex = &chars[at + 3..e];
-        if hex.is_empty() || 6 < hex.len() || !hex.iter().all(|c| c.is_ascii_hexdigit()) {
+    let scalar = |digits: &[char]| -> Option<u32> {
+        if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
-        let cp = u32::from_str_radix(&hex.iter().collect::<String>(), 16).ok()?;
-        return (cp <= MAX_CODE_POINT).then_some((e + 1 - at, cp));
-    }
-    if m == 'u' || m == 'x' {
-        let digits = if m == 'u' { 4 } else { 2 };
-        let hex = chars.get(at + 2..at + 2 + digits)?;
-        if !hex.iter().all(|c| c.is_ascii_hexdigit()) {
-            return None;
+        let cp = u32::from_str_radix(&digits.iter().collect::<String>(), 16).ok()?;
+        char::from_u32(cp).map(|_| cp)
+    };
+    match m {
+        'x' | 'u' | 'U' if chars.get(at + 2) == Some(&'{') => {
+            let e = (at + 3..chars.len()).find(|k| chars[*k] == '}')?;
+            let digits = &chars[at + 3..e];
+            if m == 'u' && 6 < digits.len() {
+                return None;
+            }
+            scalar(digits).map(|cp| (e + 1 - at, cp))
         }
-        let cp = u32::from_str_radix(&hex.iter().collect::<String>(), 16).ok()?;
-        if (0xD800..=0xDFFF).contains(&cp) {
-            return None;
+        'x' | 'u' | 'U' => {
+            let n = match m {
+                'x' => 2,
+                'u' => 4,
+                _ => 8,
+            };
+            scalar(chars.get(at + 2..at + 2 + n)?).map(|cp| (2 + n, cp))
         }
-        return Some((2 + digits, cp));
+        'a' => Some((2, 0x07)),
+        c if c.is_ascii() && !c.is_ascii_alphanumeric() && c != '<' && c != '>' => {
+            Some((2, c as u32))
+        }
+        _ => None,
     }
-    if "dDwWsSbBnrtfvckpP0123456789".contains(m) {
-        return None;
-    }
-    Some((2, m as u32))
 }
 
-pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
+pub fn pattern_char_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRange>> {
     if pattern == r"[\s\S]" {
         return Some(vec![(0, MAX_CODE_POINT)]);
     }
@@ -132,11 +147,32 @@ pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
         i += 1;
     }
     let mut ranges: Vec<CharRange> = Vec::new();
+    // Without `u` or `v` the canonical matcher reads a class in UTF-16
+    // code units, so an astral character written in one is two members,
+    // its lead and trail surrogates: `[😀]` takes the first half of
+    // U+1F601 as well. The crate reads the code point, which is kept, and
+    // the two units are added beside it, so the contest checks reach from
+    // the lead as the canonical compiler's do (`code_unit_reach`) and the
+    // three ports emit the same grammar. Mirrors TS `patternCharRanges`
+    // (tabnas/bnf#75 review).
+    let units = !flags.contains(['u', 'v']);
+    let split = |raw: bool, cp: u32, ranges: &mut Vec<CharRange>| {
+        if raw && units && cp > 0xFFFF {
+            let lead = 0xD800 + ((cp - 0x10000) >> 10);
+            let trail = 0xDC00 + ((cp - 0x10000) & 0x3FF);
+            ranges.push((lead, lead));
+            ranges.push((trail, trail));
+        }
+    };
     while i < chars.len() && chars[i] != ']' {
+        let raw = chars[i] != '\\';
         let lo = one(&chars, &mut i)?;
+        split(raw, lo, &mut ranges);
         if chars.get(i) == Some(&'-') && chars.get(i + 1).is_some_and(|c| *c != ']') {
             i += 1;
+            let raw = chars.get(i) != Some(&'\\');
             let hi = one(&chars, &mut i)?;
+            split(raw, hi, &mut ranges);
             ranges.push((lo, hi));
         } else {
             ranges.push((lo, lo));
@@ -165,6 +201,41 @@ pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
         out.push((next, MAX_CODE_POINT));
     }
     Some(out)
+}
+
+/// A matcher's first-character coverage in the code points the contest
+/// checks compare. Under `u` or `v` the canonical matcher reads code
+/// points, and a lead surrogate it names is one standing alone. Without
+/// either it reads UTF-16 code units and takes a lead surrogate wherever
+/// it stands, the first half of an astral character included, so it can
+/// start on every astral character that surrogate begins. The `regex`
+/// crate never meets a surrogate, but this port widens the same coverage,
+/// so the three ports emit the same grammar. A literal is matched in code
+/// units there too. Mirrors TS `codeUnitReach` (tabnas/bnf#75 review).
+pub fn code_unit_reach(r: &[CharRange], flags: &str) -> Vec<CharRange> {
+    let mut out = r.to_vec();
+    if flags.contains(['u', 'v']) {
+        return out;
+    }
+    for &(lo, hi) in r {
+        let (a, b) = (lo.max(0xD800), hi.min(0xDBFF));
+        if a <= b {
+            out.push((
+                0x10000 + ((a - 0xD800) << 10),
+                0x10000 + ((b - 0xD800) << 10) + 0x3FF,
+            ));
+        }
+    }
+    out
+}
+
+/// The part of sorted, merged ranges that names a lead surrogate, U+D800
+/// to U+DBFF, still sorted and merged.
+fn lead_surrogates(r: &[CharRange]) -> Vec<CharRange> {
+    r.iter()
+        .filter(|&&(lo, hi)| lo <= 0xDBFF && 0xD800 <= hi)
+        .map(|&(lo, hi)| (lo.max(0xD800), hi.min(0xDBFF)))
+        .collect()
 }
 
 /// Widen character ranges to cover both cases of every ASCII letter in
@@ -241,11 +312,30 @@ pub fn char_ranges_overlap(a: &[CharRange], b: &[CharRange]) -> bool {
 /// matches would lose the rest. A case-insensitive class is refused
 /// outright rather than folded, because the fold covers ASCII only.
 pub fn single_code_point_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRange>> {
+    single_code_point_coverage(pattern, flags).filter(|r| !code_unit_matcher_past_bmp(r, flags))
+}
+
+/// A class the canonical matcher reads in UTF-16 code units whose
+/// code-point coverage reaches past U+FFFF: a negation, `[\s\S]` or an
+/// astral literal written without `u` or `v`. JavaScript's matcher takes
+/// such a class one code unit at a time, and laid over the partition it
+/// would be matched by atoms compiled with `u`, which take an astral
+/// character whole, so whether a grammar accepted an emoji turned on
+/// whether another class overlapped this one. The `regex` crate reads
+/// code points whatever the flags say, but this port leaves the same
+/// classes out, so the three ports emit the same grammar: the class keeps
+/// its own matcher and gives up only the partition's answer for the
+/// characters it shares with an overlapping class.
+fn code_unit_matcher_past_bmp(r: &[CharRange], flags: &str) -> bool {
+    !flags.contains(['u', 'v']) && r.iter().any(|&(_, hi)| hi > 0xFFFF)
+}
+
+fn single_code_point_coverage(pattern: &str, flags: &str) -> Option<Vec<CharRange>> {
     if flags.contains('i') {
         return None;
     }
     if pattern == r"[\s\S]" {
-        return pattern_char_ranges(pattern);
+        return pattern_char_ranges(pattern, flags);
     }
     let chars: Vec<char> = pattern.chars().collect();
     if chars.first() == Some(&'[') {
@@ -269,7 +359,7 @@ pub fn single_code_point_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRa
         if i != chars.len() - 1 {
             return None;
         }
-        return pattern_char_ranges(pattern);
+        return pattern_char_ranges(pattern, flags);
     }
 
     // A bare single code point, possibly escaped: `a`, `\.`, `A`,
@@ -278,10 +368,13 @@ pub fn single_code_point_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRa
     if !is_single_code_point_pattern(&chars) {
         return None;
     }
-    pattern_char_ranges(pattern)
+    pattern_char_ranges(pattern, flags)
 }
 
-/// `^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$`
+/// One unescaped character that is no regex syntax, or one escape that
+/// `read_escape` names in full: the TypeScript port's
+/// `^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$`,
+/// with the escapes read in this port's dialect.
 fn is_single_code_point_pattern(chars: &[char]) -> bool {
     // TypeScript tests this with a regular expression over UTF-16 code
     // units, so an astral character is two units there and never a single
@@ -307,12 +400,7 @@ fn is_single_code_point_pattern(chars: &[char]) -> bool {
                         | '.'
                 )
         }
-        ['\\', m] => bmp(m) && !matches!(m, 'u' | 'x'),
-        ['\\', 'x', a, b] => a.is_ascii_hexdigit() && b.is_ascii_hexdigit(),
-        ['\\', 'u', a, b, c, d] => [a, b, c, d].iter().all(|h| h.is_ascii_hexdigit()),
-        ['\\', 'u', '{', rest @ .., '}'] => {
-            !rest.is_empty() && rest.len() <= 6 && rest.iter().all(|h| h.is_ascii_hexdigit())
-        }
+        ['\\', ..] => read_escape(chars, 0).is_some_and(|(n, _)| n == chars.len()),
         _ => false,
     }
 }
@@ -359,18 +447,24 @@ pub fn partition_ranges(coverages: &[Vec<CharRange>]) -> Vec<CharRange> {
 }
 
 /// A regex character class matching exactly one span, for the atom
-/// matchers. Returns the pattern and whether it needs the `u` flag
-/// (astral bounds).
-pub fn class_pattern(lo: u32, hi: u32) -> (String, bool) {
-    let astral = lo > 0xffff || hi > 0xffff;
+/// matchers. Returns the pattern and whether it is compiled with `u`: an
+/// astral span is, and so is a span naming a lead surrogate when the
+/// classes it stands for read code points (`code_points`), since without
+/// `u` the canonical matcher would take the first half of an astral
+/// character where they take only a lead surrogate standing alone. An
+/// atom compiled with `u` spells its bounds in braces, so its name says
+/// which reading it has. Mirrors TS `classPattern` (tabnas/bnf#75
+/// review).
+pub fn class_pattern(lo: u32, hi: u32, code_points: bool) -> (String, bool) {
+    let unicode = hi > 0xffff || (code_points && lo <= 0xDBFF && 0xD800 <= hi);
     let esc = |cp: u32| {
-        if astral {
+        if unicode {
             format!("\\u{{{:X}}}", cp)
         } else {
             format!("\\u{:04X}", cp)
         }
     };
-    (format!("[{}-{}]", esc(lo), esc(hi)), astral)
+    (format!("[{}-{}]", esc(lo), esc(hi)), unicode)
 }
 
 /// What every character class in the grammar covers, which of them
@@ -393,6 +487,9 @@ pub struct ClassAnalysis {
 
 pub fn class_analysis(terminals: &[Element]) -> ClassAnalysis {
     let mut coverage: IndexMap<String, Vec<CharRange>> = IndexMap::new();
+    // The classes the canonical matcher reads in UTF-16 code units: no
+    // `u` or `v`.
+    let mut code_units: IndexSet<String> = IndexSet::new();
     for el in terminals {
         let Kind::Regex { pattern, flags } = &el.kind else {
             continue;
@@ -406,9 +503,32 @@ pub fn class_analysis(terminals: &[Element]) -> ClassAnalysis {
         // one-character atoms, so anything that could match more would
         // lose the rest.
         if let Some(r) = single_code_point_ranges(pattern, flags) {
+            if !flags.contains(['u', 'v']) {
+                code_units.insert(key.clone());
+            }
             coverage.insert(key, normalize_ranges(&r));
         }
     }
+
+    // A lead surrogate means one thing to a class read in code points, a
+    // lead surrogate standing alone, and another to a class read in code
+    // units, which also takes it as the first half of every astral
+    // character it begins. No one atom can be both, so a class read in
+    // code units that names a lead surrogate some class read in code
+    // points names as well is left out, and keeps its own matcher. The
+    // `regex` crate reads code points whatever the flags say, but this
+    // port leaves the same classes out, so the three ports emit the same
+    // grammar. Mirrors TS `classAnalysis` (tabnas/bnf#75 review).
+    let point_leads = normalize_ranges(
+        &coverage
+            .iter()
+            .filter(|(key, _)| !code_units.contains(*key))
+            .flat_map(|(_, r)| lead_surrogates(r))
+            .collect::<Vec<_>>(),
+    );
+    coverage.retain(|key, r| {
+        !(code_units.contains(key) && char_ranges_overlap(&lead_surrogates(r), &point_leads))
+    });
 
     let mut contested = IndexSet::new();
     for (key, mine) in &coverage {
@@ -538,12 +658,26 @@ mod tests {
     #[test]
     fn class_pattern_spells_the_span_as_the_canonical_compiler_does() {
         assert_eq!(
-            class_pattern(b'0' as u32, b'9' as u32),
+            class_pattern(b'0' as u32, b'9' as u32, false),
             ("[\\u0030-\\u0039]".to_string(), false)
         );
         assert_eq!(
-            class_pattern(0x1F600, 0x1F64F),
+            class_pattern(0x1F600, 0x1F64F, false),
             (r"[\u{1F600}-\u{1F64F}]".to_string(), true)
+        );
+        // A span naming a lead surrogate is compiled in the reading of the
+        // classes it stands for; a trail surrogate reads alike either way.
+        assert_eq!(
+            class_pattern(0xD000, 0xD800, true),
+            (r"[\u{D000}-\u{D800}]".to_string(), true)
+        );
+        assert_eq!(
+            class_pattern(0xD000, 0xD800, false),
+            ("[\\uD000-\\uD800]".to_string(), false)
+        );
+        assert_eq!(
+            class_pattern(0xDC00, 0xDFFF, true),
+            ("[\\uDC00-\\uDFFF]".to_string(), false)
         );
     }
 
@@ -569,10 +703,10 @@ mod tests {
             r"\d",
         ] {
             assert_eq!(regex_head_atom_end(p), None, "{p}");
-            assert_eq!(pattern_char_ranges(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), None, "{p}");
         }
         for p in [r"[\p{L}]", r"[a\1]", r"[\u1]"] {
-            assert_eq!(pattern_char_ranges(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), None, "{p}");
         }
         for (p, end, cp) in [
             (r"\u0041", 6, 0x41),
@@ -581,25 +715,84 @@ mod tests {
             (r"\.", 2, 0x2E),
         ] {
             assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
-            assert_eq!(pattern_char_ranges(p), Some(vec![(cp, cp)]), "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), Some(vec![(cp, cp)]), "{p}");
         }
     }
 
     #[test]
-    fn pattern_char_ranges_reads_the_emitter_shapes() {
-        assert_eq!(pattern_char_ranges("[a-c]"), Some(vec![(97, 99)]));
-        assert_eq!(pattern_char_ranges(r"A"), Some(vec![(65, 65)]));
+    fn an_escape_is_read_as_the_regex_crate_reads_it() {
+        // The dialect the matchers compile in, not JavaScript's. Mirrors
+        // TestContestEscapeIsReadAsRE2ReadsIt in go/contest_test.go.
+        for (p, end, cp) in [
+            (r"\a", 2, 0x07),
+            (r"\U00000041", 10, 0x41),
+            (r"\U{1F600}", 9, 0x1F600),
+            (r"\x{41}", 6, 0x41),
+            (r"\x{0000000041}", 14, 0x41),
+            (r"\-", 2, 0x2D),
+            (r"\#", 2, 0x23),
+        ] {
+            assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), Some(vec![(cp, cp)]), "{p}");
+        }
         assert_eq!(
-            pattern_char_ranges(r"[\x41-\x43x]"),
+            pattern_char_ranges(r"[\a-\x{0D}]", ""),
+            Some(vec![(0x07, 0x0D)])
+        );
+        // Zero-width assertions, letters the crate does not define, and
+        // hex escapes naming no scalar value.
+        for p in [
+            r"\A",
+            r"\z",
+            r"\b",
+            r"\B",
+            r"\<",
+            r"\>",
+            r"\e",
+            r"\Q",
+            r"\U0000D800",
+            r"\U00110000",
+            r"\x{D800}",
+            r"\u{D800}",
+            r"\U{110000}",
+        ] {
+            assert_eq!(regex_head_atom_end(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), None, "{p}");
+        }
+        // The partition sees the same reading.
+        assert_eq!(
+            single_code_point_ranges(r"\U00000041", ""),
+            Some(vec![(0x41, 0x41)])
+        );
+        assert_eq!(single_code_point_ranges(r"\a", ""), Some(vec![(7, 7)]));
+        assert_eq!(single_code_point_ranges(r"\A", ""), None);
+    }
+
+    #[test]
+    fn pattern_char_ranges_reads_the_emitter_shapes() {
+        assert_eq!(pattern_char_ranges("[a-c]", ""), Some(vec![(97, 99)]));
+        // In code units an astral character in a class is also its two
+        // surrogates; under `u` it is the code point alone.
+        assert_eq!(
+            pattern_char_ranges("[\u{1F600}]", ""),
+            Some(vec![(0xD83D, 0xD83D), (0xDE00, 0xDE00), (0x1F600, 0x1F600)])
+        );
+        assert_eq!(
+            pattern_char_ranges("[\u{1F600}]", "u"),
+            Some(vec![(0x1F600, 0x1F600)])
+        );
+        assert_eq!(pattern_char_ranges(r"A", ""), Some(vec![(65, 65)]));
+        assert_eq!(
+            pattern_char_ranges(r"[\x41-\x43x]", ""),
             Some(vec![(65, 67), (120, 120)])
         );
         assert_eq!(
-            pattern_char_ranges(r"[\s\S]"),
+            pattern_char_ranges(r"[\s\S]", ""),
             Some(vec![(0, MAX_CODE_POINT)])
         );
-        assert_eq!(pattern_char_ranges(r"\d"), None);
+        assert_eq!(pattern_char_ranges(r"\d", ""), None);
         assert_eq!(
-            pattern_char_ranges("[^a]"),
+            pattern_char_ranges("[^a]", ""),
             Some(vec![(0, 96), (98, MAX_CODE_POINT)])
         );
     }

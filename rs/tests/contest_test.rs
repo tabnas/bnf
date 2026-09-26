@@ -198,3 +198,95 @@ fn an_escape_whose_code_point_cannot_be_read_is_not_an_exact_head() {
     let exact = emit_grammar_spec(&semi(rx(r"\u0041", ""), sens_term("u")), &opts(false)).unwrap();
     assert_eq!(depths(&exact), [1, 1]);
 }
+
+#[test]
+fn an_escape_is_read_as_the_regex_crate_reads_it() {
+    // This port compiles every matcher with the `regex` crate, so an
+    // escape is read as that crate reads it, not as JavaScript does. `\a`
+    // is BEL, which a JavaScript matcher reads as the letter `a`, and
+    // `\U` spells a code point in eight hex digits or in braces. Read as
+    // the letter after the backslash, each of these heads was held apart
+    // from a literal BEL it takes, and the literal's branch was never
+    // reached. Mirrors TestContestEscapeIsReadAsRE2ReadsIt in
+    // go/contest_test.go.
+    for pattern in [
+        r"\a",
+        r"[\a]",
+        r"\a+",
+        r"[\U00000007]",
+        r"[\U{7}]",
+        r"\x{7}",
+    ] {
+        let spec =
+            emit_grammar_spec(&semi(rx(pattern, ""), sens_term("\x07")), &opts(false)).unwrap();
+        assert_eq!(depths(&spec), [2, 2], "{pattern}");
+        assert!(parses(&spec, "\x07;;!!", true), "{pattern}");
+        assert!(parses(&spec, "\x07!!;;", true), "{pattern}");
+    }
+}
+
+// A head the canonical matcher reads in code units (no `u` or `v`) that
+// names a lead surrogate meets every astral character that surrogate
+// begins: there it takes U+D800 as the first half of U+10000. Compared as
+// code points the heads were disjoint and the decision stayed one token
+// deep. The crate never meets a surrogate, but this port decides alike,
+// so the three ports emit the same grammar (tabnas/bnf#75 review). The
+// crate spells no surrogate, so the head names the lead surrogates by
+// spanning them, and the TS lone-surrogate literal has no spelling here.
+#[test]
+fn a_head_read_in_code_units_naming_a_lead_surrogate_meets_an_astral_head() {
+    let emit =
+        |g: Grammar| emit_grammar_spec(&g, &ConvertOptions::tag("ct").start("doc")).expect("emit");
+    let spanning = r"[\x{D7FF}-\x{E000}]";
+    let astral = || rx(r"\x{10000}", "u");
+    for (label, b) in [
+        ("escape", astral()),
+        ("class", rx(r"[\x{10000}-\x{10FFFF}]", "u")),
+        ("astral literal", sens_term("\u{10000}")),
+    ] {
+        let spec = emit(semi(rx(spanning, ""), b));
+        assert_eq!(depths(&spec), [2, 2], "{label}");
+        assert!(parses(&spec, "\u{10000}!!;;", true), "{label}");
+    }
+    // Read in code points a lead surrogate is only ever one standing
+    // alone, and meets no astral character, whether the class keeps its
+    // own matcher or is laid over the partition, whose atoms read as the
+    // classes they stand for.
+    let alone = emit(semi(rx(spanning, "u"), astral()));
+    let mut contested = semi(rx(spanning, "u"), astral());
+    contested.productions[0]
+        .alts
+        .push(vec![rx(r"[\x{D000}-\x{E000}]", "u")]);
+    let contested = emit(contested);
+    let sets = |spec: &GrammarSpec| {
+        spec.options
+            .get("tokenSet")
+            .is_some_and(|s| s.as_object().is_some_and(|o| !o.is_empty()))
+    };
+    assert!(!sets(&alone), "alone");
+    assert!(sets(&contested), "partitioned");
+    for (label, spec) in [("alone", alone), ("partitioned", contested)] {
+        assert_eq!(depths(&spec), [1, 1], "{label}");
+        assert!(parses(&spec, "\u{10000}!!;;", false), "{label}");
+    }
+}
+
+// A class the canonical matcher reads in code units (no `u` or `v`) holds
+// an astral character written in it as its lead and trail surrogates, so
+// `[😀]` meets a `😁` head through the lead. The crate reads the code
+// point, but this port adds the units beside it, so the three ports emit
+// the same grammar (tabnas/bnf#75 review). Mirrors the TS and Go tests.
+#[test]
+fn a_class_read_in_code_units_takes_an_astral_character_as_two() {
+    let emit =
+        |g: Grammar| emit_grammar_spec(&g, &ConvertOptions::tag("ct").start("doc")).expect("emit");
+    for p in ["[\u{1F600}]", "[b\u{1F600}]"] {
+        let spec = emit(semi(rx(p, ""), sens_term("\u{1F601}")));
+        assert_eq!(depths(&spec), [2, 2], "{p}");
+        assert!(parses(&spec, "\u{1F601}!!;;", true), "{p}");
+    }
+    for (p, f) in [("[\u{1F600}]", "u"), ("\u{1F600}", "")] {
+        let spec = emit(semi(rx(p, f), sens_term("\u{1F601}")));
+        assert_eq!(depths(&spec), [1, 1], "{p} {f}");
+    }
+}

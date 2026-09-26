@@ -77,7 +77,7 @@ normalised.
 |---|---|
 | `planValueAnnotations` | Records what each production builds, when a front-end says it builds something rather than the default node. |
 | `resolveProseTerminals` | Drops a production whose whole body is prose naming a builtin token, so references resolve to the builtin. |
-| `liftLiteralTokens` | Gives a literal the name of the production that defines it, so `PL = "+"` becomes `#PL` rather than `#T1`. |
+| `liftLiteralTokens` | Gives a literal the name of the production that defines it, so `PL = "+"` becomes `#PL` rather than `#T1`. A production name holding whitespace would split into two token names in an alternate's `s`, so the literal keeps the name its text gives it instead. |
 | `normalizeBuiltinTokens` | Turns a bareword naming a builtin into a `KindToken` element. |
 | `eliminateLeftRecursion` | Rewrites a left-recursive production into a seed plus a tail loop. |
 | `rewriteProbeDispatches` | Synthesises a dispatcher for a subsequence the engine's bounded lookahead cannot decide. |

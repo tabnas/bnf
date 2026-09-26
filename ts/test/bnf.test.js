@@ -139,6 +139,44 @@ describe('bnf', () => {
     }
   })
 
+  // OPEN DIVERGENCE — DIVERGENCE.md, "An escape is read in the dialect of
+  // the engine that runs it". The twins are TestEscapeIsReadInTheRE2Dialect
+  // (go/bnf_test.go) and an_escape_is_read_in_the_regex_crate_dialect
+  // (rs/tests/divergence_test.rs). Whether a regex head can meet a literal
+  // decides how deep the dispatch looks, and each port reads the head's
+  // escapes as the matcher its own engine compiles does: `\a` is the
+  // letter `a` to JavaScript and BEL to RE2 and the regex crate. Each row
+  // is this port's side of the table on that page, so repairing any port
+  // turns its test red and the three are revisited together.
+  it('reads an escape as JavaScript does (Go and Rust read their own dialects)', () => {
+    const lit = (s) => ({ kind: 'term', literal: s, caseSensitive: true })
+    const semi = (a, b) => ({
+      productions: [
+        { name: 'doc', alts: [[ref('x')]] },
+        { name: 'x', alts: [[a, ref('t'), ref('u')], [b, ref('u'), ref('t')]] },
+        { name: 't', alts: [[lit(';'), lit(';')]] },
+        { name: 'u', alts: [[lit('!'), lit('!')]] },
+      ],
+    })
+    for (const [pattern, literal, depth] of [
+      ['\\a', '\x07', 1],
+      ['\\a', 'a', 2],
+      ['\\x{41}', 'x', 2],
+      ['\\U00000041', 'U', 2],
+      ['\\A', 'x', 1],
+      ['\\z', 'x', 1],
+      ['\\<', 'x', 1],
+      ['\\>', 'x', 1],
+    ]) {
+      const spec = emitGrammarSpec(semi({ kind: 'regex', pattern, flags: '' }, lit(literal)),
+        { tag: 'ct', start: 'doc' })
+      assert.deepEqual(spec.rule.x.open.map((o) => o.s.split(' ').length), [depth, depth],
+        pattern + ' beside ' + JSON.stringify(literal) + ': if this port reads the ' +
+        'escape as the others do, delete this test, its twins and the page\'s ' +
+        'entry together')
+    }
+  })
+
   it('lifts a single-literal production into a named lexer token', () => {
     const spec = emitGrammarSpec({
       productions: [
@@ -590,6 +628,25 @@ describe('bnf', () => {
 
     // A name the engine does not own is still used as-is.
     assert.deepEqual(lift('PL'), { '#PL': 'PL' })
+  })
+
+  it('never names a lifted literal after a production whose name holds whitespace', () => {
+    // An alternate's `s` separates token names with whitespace, so a
+    // literal lifted as `#P L` was looked up as `#P` and `L`, and `ab`
+    // was refused. The literal takes the name its text gives it instead.
+    // The whitespace is every runtime's: JavaScript's `\s` and U+0085.
+    const { Tabnas } = require('@tabnas/parser')
+    for (const name of ['P L', 'P\tL', 'P\u00a0L', 'P\u0085L', 'P\ufeffL', 'P\u3000L']) {
+      const spec = emitGrammarSpec({
+        productions: [
+          { name: 'doc', alts: [[ref('x')]] },
+          { name: 'x', alts: [[ref(name), { kind: 'term', literal: 'b', caseSensitive: true }]] },
+          { name, alts: [[{ kind: 'term', literal: 'a', caseSensitive: true }]] },
+        ],
+      }, { tag: 'demo', start: 'doc' })
+      assert.deepEqual(spec.options.fixed.token, { '#A': 'a', '#B': 'b' }, JSON.stringify(name))
+      assert.equal(new Tabnas().grammar(spec).parse('ab').rule, 'doc', JSON.stringify(name))
+    }
   })
 
   // Left factoring rewrites a user rule's alternatives, so it must fire

@@ -36,6 +36,10 @@ import (
 type contestCtx struct {
 	fixedTokens map[string]*string        // token name -> literal
 	matchTokens map[string]*regexp.Regexp // token name -> matcher
+	// codePoints names the match tokens the canonical compiler compiles
+	// with `u` or `v`, which read code points; every other token reads
+	// UTF-16 code units there (codeUnitReach).
+	codePoints map[string]bool
 	// setRanges is the coverage of a class that became a token SET over
 	// atoms, so it appears in neither token table. Without it the
 	// contest checks read "we do not know what this covers" and go
@@ -317,7 +321,7 @@ func (c *contestCtx) tokenRangesOf(tok string) []charRange {
 	var r []charRange
 	if lit, ok := c.fixedTokens[tok]; ok && lit != nil && *lit != "" {
 		cp := []rune(*lit)[0]
-		r = []charRange{{cp, cp}}
+		r = codeUnitReach([]charRange{{cp, cp}}, "")
 	} else if re, ok := c.matchTokens[tok]; ok && re != nil {
 		src := re.String()
 		// Strip the emitter's own inline case flag and `^` anchor (and
@@ -331,7 +335,11 @@ func (c *contestCtx) tokenRangesOf(tok string) []charRange {
 		if strings.HasPrefix(src, "(?:") && strings.HasSuffix(src, ")") {
 			src = src[3 : len(src)-1]
 		}
-		r = patternCharRanges(src)
+		flags := ""
+		if c.codePoints[tok] {
+			flags = "u"
+		}
+		r = patternCharRanges(src, flags)
 		// A case-insensitive matcher covers both cases of every letter
 		// it names, and the pattern text only spells one of them. ABNF
 		// literals are case-insensitive by default, so without this an
@@ -341,6 +349,9 @@ func (c *contestCtx) tokenRangesOf(tok string) []charRange {
 		// with firstCharRangesOfElement, which folds case already.
 		if r != nil && fold {
 			r = foldCaseRanges(r)
+		}
+		if r != nil {
+			r = codeUnitReach(r, flags)
 		}
 	}
 
@@ -930,6 +941,9 @@ type classAnalysis struct {
 func newClassAnalysis(terminals []*Element) *classAnalysis {
 	coverage := map[string][]charRange{}
 	var order []string
+	// The classes the canonical matcher reads in UTF-16 code units: no
+	// `u` or `v`.
+	codeUnits := map[string]bool{}
 	for _, el := range terminals {
 		if el.Kind != KindRegex {
 			continue
@@ -950,7 +964,36 @@ func newClassAnalysis(terminals []*Element) *classAnalysis {
 		}
 		coverage[key] = normalizeRanges(r)
 		order = append(order, key)
+		if !strings.ContainsAny(el.Flags, "uv") {
+			codeUnits[key] = true
+		}
 	}
+
+	// A lead surrogate means one thing to a class read in code points, a
+	// lead surrogate standing alone, and another to a class read in code
+	// units, which also takes it as the first half of every astral
+	// character it begins. No one atom can be both, so a class read in
+	// code units that names a lead surrogate some class read in code
+	// points names as well is left out, and keeps its own matcher. RE2
+	// reads code points whatever the flags say, but this port leaves the
+	// same classes out, so the three ports emit the same grammar. Mirrors
+	// TS classAnalysis (tabnas/bnf#75 review).
+	var pointLeads []charRange
+	for _, key := range order {
+		if !codeUnits[key] {
+			pointLeads = append(pointLeads, leadSurrogates(coverage[key])...)
+		}
+	}
+	pointLeads = normalizeRanges(pointLeads)
+	kept := order[:0:0]
+	for _, key := range order {
+		if codeUnits[key] && charRangesOverlap(leadSurrogates(coverage[key]), pointLeads) {
+			delete(coverage, key)
+			continue
+		}
+		kept = append(kept, key)
+	}
+	order = kept
 
 	contested := map[string]bool{}
 	for _, key := range order {

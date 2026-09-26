@@ -133,6 +133,15 @@ ports.
 
 - **`\b` for `wordKeywords`.** The engine's `regex` crate has no
   lookaround; `(?![A-Za-z0-9_])` cannot be expressed. Go does the same.
+- **Escapes are read in the `regex` crate's dialect.** `read_escape` in
+  `src/ranges.rs` names what the crate compiles, not what JavaScript
+  would: `\a` is BEL, `\U…` and `\x{…}` are code points, and `\A`, `\z`,
+  `\<` and `\>` are zero-width, so they name none. For an escape the two
+  dialects read differently, this port's matcher takes different input
+  from the canonical compiler's, and the dispatch it emits can differ to
+  match. No front-end writes such an escape, and the oracle corpus holds
+  none. The control escapes `\f`, `\n`, `\r`, `\t` and `\v`, which both
+  dialects share, stay unnamed as the canonical reader leaves them.
 - **`is_matcher_token_name` is a list.** TypeScript asks the engine
   (`util.isMatcherToken`); the Rust engine exports no such helper, so the
   list mirrors `MATCHER_TOKEN_NAMES` in `parser/ts/src/utility.ts`

@@ -177,13 +177,16 @@ func firstCharRangesOfElement(el *Element, grammar *Grammar, visited map[string]
 			lo := toLowerRune(cp)
 			up := toUpperRune(cp)
 			if lo == up {
-				return []charRange{{cp, cp}}
+				return codeUnitReach([]charRange{{cp, cp}}, "")
 			}
-			return []charRange{{lo, lo}, {up, up}}
+			return codeUnitReach([]charRange{{lo, lo}, {up, up}}, "")
 		}
-		return []charRange{{cp, cp}}
+		return codeUnitReach([]charRange{{cp, cp}}, "")
 	case KindRegex:
-		return patternCharRanges(el.Pattern)
+		if r := patternCharRanges(el.Pattern, el.Flags); r != nil {
+			return codeUnitReach(r, el.Flags)
+		}
+		return nil
 	case KindRef:
 		if visited[el.Name] {
 			return nil

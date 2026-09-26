@@ -1591,3 +1591,32 @@ fn a_long_reference_chain_compiles() {
     let spec = emit_grammar_spec(&Grammar::new(prods), &demo()).expect("a long chain compiles");
     assert!(spec.rule.contains_key("r0"));
 }
+
+// An alternate's `s` separates token names with whitespace, so a literal
+// lifted as `#P L` was looked up as `#P` and `L`, and `ab` was refused.
+// The literal takes the name its text gives it instead. Mirrors the TS
+// and Go tests of the same name.
+#[test]
+fn never_names_a_lifted_literal_after_a_production_whose_name_holds_whitespace() {
+    for name in [
+        "P L",
+        "P\tL",
+        "P\u{a0}L",
+        "P\u{85}L",
+        "P\u{feff}L",
+        "P\u{3000}L",
+    ] {
+        let spec = emit(
+            Grammar::new(vec![
+                prod("doc", vec![vec![reference("x")]]),
+                prod("x", vec![vec![reference(name), sens_term("b")]]),
+                prod(name, vec![vec![sens_term("a")]]),
+            ]),
+            ConvertOptions::tag("demo").start("doc"),
+        );
+        let fixed = spec.options["fixed"]["token"].as_object().unwrap();
+        let names: Vec<&String> = fixed.keys().collect();
+        assert_eq!(names, ["#A", "#B"], "{name:?}");
+        assert!(parse_with(&spec, "ab").is_ok(), "{name:?}");
+    }
+}

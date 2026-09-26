@@ -193,4 +193,74 @@ describe('contest', () => {
     assert.deepEqual(depthsOf(exact), [1, 1])
   })
 
+  it('a head read in code units that names a lead surrogate meets an astral head', () => {
+    // Without `u` or `v` a matcher reads UTF-16 code units, and takes
+    // U+D800 as the first half of U+10000 as well as standing alone, so
+    // `\uD800` and `\u{10000}/u` both take U+10000. Compared as code
+    // points they were disjoint, the decision stayed one token deep, and
+    // the first branch took the first half of U+10000 and refused input
+    // the second accepts (tabnas/bnf#75 review). A literal is matched in
+    // code units too.
+    const astral = rx('\\u{10000}', 'u')
+    for (const [label, a, b] of [
+      ['escape', rx('\\uD800'), astral],
+      ['class', rx('[\\uD800-\\uDBFF]'), rx('[\\u{10000}-\\u{10FFFF}]', 'u')],
+      ['literal', lit('\uD800'), astral],
+      ['astral literal', rx('\\uD800'), lit('\u{10000}')],
+    ]) {
+      const spec = emitGrammarSpec(semi(a, b), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], label)
+      assert.ok(parses(spec, '\u{10000}!!;;', { lex: { relex: true } }), label)
+    }
+    // Under `u` a lead surrogate is only ever one standing alone, and
+    // meets no astral character, whether the class keeps its own matcher
+    // or is laid over the partition, whose atoms read as the classes they
+    // stand for.
+    const lone = rx('[\\uD800]', 'u')
+    const contested = semi(lone, astral)
+    contested.productions[0].alts.push([rx('[\\uD800-\\uDBFF]', 'u')])
+    for (const [label, g] of [['alone', semi(lone, astral)], ['partitioned', contested]]) {
+      const spec = emitGrammarSpec(g, { tag: 'ct', start: 'doc' })
+      assert.equal(0 < Object.keys(spec.options.tokenSet ?? {}).length, 'partitioned' === label, label)
+      assert.deepEqual(depthsOf(spec), [1, 1], label)
+      assert.ok(parses(spec, '\u{10000}!!;;'), label)
+    }
+  })
+
+  it('a class read in code units takes an astral character it holds as two', () => {
+    // Without `u` or `v` JavaScript reads `[😀]` as its lead and trail
+    // surrogates, so it takes the first half of U+1F601 as well. Read as
+    // U+1F600 alone, it and a `😁` head were disjoint, and the class took
+    // the lead surrogate of `😁` from the literal's branch (tabnas/bnf#75
+    // review).
+    for (const pattern of ['[\u{1F600}]', '[b\u{1F600}]']) {
+      const spec = emitGrammarSpec(semi(rx(pattern), lit('\u{1F601}')), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], pattern)
+      assert.ok(parses(spec, '\u{1F601}!!;;', { lex: { relex: true } }), pattern)
+    }
+    // Under `u` the class holds the code point alone, and a bare `😀`, a
+    // sequence, takes only the whole pair.
+    for (const [pattern, flags] of [['[\u{1F600}]', 'u'], ['\u{1F600}', '']]) {
+      const spec = emitGrammarSpec(semi(rx(pattern, flags), lit('\u{1F601}')), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [1, 1], pattern + ' ' + flags)
+    }
+  })
+
+  it('a repetition ending on a surrogate escape keeps its exit guard', () => {
+    // doc = *[\u0041-\ud800] "A" ";" -- ABNF `*%x41-D800 %x41 %x3B`. The
+    // class covers the `A` the tail needs, so the loop carries a two-token
+    // exit guard that yields it. Coverage read as unknown meets nothing
+    // (tokensOverlap), so the guard was dropped and the loop ate the `A`.
+    const star = (inner) => ({ kind: 'star', inner })
+    const spec = emitGrammarSpec({
+      productions: [prod('doc', [star(rx('[\\u0041-\\ud800]')), lit('A'), lit(';')])],
+    }, { tag: 'ct', start: 'doc' })
+    const guards = Object.values(spec.rule)
+      .flatMap((r) => r.open ?? []).filter((o) => '#A #T' === o.s && 2 === o.b)
+    assert.equal(guards.length, 1, 'the loop yields on `A ;`')
+    for (const src of ['A;', 'BA;', 'BBA;']) {
+      assert.ok(parses(spec, src, { lex: { relex: true } }), src)
+    }
+  })
+
 })

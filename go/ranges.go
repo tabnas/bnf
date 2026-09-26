@@ -32,8 +32,9 @@ const maxCodePoint = 0x10FFFF
 // guard rather than a wrong one.
 //
 // It handles exactly what the emitter itself produces: a leading
-// character class with \uXXXX / \u{…} / \xXX escapes and ranges,
-// `[\s\S]`, negation, or a single (possibly escaped) literal character.
+// character class with \x{…} / \xXX escapes and ranges, `[\s\S]`,
+// negation, or a single (possibly escaped) literal character, each escape
+// read as RE2 reads it (readEscape).
 // Trailing content after the first class (`[aA][bB]`, boundary guards)
 // is irrelevant: only the FIRST character's coverage decides whether
 // two tokens can contest one input position.
@@ -81,22 +82,29 @@ func regexHeadAtomEnd(src string) int {
 	return size
 }
 
-// readEscape reads the escape at r[at] as one code point: its length in
-// runes and the code point, or ok false when it is not one this can name.
-// A shorthand class, a control or property escape, a group or back
-// reference, and a digit escape all bail rather than guess, and so does a
-// hex escape without its full digits (`\u1` is `u` then `1` in the
-// JavaScript matcher the canonical runtime emits for, not U+0001) or one
-// naming half of a surrogate pair. Unknown coverage keeps every caller
-// conservative. Mirrors the TS readEscape, plus RE2's `\x{…}`: the TS side
-// never writes that form (JavaScript spells it `\u{…}`), but the Go
-// emitter does, for every character class it builds.
+// readEscape reads the escape at r[at] as one code point by RE2's rules,
+// the dialect of Go's regexp, which compiles every matcher this port
+// emits: its length in runes and the code point, or ok false when it is
+// not one this can name.
+//
+// A hex escape is the code point it spells, in RE2's two forms: `\xHH`
+// with both digits, and `\x{…}`, which the Go emitter writes for every
+// character class it builds. `\a` is BEL, U+0007, and escaped ASCII
+// punctuation is the character itself. Everything else bails rather than
+// guess: a shorthand or property class, an octal or digit escape, the
+// zero-width `\A`, `\z`, `\b` and `\B`, the quoting `\Q…\E`, and every
+// letter RE2 does not define, JavaScript's `\u` and `\c` among them (Go's
+// regexp refuses those, so such a matcher never compiles). `\f`, `\n`,
+// `\r`, `\t` and `\v` bail as well although RE2 names them, because the
+// canonical TypeScript reader declines them, and where the two dialects
+// agree the two runtimes should decide alike. Unknown coverage keeps the
+// dispatcher conservative.
 func readEscape(r []rune, at int) (int, rune, bool) {
 	if at+1 >= len(r) {
 		return 0, 0, false
 	}
-	m := r[at+1]
-	if (m == 'u' || m == 'x') && at+2 < len(r) && r[at+2] == '{' {
+	switch m := r[at+1]; {
+	case m == 'x' && at+2 < len(r) && r[at+2] == '{':
 		e := -1
 		for k := at + 3; k < len(r); k++ {
 			if r[k] == '}' {
@@ -112,25 +120,18 @@ func readEscape(r []rune, at int) (int, rune, bool) {
 			return 0, 0, false
 		}
 		return e + 1 - at, rune(cp), true
-	}
-	if m == 'u' || m == 'x' {
-		digits := 4
-		if m == 'x' {
-			digits = 2
-		}
-		if at+2+digits > len(r) || !hexDigits(r[at+2:at+2+digits], digits, digits) {
+	case m == 'x':
+		if at+4 > len(r) || !hexDigits(r[at+2:at+4], 2, 2) {
 			return 0, 0, false
 		}
-		cp, _ := strconv.ParseInt(string(r[at+2:at+2+digits]), 16, 32)
-		if 0xD800 <= cp && cp <= 0xDFFF {
-			return 0, 0, false
-		}
-		return 2 + digits, rune(cp), true
+		cp, _ := strconv.ParseInt(string(r[at+2:at+4]), 16, 32)
+		return 4, rune(cp), true
+	case m == 'a':
+		return 2, 0x07, true
+	case m < utf8.RuneSelf && !('0' <= m && m <= '9' || 'a' <= m && m <= 'z' || 'A' <= m && m <= 'Z'):
+		return 2, m, true
 	}
-	if strings.ContainsRune("dDwWsSbBnrtfvckpP0123456789", m) {
-		return 0, 0, false
-	}
-	return 2, m, true
+	return 0, 0, false
 }
 
 // hexDigits reports whether r is between min and max hexadecimal digits.
@@ -146,7 +147,7 @@ func hexDigits(r []rune, min, max int) bool {
 	return true
 }
 
-func patternCharRanges(pattern string) []charRange {
+func patternCharRanges(pattern, flags string) []charRange {
 	if pattern == `[\s\S]` {
 		return []charRange{{0, maxCodePoint}}
 	}
@@ -193,17 +194,36 @@ func patternCharRanges(pattern string) []charRange {
 	}
 
 	out := []charRange{}
+	// Without `u` or `v` the canonical matcher reads a class in UTF-16 code
+	// units, so an astral character written in one is two members, its
+	// lead and trail surrogates: `[😀]` takes the first half of U+1F601 as
+	// well. RE2 reads the code point, which is kept, and the two units are
+	// added beside it, so the contest checks reach from the lead as the
+	// canonical compiler's do (codeUnitReach) and the three ports emit the
+	// same grammar. Mirrors TS patternCharRanges (tabnas/bnf#75 review).
+	units := !strings.ContainsAny(flags, "uv")
+	split := func(raw bool, cp rune) {
+		if raw && units && cp > 0xFFFF {
+			lead := 0xD800 + (cp-0x10000)>>10
+			trail := 0xDC00 + (cp-0x10000)&0x3FF
+			out = append(out, charRange{lead, lead}, charRange{trail, trail})
+		}
+	}
 	for i < len(r) && r[i] != ']' {
+		raw := r[i] != '\\'
 		lo, ok := one()
 		if !ok {
 			return nil
 		}
+		split(raw, lo)
 		if i < len(r) && r[i] == '-' && i+1 < len(r) && r[i+1] != ']' {
 			i++
+			raw := r[i] != '\\'
 			hi, ok := one()
 			if !ok {
 				return nil
 			}
+			split(raw, hi)
 			out = append(out, charRange{lo, hi})
 			continue
 		}
@@ -233,6 +253,51 @@ func patternCharRanges(pattern string) []charRange {
 		comp = append(comp, charRange{next, maxCodePoint})
 	}
 	return comp
+}
+
+// codeUnitReach is a matcher's first-character coverage in the code
+// points the contest checks compare. Under `u` or `v` the canonical
+// matcher reads code points, and a lead surrogate it names is one
+// standing alone. Without either it reads UTF-16 code units and takes a
+// lead surrogate wherever it stands, the first half of an astral
+// character included, so it can start on every astral character that
+// surrogate begins. RE2 never meets a surrogate in UTF-8 text, but this
+// port widens the same coverage, so the three ports emit the same
+// grammar. A literal is matched in code units there too. Mirrors TS
+// codeUnitReach (tabnas/bnf#75 review).
+func codeUnitReach(r []charRange, flags string) []charRange {
+	if strings.ContainsAny(flags, "uv") {
+		return r
+	}
+	out := append([]charRange{}, r...)
+	for _, span := range r {
+		a, b := max(span.lo, 0xD800), min(span.hi, 0xDBFF)
+		if a <= b {
+			out = append(out, charRange{0x10000 + (a-0xD800)<<10, 0x10000 + (b-0xD800)<<10 + 0x3FF})
+		}
+	}
+	return out
+}
+
+// leadSurrogates is the part of sorted, merged ranges that names a lead
+// surrogate, U+D800 to U+DBFF, still sorted and merged.
+func leadSurrogates(r []charRange) []charRange {
+	var out []charRange
+	for _, span := range r {
+		if span.lo <= 0xDBFF && 0xD800 <= span.hi {
+			out = append(out, charRange{max(span.lo, 0xD800), min(span.hi, 0xDBFF)})
+		}
+	}
+	return out
+}
+
+// atomReadsCodePoints reports whether the canonical compiler compiles
+// an atom with `u`: an astral one always, and one naming a lead
+// surrogate when the classes it stands for read code points. RE2 has no
+// such flag, but the contest checks read coverage by it (codeUnitReach).
+// Mirrors TS classPattern.
+func atomReadsCodePoints(lo, hi rune, codePoints bool) bool {
+	return hi > 0xFFFF || codePoints && lo <= 0xDBFF && 0xD800 <= hi
 }
 
 // foldCaseRanges widens ranges to cover both cases of every ASCII
@@ -353,11 +418,42 @@ func maxRune(a, b rune) rune {
 // a term, not a regex), and a class left out of the partition simply
 // keeps the single token it has always had.
 func singleCodePointRanges(pattern, flags string) []charRange {
+	r := singleCodePointCoverage(pattern, flags)
+	if r != nil && codeUnitMatcherPastBmp(r, flags) {
+		return nil
+	}
+	return r
+}
+
+// codeUnitMatcherPastBmp reports a class the canonical matcher reads in
+// UTF-16 code units whose code-point coverage reaches past U+FFFF: a
+// negation, `[\s\S]` or an astral literal written without `u` or `v`.
+// JavaScript's matcher takes such a class one code unit at a time, and
+// laid over the partition it would be matched by atoms compiled with
+// `u`, which take an astral character whole, so whether a grammar
+// accepted an emoji turned on whether another class overlapped this one.
+// RE2 reads code points whatever the flags say, but this port leaves the
+// same classes out, so the three ports emit the same grammar: the class
+// keeps its own matcher and gives up only the partition's answer for the
+// characters it shares with an overlapping class.
+func codeUnitMatcherPastBmp(r []charRange, flags string) bool {
+	if strings.ContainsAny(flags, "uv") {
+		return false
+	}
+	for _, span := range r {
+		if span.hi > 0xFFFF {
+			return true
+		}
+	}
+	return false
+}
+
+func singleCodePointCoverage(pattern, flags string) []charRange {
 	if strings.Contains(flags, "i") {
 		return nil
 	}
 	if pattern == `[\s\S]` {
-		return patternCharRanges(pattern)
+		return patternCharRanges(pattern, flags)
 	}
 
 	if strings.HasPrefix(pattern, "[") {
@@ -380,20 +476,20 @@ func singleCodePointRanges(pattern, flags string) []charRange {
 		if i != len(pattern)-1 {
 			return nil
 		}
-		return patternCharRanges(pattern)
+		return patternCharRanges(pattern, flags)
 	}
 
-	// A bare single code point, possibly escaped: `a`, `\.`, `\x{41}`,
-	// `\u0041`. Anything longer is a sequence, an alternation or a
+	// A bare single code point, possibly escaped: `a`, `\.`, `\x41`,
+	// `\x{41}`, `\a`. Anything longer is a sequence, an alternation or a
 	// quantified atom, none of which this may touch.
 	if !singleCodePointRe.MatchString(pattern) {
 		return nil
 	}
-	return patternCharRanges(pattern)
+	return patternCharRanges(pattern, flags)
 }
 
 var singleCodePointRe = regexp.MustCompile(
-	`^(?:\\x\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\\[\]()|*+?{}^$.])$`)
+	`^(?:\\x\{[0-9A-Fa-f]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\\[\]()|*+?{}^$.])$`)
 
 // partitionRanges splits a collection of character coverages into
 // ATOMS: the coarsest set of pairwise-disjoint spans such that every

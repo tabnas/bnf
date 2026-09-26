@@ -220,3 +220,93 @@ func TestPartitionNamesAtomsApartFromClasses(t *testing.T) {
 		}
 	}
 }
+
+// A class without u or v whose code-point reading reaches past U+FFFF is
+// left out of the partition, as the TypeScript emitter leaves it:
+// JavaScript's matcher reads it in UTF-16 code units, and atoms compiled
+// with u would take an astral character whole. RE2 reads code points
+// whatever the flags say, so here the rule keeps the emitted grammar the
+// same as TypeScript's, and the class keeps its own matcher. Under u it is
+// still partitioned (tabnas/bnf#75 review).
+func TestPartitionLeavesOutACodeUnitClassPastTheBmp(t *testing.T) {
+	grammar := func(pattern, flags string) *tabnas.GrammarSpec {
+		return emitIR(t, []*Production{
+			{Name: "doc", Alts: []Sequence{
+				{rxEl(pattern, flags), rxEl(pattern, flags), termEl(";")},
+				{rxEl("[b-c]", ""), termEl("!")},
+			}},
+		}, &ConvertOptions{Tag: "cp", Start: "doc"})
+	}
+	for _, pattern := range []string{`[^a]`, `[\s\S]`, "[b\U0001F600]"} {
+		if sets := grammar(pattern, "").Options.TokenSet; len(sets) != 0 {
+			t.Errorf("%q: a class read in code units past U+FFFF must keep its "+
+				"own matcher; got sets %v", pattern, sets)
+		}
+	}
+	if sets := grammar(`[^a]`, "u").Options.TokenSet; len(sets) != 2 {
+		t.Errorf("[^a] under u: want the class and [b-c] laid over the partition, got sets %v", sets)
+	}
+}
+
+// TestPartitionRefusesAPatternWhetherOrNotAnotherClassOverlapsIt pins
+// that a contested class's own matcher is still compiled. Partitioning
+// replaces it with atoms, and it went unbuilt: `[z-a]` beside `[a-z]`
+// became an empty set and the grammar was accepted, where alone RE2
+// refuses it (tabnas/bnf#75 review). Mirrors the TS test of the same
+// name.
+func TestPartitionRefusesAPatternWhetherOrNotAnotherClassOverlapsIt(t *testing.T) {
+	refusal := func(alts []Sequence) string {
+		_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{{Name: "top", Alts: alts}}},
+			&ConvertOptions{Tag: "t"})
+		if err == nil {
+			return ""
+		}
+		return err.Error()
+	}
+	for _, p := range []string{`[z-a]`, `[\x{7a}-\x{61}]`} {
+		alone := refusal([]Sequence{{rxEl(p, "")}})
+		if alone == "" {
+			t.Fatalf("%s alone: accepted", p)
+		}
+		if beside := refusal([]Sequence{{rxEl(p, "")}, {rxEl("[a-z]", "")}}); beside != alone {
+			t.Errorf("%s beside [a-z]: refusal %q, want %q", p, beside, alone)
+		}
+	}
+}
+
+// TestPartitionLeavesOutACodeUnitClassNamingALeadSurrogateACodePointClassNames
+// pins the one case no atom can serve. Read in code units, as the
+// canonical matcher reads a class without `u` or `v`, U+D800 is also the
+// first half of U+10000; read in code points it is only one standing
+// alone. The class read in code units keeps its own matcher and the rest
+// are laid over the partition without it, as in the canonical compiler,
+// so the three ports emit the same grammar (tabnas/bnf#75 review).
+// Mirrors the TS test.
+func TestPartitionLeavesOutACodeUnitClassNamingALeadSurrogateACodePointClassNames(t *testing.T) {
+	own := func(spec *tabnas.GrammarSpec, source string) bool {
+		for _, s := range matchSources(spec) {
+			if s == source {
+				return true
+			}
+		}
+		return false
+	}
+	spec := emitIR(t, []*Production{{Name: "top", Alts: []Sequence{
+		{rxEl(`[\x{41}-\x{d800}]`, "")}, {rxEl(`[^a]`, "u")}, {rxEl(`[\x{41}-\x{5a}]`, "")},
+	}}}, nil)
+	if sets := spec.Options.TokenSet; len(sets) != 2 {
+		t.Errorf("want [^a] and [A-Z] laid over the partition, got sets %v", sets)
+	}
+	if !own(spec, `^[\x{41}-\x{d800}]`) {
+		t.Errorf("the class read in code units should keep its own matcher: %v", matchSources(spec))
+	}
+	// A class read in code units that stops short of the lead surrogates
+	// reads the same either way, and stays in.
+	short := emitIR(t, []*Production{{Name: "top", Alts: []Sequence{
+		{rxEl(`[\x{41}-\x{d7ff}]`, "")}, {rxEl(`[^a]`, "u")},
+	}}}, nil)
+	if sets := short.Options.TokenSet; len(sets) != 2 || own(short, `^[\x{41}-\x{d7ff}]`) {
+		t.Errorf("[A-\\x{d7ff}] should be laid over the partition: sets %v, matchers %v",
+			sets, matchSources(short))
+	}
+}

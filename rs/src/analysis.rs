@@ -680,7 +680,7 @@ pub(crate) fn is_single_segment(alt: &Sequence) -> bool {
 /// Go's `unicode.IsSpace`, together with U+FEFF, which JavaScript's `\s`
 /// counts and they do not (`\s` in turn leaves out U+0085, which they
 /// count). Mirrors the TS `HAS_SPACE`.
-fn is_name_space(c: char) -> bool {
+pub(crate) fn is_name_space(c: char) -> bool {
     c.is_whitespace() || c == '\u{FEFF}'
 }
 
