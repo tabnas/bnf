@@ -86,7 +86,21 @@ var _ = &sharedMu // referenced only by opt-in constructs
 // ignore it; a row that defines options must validate it here, since
 // nothing upstream does.
 func newParser(opts string) (parseFn, error) {
-	return func(src string) (any, error) { gs, err := host.GrammarSpecFromJSON([]byte(src)); if err != nil { return nil, &plug.CompileError{Message: "invalid spec: " + firstLine(err.Error())} }; rec, err := plug.ToRecognitionSpec(gs); if err != nil { return nil, err }; pure, err := plug.ToPureSpec(gs); if err != nil { return nil, err }; return map[string]any{"recognition": rec, "pure": pure}, nil }, nil
+	return func(src string) (any, error) {
+		gs, err := host.GrammarSpecFromJSON([]byte(src))
+		if err != nil {
+			return nil, &plug.CompileError{Message: "invalid spec: " + firstLine(err.Error())}
+		}
+		rec, err := plug.ToRecognitionSpec(gs)
+		if err != nil {
+			return nil, err
+		}
+		pure, err := plug.ToPureSpec(gs)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"recognition": rec, "pure": pure}, nil
+	}, nil
 }
 
 // reply marshals a result document. Marshalling cannot fail for the
