@@ -278,8 +278,10 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 	// escape are a control character, a property, a group or a back
 	// reference, none of them the letter after the backslash. Go's regexp
 	// compiles only some of these, so they are pinned on the two readers.
+	// JavaScript's `\u` is not an RE2 escape at all, so even with its full
+	// digits it names nothing here (readEscape reads RE2).
 	for _, p := range []string{`\u1`, `\x1`, `\u12`, `\uD83D`, `\u{}`, `\u{4g}`, `\x{110000}`,
-		`\cA`, `\p{L}`, `\PL`, `\k<a>`, `\1`, `\0`, `\d`} {
+		`\cA`, `\p{L}`, `\PL`, `\k<a>`, `\1`, `\0`, `\d`, `\u0041`, `\u{1F600}`} {
 		if end := regexHeadAtomEnd(p); end != -1 {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
 		}
@@ -297,7 +299,7 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 		end int
 		cp  rune
 	}{
-		{`\u0041`, 6, 'A'}, {`\x41`, 4, 'A'}, {`\x{41}`, 6, 'A'}, {`\u{1F600}`, 9, 0x1F600}, {`\.`, 2, '.'},
+		{`\x41`, 4, 'A'}, {`\x{41}`, 6, 'A'}, {`\x{1F600}`, 9, 0x1F600}, {`\.`, 2, '.'},
 	} {
 		if end := regexHeadAtomEnd(c.p); end != c.end {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
@@ -315,5 +317,73 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 	}
 	if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
 		t.Fatalf(`[\p{L}]: depths %v, want [2 2]`, d)
+	}
+}
+
+func TestContestEscapeIsReadAsRE2ReadsIt(t *testing.T) {
+	// This port compiles every matcher with Go's regexp, so an escape is
+	// read as RE2 reads it, not as JavaScript does. `\a` is BEL, which a
+	// JavaScript matcher reads as the letter `a`; read as `a`, a head `\a`
+	// was held apart from a literal BEL that it takes, and the literal's
+	// branch was never reached. The zero-width `\A` and `\z`, the quoting
+	// `\Q…\E`, `\C` and letters RE2 does not define name no one code point.
+	for _, c := range []struct {
+		p   string
+		end int
+		cp  rune
+	}{
+		{`\a`, 2, 0x07}, {`\x07`, 4, 0x07}, {`\_`, 2, '_'}, {`\-`, 2, '-'},
+	} {
+		if end := regexHeadAtomEnd(c.p); end != c.end {
+			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
+		}
+		if r := patternCharRanges(c.p); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
+			t.Errorf("patternCharRanges(%q) = %v, want %U", c.p, r, c.cp)
+		}
+	}
+	if r := patternCharRanges(`[\a-\x{0d}]`); len(r) != 1 || r[0] != (charRange{0x07, 0x0D}) {
+		t.Errorf(`patternCharRanges([\a-\x{0d}]) = %v, want U+0007-U+000D`, r)
+	}
+	for _, p := range []string{`\A`, `\z`, `\Qa\E`, `\Q+\E`, `\C`, `\E`, `\e`, `\U00000041`} {
+		if end := regexHeadAtomEnd(p); end != -1 {
+			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
+		}
+		if r := patternCharRanges(p); r != nil {
+			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
+		}
+	}
+	// Through the dispatcher: each of these heads can take the input the
+	// literal takes, so the choice looks two tokens deep and both branches
+	// are reached.
+	for _, c := range []struct{ pattern, text string }{
+		{`\a`, "\a"}, {`[\a]`, "\a"}, {`\a+`, "\a"}, {`\Q+\E`, "+"},
+	} {
+		spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: c.pattern}, ctLit(c.text)),
+			&ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Errorf("%s: depths %v, want [2 2]", c.pattern, d)
+		}
+		for _, src := range []string{c.text + ";;!!", c.text + "!!;;"} {
+			if !ctParses(t, spec, src, true) {
+				t.Errorf("%s: %q should parse", c.pattern, src)
+			}
+		}
+	}
+	// A range ending on a hex escape that names a surrogate is read as RE2
+	// reads it, and laid over the partition beside the class it overlaps.
+	// (The TypeScript reader once named no surrogate escape at all, and
+	// lost the second branch to the lexer.)
+	spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: `[\x{0041}-\x{d800}]`},
+		&Element{Kind: KindRegex, Pattern: `[\x{0041}-\x{005a}]`}), &ConvertOptions{Tag: "ct", Start: "doc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{"A;;!!", "A!!;;", "b;;!!"} {
+		if !ctParses(t, spec, src, false) {
+			t.Errorf("%q should parse", src)
+		}
 	}
 }

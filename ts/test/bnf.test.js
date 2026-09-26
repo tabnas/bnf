@@ -592,6 +592,25 @@ describe('bnf', () => {
     assert.deepEqual(lift('PL'), { '#PL': 'PL' })
   })
 
+  it('never names a lifted literal after a production whose name holds whitespace', () => {
+    // An alternate's `s` separates token names with whitespace, so a
+    // literal lifted as `#P L` was looked up as `#P` and `L`, and `ab`
+    // was refused. The literal takes the name its text gives it instead.
+    // The whitespace is every runtime's: JavaScript's `\s` and U+0085.
+    const { Tabnas } = require('@tabnas/parser')
+    for (const name of ['P L', 'P\tL', 'P\u00a0L', 'P\u0085L', 'P\ufeffL', 'P\u3000L']) {
+      const spec = emitGrammarSpec({
+        productions: [
+          { name: 'doc', alts: [[ref('x')]] },
+          { name: 'x', alts: [[ref(name), { kind: 'term', literal: 'b', caseSensitive: true }]] },
+          { name, alts: [[{ kind: 'term', literal: 'a', caseSensitive: true }]] },
+        ],
+      }, { tag: 'demo', start: 'doc' })
+      assert.deepEqual(spec.options.fixed.token, { '#A': 'a', '#B': 'b' }, JSON.stringify(name))
+      assert.equal(new Tabnas().grammar(spec).parse('ab').rule, 'doc', JSON.stringify(name))
+    }
+  })
+
   // Left factoring rewrites a user rule's alternatives, so it must fire
   // only where the dispatcher genuinely cannot separate them: a
   // factored rule keeps ONE alternative, which merges the per-branch

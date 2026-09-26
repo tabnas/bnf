@@ -193,4 +193,21 @@ describe('contest', () => {
     assert.deepEqual(depthsOf(exact), [1, 1])
   })
 
+  it('a repetition ending on a surrogate escape keeps its exit guard', () => {
+    // doc = *[\u0041-\ud800] "A" ";" -- ABNF `*%x41-D800 %x41 %x3B`. The
+    // class covers the `A` the tail needs, so the loop carries a two-token
+    // exit guard that yields it. Coverage read as unknown meets nothing
+    // (tokensOverlap), so the guard was dropped and the loop ate the `A`.
+    const star = (inner) => ({ kind: 'star', inner })
+    const spec = emitGrammarSpec({
+      productions: [prod('doc', [star(rx('[\\u0041-\\ud800]')), lit('A'), lit(';')])],
+    }, { tag: 'ct', start: 'doc' })
+    const guards = Object.values(spec.rule)
+      .flatMap((r) => r.open ?? []).filter((o) => '#A #T' === o.s && 2 === o.b)
+    assert.equal(guards.length, 1, 'the loop yields on `A ;`')
+    for (const src of ['A;', 'BA;', 'BBA;']) {
+      assert.ok(parses(spec, src, { lex: { relex: true } }), src)
+    }
+  })
+
 })

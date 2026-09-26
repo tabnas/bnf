@@ -32,8 +32,9 @@ const maxCodePoint = 0x10FFFF
 // guard rather than a wrong one.
 //
 // It handles exactly what the emitter itself produces: a leading
-// character class with \uXXXX / \u{…} / \xXX escapes and ranges,
-// `[\s\S]`, negation, or a single (possibly escaped) literal character.
+// character class with \x{…} / \xXX escapes and ranges, `[\s\S]`,
+// negation, or a single (possibly escaped) literal character, each escape
+// read as RE2 reads it (readEscape).
 // Trailing content after the first class (`[aA][bB]`, boundary guards)
 // is irrelevant: only the FIRST character's coverage decides whether
 // two tokens can contest one input position.
@@ -81,22 +82,29 @@ func regexHeadAtomEnd(src string) int {
 	return size
 }
 
-// readEscape reads the escape at r[at] as one code point: its length in
-// runes and the code point, or ok false when it is not one this can name.
-// A shorthand class, a control or property escape, a group or back
-// reference, and a digit escape all bail rather than guess, and so does a
-// hex escape without its full digits (`\u1` is `u` then `1` in the
-// JavaScript matcher the canonical runtime emits for, not U+0001) or one
-// naming half of a surrogate pair. Unknown coverage keeps every caller
-// conservative. Mirrors the TS readEscape, plus RE2's `\x{…}`: the TS side
-// never writes that form (JavaScript spells it `\u{…}`), but the Go
-// emitter does, for every character class it builds.
+// readEscape reads the escape at r[at] as one code point by RE2's rules,
+// the dialect of Go's regexp, which compiles every matcher this port
+// emits: its length in runes and the code point, or ok false when it is
+// not one this can name.
+//
+// A hex escape is the code point it spells, in RE2's two forms: `\xHH`
+// with both digits, and `\x{…}`, which the Go emitter writes for every
+// character class it builds. `\a` is BEL, U+0007, and escaped ASCII
+// punctuation is the character itself. Everything else bails rather than
+// guess: a shorthand or property class, an octal or digit escape, the
+// zero-width `\A`, `\z`, `\b` and `\B`, the quoting `\Q…\E`, and every
+// letter RE2 does not define, JavaScript's `\u` and `\c` among them (Go's
+// regexp refuses those, so such a matcher never compiles). `\f`, `\n`,
+// `\r`, `\t` and `\v` bail as well although RE2 names them, because the
+// canonical TypeScript reader declines them, and where the two dialects
+// agree the two runtimes should decide alike. Unknown coverage keeps the
+// dispatcher conservative.
 func readEscape(r []rune, at int) (int, rune, bool) {
 	if at+1 >= len(r) {
 		return 0, 0, false
 	}
-	m := r[at+1]
-	if (m == 'u' || m == 'x') && at+2 < len(r) && r[at+2] == '{' {
+	switch m := r[at+1]; {
+	case m == 'x' && at+2 < len(r) && r[at+2] == '{':
 		e := -1
 		for k := at + 3; k < len(r); k++ {
 			if r[k] == '}' {
@@ -112,25 +120,18 @@ func readEscape(r []rune, at int) (int, rune, bool) {
 			return 0, 0, false
 		}
 		return e + 1 - at, rune(cp), true
-	}
-	if m == 'u' || m == 'x' {
-		digits := 4
-		if m == 'x' {
-			digits = 2
-		}
-		if at+2+digits > len(r) || !hexDigits(r[at+2:at+2+digits], digits, digits) {
+	case m == 'x':
+		if at+4 > len(r) || !hexDigits(r[at+2:at+4], 2, 2) {
 			return 0, 0, false
 		}
-		cp, _ := strconv.ParseInt(string(r[at+2:at+2+digits]), 16, 32)
-		if 0xD800 <= cp && cp <= 0xDFFF {
-			return 0, 0, false
-		}
-		return 2 + digits, rune(cp), true
+		cp, _ := strconv.ParseInt(string(r[at+2:at+4]), 16, 32)
+		return 4, rune(cp), true
+	case m == 'a':
+		return 2, 0x07, true
+	case m < utf8.RuneSelf && !('0' <= m && m <= '9' || 'a' <= m && m <= 'z' || 'A' <= m && m <= 'Z'):
+		return 2, m, true
 	}
-	if strings.ContainsRune("dDwWsSbBnrtfvckpP0123456789", m) {
-		return 0, 0, false
-	}
-	return 2, m, true
+	return 0, 0, false
 }
 
 // hexDigits reports whether r is between min and max hexadecimal digits.
@@ -383,8 +384,8 @@ func singleCodePointRanges(pattern, flags string) []charRange {
 		return patternCharRanges(pattern)
 	}
 
-	// A bare single code point, possibly escaped: `a`, `\.`, `\x{41}`,
-	// `\u0041`. Anything longer is a sequence, an alternation or a
+	// A bare single code point, possibly escaped: `a`, `\.`, `\x41`,
+	// `\x{41}`, `\a`. Anything longer is a sequence, an alternation or a
 	// quantified atom, none of which this may touch.
 	if !singleCodePointRe.MatchString(pattern) {
 		return nil
@@ -393,7 +394,7 @@ func singleCodePointRanges(pattern, flags string) []charRange {
 }
 
 var singleCodePointRe = regexp.MustCompile(
-	`^(?:\\x\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\\[\]()|*+?{}^$.])$`)
+	`^(?:\\x\{[0-9A-Fa-f]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\\[\]()|*+?{}^$.])$`)
 
 // partitionRanges splits a collection of character coverages into
 // ATOMS: the coarsest set of pairwise-disjoint spans such that every

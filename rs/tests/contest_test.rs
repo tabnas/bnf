@@ -198,3 +198,29 @@ fn an_escape_whose_code_point_cannot_be_read_is_not_an_exact_head() {
     let exact = emit_grammar_spec(&semi(rx(r"\u0041", ""), sens_term("u")), &opts(false)).unwrap();
     assert_eq!(depths(&exact), [1, 1]);
 }
+
+#[test]
+fn an_escape_is_read_as_the_regex_crate_reads_it() {
+    // This port compiles every matcher with the `regex` crate, so an
+    // escape is read as that crate reads it, not as JavaScript does. `\a`
+    // is BEL, which a JavaScript matcher reads as the letter `a`, and
+    // `\U` spells a code point in eight hex digits or in braces. Read as
+    // the letter after the backslash, each of these heads was held apart
+    // from a literal BEL it takes, and the literal's branch was never
+    // reached. Mirrors TestContestEscapeIsReadAsRE2ReadsIt in
+    // go/contest_test.go.
+    for pattern in [
+        r"\a",
+        r"[\a]",
+        r"\a+",
+        r"[\U00000007]",
+        r"[\U{7}]",
+        r"\x{7}",
+    ] {
+        let spec =
+            emit_grammar_spec(&semi(rx(pattern, ""), sens_term("\x07")), &opts(false)).unwrap();
+        assert_eq!(depths(&spec), [2, 2], "{pattern}");
+        assert!(parses(&spec, "\x07;;!!", true), "{pattern}");
+        assert!(parses(&spec, "\x07!!;;", true), "{pattern}");
+    }
+}

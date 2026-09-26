@@ -166,6 +166,11 @@ pub(crate) fn is_engine_owned_token(name: &str) -> bool {
 /// astral character reduces to two underscores, as it does in the
 /// canonical compiler, which counts UTF-16 units.
 fn alloc_token_name(literal: &str, used: &mut IndexSet<String>, preferred: Option<&str>) -> String {
+    // Not a name holding whitespace: an alternate's `s` separates token
+    // names with it, so `#P L` would read as two tokens there, and the
+    // literal takes the name its text gives it instead. Whitespace as every
+    // runtime reads it (`is_name_space`). Mirrors the TS `allocTokenName`.
+    let preferred = preferred.filter(|p| !p.chars().any(crate::analysis::is_name_space));
     if let Some(preferred) = preferred {
         let want = format!("#{preferred}");
         if !used.contains(&want) && !is_engine_owned_token(&want) {

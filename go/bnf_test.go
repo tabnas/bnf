@@ -1486,6 +1486,62 @@ func TestEmitFailureIsAnErrorNotAPanic(t *testing.T) {
 	})
 }
 
+// TestEmitRefusesAPatternGoCannotCompile pins the error path for a regex
+// terminal Go's regexp refuses. The IR carries a front-end's pattern as
+// written, and JavaScript's `\u0041` or `\cA` is no RE2 at all; compiling
+// it with MustCompile panicked out of EmitGrammarSpec on grammar input.
+func TestEmitRefusesAPatternGoCannotCompile(t *testing.T) {
+	for _, p := range []string{`\u1`, `\cA`, `\u0041`, `[\u0041-\u005a]`} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%q: panicked on a pattern Go cannot compile: %v", p, r)
+				}
+			}()
+			_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+				{Name: "top", Alts: []Sequence{{&Element{Kind: KindRegex, Pattern: p}}}},
+			}}, &ConvertOptions{Tag: "demo"})
+			var ee *EmitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("%q: error is %T (%v), want *EmitError", p, err, err)
+			}
+			if !strings.HasPrefix(ee.Message, "demo: invalid regular expression for token #RX_") {
+				t.Errorf("%q: message %q", p, ee.Message)
+			}
+		}()
+	}
+}
+
+// TestLiftedLiteralIsNotNamedAfterAWhitespaceName pins literal lifting
+// against a production whose name holds whitespace. An alternate's S
+// separates token names with it, so a literal lifted as `#P L` was looked
+// up as `#P` and `L`, and `ab` was refused; it takes the name its text
+// gives it instead. The whitespace is every runtime's (isNameSpace).
+// Mirrors the TS test of the same name.
+func TestLiftedLiteralIsNotNamedAfterAWhitespaceName(t *testing.T) {
+	for _, name := range []string{"P L", "P\tL", "P\u00a0L", "P\u0085L", "P\ufeffL", "P\u3000L"} {
+		spec, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+			{Name: "doc", Alts: []Sequence{{ref("x")}}},
+			{Name: "x", Alts: []Sequence{{ref(name), ctLit("b")}}},
+			{Name: name, Alts: []Sequence{{ctLit("a")}}},
+		}}, &ConvertOptions{Tag: "demo", Start: "doc"})
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		var names []string
+		for n := range spec.Options.Fixed.Token {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		if strings.Join(names, ",") != "#A,#B" {
+			t.Errorf("%q: fixed tokens %q, want [#A #B]", name, names)
+		}
+		if !ctParses(t, spec, "ab", false) {
+			t.Errorf("%q: ab should parse", name)
+		}
+	}
+}
+
 // TestCloneGrammarKeepsEveryField pins the whole-struct copy.
 //
 // cloneGrammar rebuilt the Grammar from Productions alone, so Remove,

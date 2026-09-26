@@ -30,11 +30,17 @@ contests at the character level. All of it is now ported:
   (`isEngineOwnedToken` in `go/compiler.go`).
 
 Character coverage (the question all three guards ask, "can these two
-tokens claim the same input character?") lives in `go/ranges.go`. One
-Go-specific detail there has no TS counterpart: the Go emitter writes
-RE2's `\x{…}` brace form where JS writes `\u{…}`, so the coverage reader
-must understand both. Reading only `\xHH` makes every Go-emitted class's
+tokens claim the same input character?") lives in `go/ranges.go`. Its
+escape reader reads RE2, the dialect Go's regexp compiles every matcher
+in, not JavaScript. The Go emitter writes RE2's `\x{…}` brace form where
+JS writes `\u…`, so the reader takes `\x{…}` and `\xHH` as the code
+points they spell; reading only `\xHH` makes every Go-emitted class's
 coverage UNKNOWN, which silently switches off every check downstream.
+`\a` is BEL and escaped ASCII punctuation is itself, while JavaScript's
+`\u`, the zero-width `\A` and `\z`, and the quoting `\Q…\E` name no code
+point. Where the two dialects read an escape differently (`\a` is the
+letter `a` to JavaScript), each port reads it as its own matcher does,
+so the same pattern can dispatch at a different depth.
 
 ### How this was verified
 

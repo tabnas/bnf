@@ -1615,7 +1615,7 @@ function firstCharRangesOfElement(
       return [[cp, cp]]
     }
     case 'regex':
-      return patternCharRanges(el.pattern)
+      return patternCharRanges(el.pattern, el.flags)
     case 'ref': {
       if (visited.has(el.name)) return null
       const target = grammar.productions.find((p) => p.name === el.name)
@@ -3399,7 +3399,7 @@ function emitGrammarSpec(
         let src = re.source.replace(/^\^/, '')
         const m = /^\(\?:(.*)\)$/.exec(src)
         if (m) src = m[1]
-        r = patternCharRanges(src)
+        r = patternCharRanges(src, re.flags)
         // A case-insensitive matcher covers both cases of every letter
         // it names, and the pattern text only spells one of them. ABNF
         // literals are case-insensitive by default, so without this an
@@ -3553,11 +3553,15 @@ function emitGrammarSpec(
     let src = re.source.replace(/^\^/, '')
     const m = /^\(\?:(.*)\)$/.exec(src)
     if (m) src = m[1]
-    const end = regexHeadAtomEnd(src)
+    const end = regexHeadAtomEnd(src, re.flags)
     if (end < 0) return false
     // `\u{61}` is the code point `a` only under the `u` or `v` flag;
-    // without either it is `u` repeated 61 times, which is not what
-    // patternCharRanges reads it as.
+    // without either it is `u` and then a quantifier, which readEscape
+    // now reads it as, so a bare one is never one atom. A class spelling
+    // one (`[\u{61}]`, which holds `u`, `{`, `6`, `1` and `}`) stays
+    // inexact here as well: the Rust port, whose regex dialect reads the
+    // escape as a code point with or without the flag, holds such a head
+    // inexact too, which keeps the two compilers' documents alike.
     if (!/[uv]/.test(re.flags) && src.slice(0, end).includes('\\u{')) return false
     const rest = src.slice(end)
     return ('' === rest || '+' === rest) && null != tokenRangesOf(tok)
@@ -5696,8 +5700,9 @@ function computeFollowPairs(
 // input position.
 // Where a pattern's first atom or class ends, or -1 when the pattern does
 // not begin with one: a group, an alternation, a quantifier, `.`, or an
-// escape whose coverage patternCharRanges declines to name.
-function regexHeadAtomEnd(src: string): number {
+// escape whose coverage patternCharRanges declines to name. The flags are
+// the matcher's, since they decide what an escape is (readEscape).
+function regexHeadAtomEnd(src: string, flags: string): number {
   if ('' === src) return -1
   const c = src[0]
   if ('[' === c) {
@@ -5710,7 +5715,7 @@ function regexHeadAtomEnd(src: string): number {
   if ('\\' === c) {
     // Exactly the escapes patternCharRanges reads: a head this calls one
     // atom must be one whose coverage is known.
-    const n = escapeLength(src, 0)
+    const n = escapeLength(src, 0, flags)
     return null == n ? -1 : n
   }
   if ('(.|)?*+{'.includes(c)) return -1
@@ -5718,17 +5723,33 @@ function regexHeadAtomEnd(src: string): number {
   return cp > 0xFFFF ? 2 : 1
 }
 
-// The escape at `at` in a pattern, read as one code point: its length
-// and the code point, or null when it is not one this can name. A
-// shorthand class, a control or property escape, a group or back
-// reference, and a digit escape all bail rather than guess, and so does
-// a hex escape without its full digits (`\u1` is `u` then `1` without the
-// `u` flag, not U+0001) or one naming half of a surrogate pair. Unknown
-// coverage keeps every caller conservative.
-function readEscape(src: string, at: number): [number, number] | null {
+// The escape at `at` in a pattern, read as one code point under the
+// matcher's flags: its length and the code point, or null when it is not
+// one this can name. A shorthand class, a control or property escape, a
+// group or back reference, and a digit escape all bail rather than guess.
+//
+// A hex escape with its full digits is always the code point it spells
+// (`\u0041` is `A`), a surrogate included: without `u` or `v` the matcher
+// works in UTF-16 code units, and `\ud800` is that unit, as the emitter's
+// own partition atoms spell it (`[\uD800-\uDFFF]`). Under `u` or `v` a
+// lead surrogate escape written straight before a trail surrogate escape
+// is the one code point the pair encodes (`\uD83D\uDE00` is U+1F600),
+// and a surrogate escape standing alone is that lone code point.
+//
+// The brace form `\u{…}` is a code point only under `u` or `v`. Without
+// either, `\u` and `\x` short of their full digits are the letter itself
+// (`\u{61}` is `u` and then a quantifier, `[\u{61}]` holds `u`, `{`, `6`,
+// `1` and `}`, and `\x1` is `x` then `1`); under either, they do not
+// compile.
+function readEscape(
+  src: string,
+  at: number,
+  flags: string,
+): [number, number] | null {
   const m = src[at + 1]
   if (undefined === m) return null
-  if ('u' === m && '{' === src[at + 2]) {
+  const unicode = /[uv]/.test(flags)
+  if ('u' === m && '{' === src[at + 2] && unicode) {
     const e = src.indexOf('}', at + 3)
     if (e < 0) return null
     const hex = src.slice(at + 3, e)
@@ -5739,9 +5760,18 @@ function readEscape(src: string, at: number): [number, number] | null {
   if ('u' === m || 'x' === m) {
     const digits = 'u' === m ? 4 : 2
     const hex = src.slice(at + 2, at + 2 + digits)
-    if (digits !== hex.length || !/^[0-9A-Fa-f]+$/.test(hex)) return null
+    if (digits !== hex.length || !/^[0-9A-Fa-f]+$/.test(hex)) {
+      return unicode ? null : [2, m.charCodeAt(0)]
+    }
     const cp = parseInt(hex, 16)
-    if (0xD800 <= cp && cp <= 0xDFFF) return null
+    if (unicode && 0xD800 <= cp && cp <= 0xDBFF &&
+      '\\u' === src.slice(at + 6, at + 8)) {
+      const trail = src.slice(at + 8, at + 12)
+      const lo = /^[0-9A-Fa-f]{4}$/.test(trail) ? parseInt(trail, 16) : -1
+      if (0xDC00 <= lo && lo <= 0xDFFF) {
+        return [12, 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)]
+      }
+    }
     return [2 + digits, cp]
   }
   if (/[dDwWsSbBnrtfvckpP0-9]/.test(m)) return null
@@ -5749,13 +5779,14 @@ function readEscape(src: string, at: number): [number, number] | null {
   return [cp > 0xFFFF ? 3 : 2, cp]
 }
 
-function escapeLength(src: string, at: number): number | null {
-  const e = readEscape(src, at)
+function escapeLength(src: string, at: number, flags: string): number | null {
+  const e = readEscape(src, at, flags)
   return null == e ? null : e[0]
 }
 
 function patternCharRanges(
   pattern: string,
+  flags: string,
 ): Array<[number, number]> | null {
   if ('[\\s\\S]' === pattern) return [[0, 0x10FFFF]]
 
@@ -5765,7 +5796,7 @@ function patternCharRanges(
     const c = pattern[i]
     if (undefined === c) return null
     if ('\\' === c) {
-      const e = readEscape(pattern, i)
+      const e = readEscape(pattern, i, flags)
       if (null == e) return null
       i += e[0]
       return e[1]
@@ -6021,7 +6052,7 @@ function singleCodePointRanges(
   flags: string,
 ): Array<[number, number]> | null {
   if (flags.includes('i')) return null
-  if ('[\\s\\S]' === pattern) return patternCharRanges(pattern)
+  if ('[\\s\\S]' === pattern) return patternCharRanges(pattern, flags)
 
   if (pattern.startsWith('[')) {
     // The class must BE the pattern: find its closing bracket, honouring
@@ -6034,15 +6065,19 @@ function singleCodePointRanges(
       if (']' === pattern[i]) break
     }
     if (i !== pattern.length - 1) return null
-    return patternCharRanges(pattern)
+    return patternCharRanges(pattern, flags)
   }
 
-  // A bare single code point, possibly escaped: `a`, `\.`, `\u0041`,
-  // `\u{1F600}`. Anything longer is a sequence, an alternation or a
-  // quantified atom, none of which this may touch.
-  const one = /^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$/
+  // A bare single code point, possibly escaped: `a`, `\.`, `\u0041`, and
+  // under `u` or `v` `\u{1F600}` or a surrogate pair `\uD83D\uDE00`.
+  // Anything longer is a sequence, an alternation or a quantified atom,
+  // none of which this may touch: `\u{61}` without either flag is one of
+  // those, `u` sixty-one times.
+  const one = /[uv]/.test(flags)
+    ? /^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[dD][89abAB][0-9A-Fa-f]{2}\\u[dD][c-fC-F][0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$/
+    : /^(?:\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$/
   if (!one.test(pattern)) return null
-  return patternCharRanges(pattern)
+  return patternCharRanges(pattern, flags)
 }
 
 
@@ -6552,8 +6587,11 @@ function allocTokenName(
   preferred?: string,
 ): string {
   // A literal lifted from a named production (`PL = "+"`) keeps that
-  // name, so the emitted grammar reads `PL` rather than `T`.
-  if (preferred) {
+  // name, so the emitted grammar reads `PL` rather than `T`. Not a name
+  // holding whitespace: an alternate's `s` separates token names with it,
+  // so `#P L` would read as two tokens there, and the literal takes the
+  // name its text gives it instead.
+  if (preferred && !HAS_SPACE.test(preferred)) {
     const want = '#' + preferred
     if (!used.has(want) && !isEngineOwnedToken(want)) {
       used.add(want)

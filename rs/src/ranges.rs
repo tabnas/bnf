@@ -63,41 +63,56 @@ pub fn regex_head_atom_end(src: &str) -> Option<usize> {
     Some(1)
 }
 
-/// The escape at `chars[at]` read as one code point: its length in chars
-/// and the code point, or `None` when it is not one this can name. A
-/// shorthand class, a control or property escape, a group or back
-/// reference, and a digit escape all bail rather than guess, and so does a
-/// hex escape without its full digits (`\u1` is `u` then `1` without the
-/// `u` flag, not U+0001) or one naming half of a surrogate pair. Unknown
-/// coverage keeps every caller conservative. Mirrors `readEscape` in
-/// `ts/src/compiler.ts`.
+/// The escape at `chars[at]` read as one code point by the `regex` crate's
+/// rules, the dialect every matcher this port emits is compiled in
+/// (`check_regex` in `src/emit.rs`): its length in chars and the code
+/// point, or `None` when it is not one this can name.
+///
+/// A hex escape is the code point it spells, in each of the crate's forms,
+/// `\xHH`, `\uHHHH` and `\UHHHHHHHH` with all their digits and the brace
+/// forms `\x{…}`, `\u{…}` and `\U{…}`, and only when that is a Unicode
+/// scalar value (the crate refuses a surrogate). `\a` is BEL, U+0007, and
+/// escaped ASCII punctuation is the character itself, except `\<` and
+/// `\>`. Everything else bails rather than guess: a shorthand or property
+/// class, a digit escape, the zero-width `\A`, `\z`, `\b`, `\B`, `\<` and
+/// `\>`, and every letter the crate does not define. `\f`, `\n`, `\r`,
+/// `\t` and `\v` bail as well although the crate names them, because the
+/// canonical TypeScript reader declines them, and where the two dialects
+/// agree the two compilers should emit alike; `\u{…}` keeps that reader's
+/// one to six digits for the same reason. Unknown coverage keeps the
+/// dispatcher conservative.
 fn read_escape(chars: &[char], at: usize) -> Option<(usize, u32)> {
     let m = *chars.get(at + 1)?;
-    if m == 'u' && chars.get(at + 2) == Some(&'{') {
-        let e = (at + 3..chars.len()).find(|k| chars[*k] == '}')?;
-        let hex = &chars[at + 3..e];
-        if hex.is_empty() || 6 < hex.len() || !hex.iter().all(|c| c.is_ascii_hexdigit()) {
+    let scalar = |digits: &[char]| -> Option<u32> {
+        if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
-        let cp = u32::from_str_radix(&hex.iter().collect::<String>(), 16).ok()?;
-        return (cp <= MAX_CODE_POINT).then_some((e + 1 - at, cp));
-    }
-    if m == 'u' || m == 'x' {
-        let digits = if m == 'u' { 4 } else { 2 };
-        let hex = chars.get(at + 2..at + 2 + digits)?;
-        if !hex.iter().all(|c| c.is_ascii_hexdigit()) {
-            return None;
+        let cp = u32::from_str_radix(&digits.iter().collect::<String>(), 16).ok()?;
+        char::from_u32(cp).map(|_| cp)
+    };
+    match m {
+        'x' | 'u' | 'U' if chars.get(at + 2) == Some(&'{') => {
+            let e = (at + 3..chars.len()).find(|k| chars[*k] == '}')?;
+            let digits = &chars[at + 3..e];
+            if m == 'u' && 6 < digits.len() {
+                return None;
+            }
+            scalar(digits).map(|cp| (e + 1 - at, cp))
         }
-        let cp = u32::from_str_radix(&hex.iter().collect::<String>(), 16).ok()?;
-        if (0xD800..=0xDFFF).contains(&cp) {
-            return None;
+        'x' | 'u' | 'U' => {
+            let n = match m {
+                'x' => 2,
+                'u' => 4,
+                _ => 8,
+            };
+            scalar(chars.get(at + 2..at + 2 + n)?).map(|cp| (2 + n, cp))
         }
-        return Some((2 + digits, cp));
+        'a' => Some((2, 0x07)),
+        c if c.is_ascii() && !c.is_ascii_alphanumeric() && c != '<' && c != '>' => {
+            Some((2, c as u32))
+        }
+        _ => None,
     }
-    if "dDwWsSbBnrtfvckpP0123456789".contains(m) {
-        return None;
-    }
-    Some((2, m as u32))
 }
 
 pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
@@ -281,7 +296,10 @@ pub fn single_code_point_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRa
     pattern_char_ranges(pattern)
 }
 
-/// `^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$`
+/// One unescaped character that is no regex syntax, or one escape that
+/// `read_escape` names in full: the TypeScript port's
+/// `^(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[^ux]|[^\\[\]()|*+?{}^$.])$`,
+/// with the escapes read in this port's dialect.
 fn is_single_code_point_pattern(chars: &[char]) -> bool {
     // TypeScript tests this with a regular expression over UTF-16 code
     // units, so an astral character is two units there and never a single
@@ -307,12 +325,7 @@ fn is_single_code_point_pattern(chars: &[char]) -> bool {
                         | '.'
                 )
         }
-        ['\\', m] => bmp(m) && !matches!(m, 'u' | 'x'),
-        ['\\', 'x', a, b] => a.is_ascii_hexdigit() && b.is_ascii_hexdigit(),
-        ['\\', 'u', a, b, c, d] => [a, b, c, d].iter().all(|h| h.is_ascii_hexdigit()),
-        ['\\', 'u', '{', rest @ .., '}'] => {
-            !rest.is_empty() && rest.len() <= 6 && rest.iter().all(|h| h.is_ascii_hexdigit())
-        }
+        ['\\', ..] => read_escape(chars, 0).is_some_and(|(n, _)| n == chars.len()),
         _ => false,
     }
 }
@@ -583,6 +596,55 @@ mod tests {
             assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
             assert_eq!(pattern_char_ranges(p), Some(vec![(cp, cp)]), "{p}");
         }
+    }
+
+    #[test]
+    fn an_escape_is_read_as_the_regex_crate_reads_it() {
+        // The dialect the matchers compile in, not JavaScript's. Mirrors
+        // TestContestEscapeIsReadAsRE2ReadsIt in go/contest_test.go.
+        for (p, end, cp) in [
+            (r"\a", 2, 0x07),
+            (r"\U00000041", 10, 0x41),
+            (r"\U{1F600}", 9, 0x1F600),
+            (r"\x{41}", 6, 0x41),
+            (r"\x{0000000041}", 14, 0x41),
+            (r"\-", 2, 0x2D),
+            (r"\#", 2, 0x23),
+        ] {
+            assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
+            assert_eq!(pattern_char_ranges(p), Some(vec![(cp, cp)]), "{p}");
+        }
+        assert_eq!(
+            pattern_char_ranges(r"[\a-\x{0D}]"),
+            Some(vec![(0x07, 0x0D)])
+        );
+        // Zero-width assertions, letters the crate does not define, and
+        // hex escapes naming no scalar value.
+        for p in [
+            r"\A",
+            r"\z",
+            r"\b",
+            r"\B",
+            r"\<",
+            r"\>",
+            r"\e",
+            r"\Q",
+            r"\U0000D800",
+            r"\U00110000",
+            r"\x{D800}",
+            r"\u{D800}",
+            r"\U{110000}",
+        ] {
+            assert_eq!(regex_head_atom_end(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p), None, "{p}");
+        }
+        // The partition sees the same reading.
+        assert_eq!(
+            single_code_point_ranges(r"\U00000041", ""),
+            Some(vec![(0x41, 0x41)])
+        );
+        assert_eq!(single_code_point_ranges(r"\a", ""), Some(vec![(7, 7)]));
+        assert_eq!(single_code_point_ranges(r"\A", ""), None);
     }
 
     #[test]

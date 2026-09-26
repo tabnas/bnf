@@ -958,8 +958,12 @@ func isEngineOwnedToken(name string) bool {
 
 func allocTokenName(literal string, used map[string]bool, preferred string) string {
 	// A literal lifted from a named production (`PL = "+"`) keeps that name,
-	// so the emitted grammar reads `PL` rather than `T`.
-	if preferred != "" {
+	// so the emitted grammar reads `PL` rather than `T`. Not a name holding
+	// whitespace: an alternate's S separates token names with it, so `#P L`
+	// would read as two tokens there, and the literal takes the name its
+	// text gives it instead. Whitespace as every runtime reads it
+	// (isNameSpace). Mirrors the TS allocTokenName.
+	if preferred != "" && !strings.ContainsFunc(preferred, isNameSpace) {
 		want := "#" + preferred
 		if !used[want] && !isEngineOwnedToken(want) {
 			used[want] = true

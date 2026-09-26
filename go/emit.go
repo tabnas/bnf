@@ -397,7 +397,20 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		// lookahead position — equivalent coverage; the parser still
 		// rejects a token it doesn't expect at the current slot.
 		emit := func(n, pattern, flags string) {
-			matchTokens[n] = goRegex(pattern, flags)
+			re, err := goRegex(pattern, flags)
+			if err != nil {
+				// The grammar's error, not this compiler's: an IR pattern
+				// Go's regexp refuses (JavaScript's `\u0041` or `\cA`) is
+				// reported through the emitter's error return, as the Rust
+				// port reports a pattern its dialect refuses.
+				panic(&EmitError{
+					Message: fmt.Sprintf("%s: invalid regular expression for token %s: %v",
+						diagName(), n, err),
+					Sp:    el.Sp,
+					Cause: err,
+				})
+			}
+			matchTokens[n] = re
 			matchEager[n] = true
 			matchOrder = append(matchOrder, n)
 		}
@@ -720,13 +733,14 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 // goRegex translates a JS-flavoured regex source + flags into a Go
 // regexp. The patterns the converter emits are simple char classes
 // (`[\x{0030}-\x{0039}]`) so no heavy translation is needed; the `i`
-// flag maps to the (?i) inline group.
-func goRegex(pattern, flags string) *regexp.Regexp {
+// flag maps to the (?i) inline group. A pattern Go's regexp refuses is
+// returned as the error, never panicked on: the pattern is grammar input.
+func goRegex(pattern, flags string) (*regexp.Regexp, error) {
 	src := "^" + pattern
 	if strings.Contains(flags, "i") {
 		src = "(?i)" + src
 	}
-	return regexp.MustCompile(src)
+	return regexp.Compile(src)
 }
 
 // ---- segments ------------------------------------------------------
