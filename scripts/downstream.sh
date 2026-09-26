@@ -75,20 +75,20 @@
 # fresh as the last fetch in that checkout.)
 #
 # Each step prints a line when it starts, with its place in the run, and
-# a heartbeat every 30 s while it runs: a Go conformance suite or a Rust
-# gate can be quiet for minutes, and a quiet step reads as a hung one.
+# runs through scripts/heartbeat.sh, which prints a line every 30 s while
+# it runs: a Go conformance suite or a Rust gate can be quiet for minutes,
+# and a quiet step reads as a hung one.
 
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PEERS=(${@:-abnf ebnf gbnf})
 RUNTIMES=${RUNTIMES:-ts go rs}
+HEARTBEAT="$ROOT/scripts/heartbeat.sh"
 WORK=$(mktemp -d)
 SAVED=()
-BEAT=""
 
 restore() {
-  if [ -n "$BEAT" ]; then kill "$BEAT" 2>/dev/null || true; fi
   for s in ${SAVED+"${SAVED[@]}"}; do
     rm -rf "${s%%:*}"
     [ -d "${s#*:}" ] && mv "${s#*:}" "${s%%:*}"
@@ -125,24 +125,6 @@ state() {
     at="$at, $behind BEHIND $(git -C "$1" rev-parse --abbrev-ref '@{upstream}')"
   fi
   echo "[$at]"
-}
-
-# Run a step with a heartbeat: one line every 30 s until it ends, so that
-# nothing here is silent for longer. The step's own output streams as
-# usual, and its exit status is the step's.
-beat() {
-  local label=$1 start rc=0
-  shift
-  start=$(date +%s)
-  ( while sleep 30; do
-      echo "==> $label: still running, $(( $(date +%s) - start ))s, percentage unknown"
-    done ) &
-  BEAT=$!
-  "$@" || rc=$?
-  kill "$BEAT" 2>/dev/null || true
-  wait "$BEAT" 2>/dev/null || true
-  BEAT=""
-  return "$rc"
 }
 
 missing=()
@@ -195,9 +177,14 @@ header() {
   echo "==> $1, step $step of $total ($(( 100 * (step - 1) / total ))%)"
 }
 
-echo "==> packing $(basename "$ROOT") as npm would publish it"
-(cd "$ROOT/ts" && npm run --silent build)
-TARBALL="$WORK/$(cd "$ROOT/ts" && npm pack --silent --pack-destination "$WORK")"
+# Only the TypeScript half, and the TypeScript build the Rust half makes,
+# need this tree packed. The Go half reads go/ through a workspace, so a
+# Go-only run needs no Node at all.
+if wants ts || wants rs; then
+  echo "==> packing $(basename "$ROOT") as npm would publish it"
+  (cd "$ROOT/ts" && npm run --silent build)
+  TARBALL="$WORK/$(cd "$ROOT/ts" && npm pack --silent --pack-destination "$WORK")"
+fi
 
 # Every sibling runs even after one goes red. Stopping at the first
 # failure would let a pre-existing break in an early sibling hide a real
@@ -207,42 +194,46 @@ failed=()
 
 for p in "${PEERS[@]}"; do
   peer=$(cd "$ROOT/../$p" && pwd)
+  # What the sibling is sitting on, shown in its first step's header.
+  at=" $(state "$peer")"
 
-  dest="$peer/ts/node_modules/@tabnas/bnf"
-  if [ -d "$dest" ]; then
-    mv "$dest" "$WORK/$p-bnf"
-    SAVED+=("$dest:$WORK/$p-bnf")
-  else
-    SAVED+=("$dest:")
+  if wants ts || wants rs; then
+    dest="$peer/ts/node_modules/@tabnas/bnf"
+    if [ -d "$dest" ]; then
+      mv "$dest" "$WORK/$p-bnf"
+      SAVED+=("$dest:$WORK/$p-bnf")
+    else
+      SAVED+=("$dest:")
+    fi
+    mkdir -p "$dest"
+    tar xzf "$TARBALL" --strip-components=1 -C "$dest"
   fi
-  mkdir -p "$dest"
-  tar xzf "$TARBALL" --strip-components=1 -C "$dest"
 
   # Build explicitly. Most siblings rebuild in `pretest`, but abnf's
   # pretest fetches its conformance corpus instead, so `npm test` there
   # grades whatever dist/ was left lying around -- which looks exactly
   # like a failure in this tree.
   if wants ts; then
-    header "$p (ts) $(state "$peer")"
-    beat "$p (ts)" bash -c 'cd "$1/ts" && npm run --silent build && npm test' _ "$peer" \
+    header "$p (ts)$at"; at=""
+    "$HEARTBEAT" "$p (ts)" bash -c 'cd "$1/ts" && npm run --silent build && npm test' _ "$peer" \
       || failed+=("$p (ts)")
   elif wants rs; then
-    header "$p (ts build, for the Rust half) $(state "$peer")"
-    beat "$p (ts build)" bash -c 'cd "$1/ts" && npm run --silent build' _ "$peer" \
+    header "$p (ts build, for the Rust half)$at"; at=""
+    "$HEARTBEAT" "$p (ts build)" bash -c 'cd "$1/ts" && npm run --silent build' _ "$peer" \
       || failed+=("$p (ts build)")
   fi
 
   if wants go && [ -d "$peer/go" ]; then
-    header "$p (go)"
+    header "$p (go)$at"; at=""
     printf 'go 1.24.7\n\nuse (\n\t%s/go\n\t%s/go\n)\n' "$ROOT" "$peer" > "$WORK/go.work"
-    beat "$p (go)" bash -c 'cd "$1/go" && GOWORK="$2" go test ./...' _ "$peer" "$WORK/go.work" \
+    "$HEARTBEAT" "$p (go)" bash -c 'cd "$1/go" && GOWORK="$2" go test ./...' _ "$peer" "$WORK/go.work" \
       || failed+=("$p (go)")
   fi
 
   if wants rs && [ -f "$peer/rs/Cargo.toml" ]; then
-    header "$p (rs)"
+    header "$p (rs)$at"; at=""
     if [ -f "$peer/ci/rust/run.sh" ]; then
-      beat "$p (rs)" bash "$peer/ci/rust/run.sh" || failed+=("$p (rs)")
+      "$HEARTBEAT" "$p (rs)" bash "$peer/ci/rust/run.sh" || failed+=("$p (rs)")
     else
       echo "downstream: $p has a crate but no ci/rust/run.sh to grade it with" >&2
       failed+=("$p (rs)")

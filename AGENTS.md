@@ -98,6 +98,7 @@ are not:
 | `rs/` | Rust port (follows TS): the `tabnas-bnf` crate. Depends on the engine's `tabnas` crate via a `path` dependency on the sibling checkout (`../../parser/rs`). Library only. Holds its emitter to the TypeScript compiler's serialised output byte for byte in `rs/tests/oracle_test.rs`. See `rs/AGENTS.md`. |
 | `ci/` | `ci/rust/run.sh`, the Rust gate: what `.github/workflows/rust.yml` runs, and what you run locally. The workflows once staged under `ci/workflows/` now live in `.github/workflows/`. |
 | `scripts/downstream.sh` | Runs the front-end suites against this working tree: `make downstream` locally, `.github/workflows/downstream.yml` in CI. |
+| `scripts/heartbeat.sh` | Runs a command and prints a line every 30 s until it ends. `scripts/downstream.sh` and the Downstream workflow run their long steps and installs through it. |
 
 ## Provenance, and why the tests live downstream
 
