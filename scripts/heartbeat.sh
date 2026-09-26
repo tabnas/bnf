@@ -11,16 +11,23 @@
 #
 # A step that is quiet for minutes reads as a hung one (AGENTS.md, the
 # progress principle), so scripts/downstream.sh and the Downstream
-# workflow run their long steps, installs included, through this.
+# workflow run their long steps, clones and installs included, through
+# this.
 #
-# The heartbeat's sleep runs in the background and is waited on, so the
-# signal that stops the heartbeat interrupts the wait, and its trap kills
-# the sleep too. A sleep left behind would hold this script's output open
-# after the command had ended: a caller reading that output through a pipe
-# would wait up to 30 s more for nothing, and every step would leave one
-# more stray process. The trap finds the sleep through `jobs -p` rather
-# than a saved PID, because a command that ends at once can stop the
-# heartbeat between starting the sleep and saving its PID.
+# The script becomes the command. It starts the heartbeat in the
+# background and then execs COMMAND in its own place, so a signal sent to
+# it reaches the command itself, with no shell in between to defer it
+# until the command returns, and the exit status is the command's own. A
+# `timeout` or a CI cancel that signals only this process still stops the
+# command.
+#
+# The heartbeat watches its parent, which after the exec is the command.
+# When the command ends, the heartbeat is handed to another parent,
+# notices within a second, and stops, letting go of the output it shares:
+# a caller reading that output through a pipe is not kept waiting, and
+# nothing is left behind. A reparent is also what a reused PID cannot
+# fake. Where `ps` cannot answer, it falls back to asking whether the
+# command's PID still exists.
 
 set -uo pipefail
 
@@ -30,28 +37,30 @@ if [ $# -lt 2 ]; then
 fi
 label=$1
 shift
+parent=$$
 start=$(date +%s)
 
 (
-  trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
-  while :; do
-    sleep 30 </dev/null >/dev/null 2>&1 &
-    wait $!
-    echo "==> $label: still running, $(( $(date +%s) - start ))s, percentage unknown"
+  exec </dev/null
+  me=$(exec sh -c 'echo $PPID')
+  running() {
+    local pp
+    pp=$(ps -o ppid= -p "$me" 2>/dev/null | tr -d ' ')
+    if [ -n "$pp" ]; then
+      [ "$pp" = "$parent" ]
+    else
+      kill -0 "$parent" 2>/dev/null
+    fi
+  }
+  last=$start
+  while running; do
+    sleep 1
+    now=$(date +%s)
+    if [ $((now - last)) -ge 30 ] && running; then
+      echo "==> $label: still running, $((now - start))s, percentage unknown"
+      last=$now
+    fi
   done
 ) &
-beat=$!
 
-stop() {
-  kill "$beat" 2>/dev/null
-  wait "$beat" 2>/dev/null
-}
-# An interrupted run stops the heartbeat as well, rather than leaving it
-# looping on its own.
-trap 'stop; exit 130' INT
-trap 'stop; exit 143' TERM
-
-rc=0
-"$@" || rc=$?
-stop
-exit "$rc"
+exec "$@"
