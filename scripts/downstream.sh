@@ -197,10 +197,21 @@ header() {
 # Only the TypeScript half, and the TypeScript build the Rust half makes,
 # need this tree packed. The Go half reads go/ through a workspace, so a
 # Go-only run needs no Node at all.
+# The build and the pack run through the heartbeat as well: either can be
+# quiet for longer than 30 s on a cold machine. The tarball is found in
+# $WORK afterwards rather than read from npm's output, which the
+# heartbeat's lines would share.
 if wants ts || wants rs; then
   echo "==> packing $(basename "$ROOT") as npm would publish it"
-  (cd "$ROOT/ts" && npm run --silent build)
-  TARBALL="$WORK/$(cd "$ROOT/ts" && npm pack --silent --pack-destination "$WORK")"
+  "$HEARTBEAT" "packing $(basename "$ROOT")" bash -c \
+    'cd "$1/ts" && npm run --silent build && npm pack --silent --pack-destination "$2" >/dev/null' \
+    _ "$ROOT" "$WORK"
+  tarballs=("$WORK"/*.tgz)
+  if [ ${#tarballs[@]} != 1 ] || [ ! -f "${tarballs[0]}" ]; then
+    echo "downstream: npm pack left no single tarball in $WORK" >&2
+    exit 1
+  fi
+  TARBALL=${tarballs[0]}
 fi
 
 # Every sibling runs even after one goes red. Stopping at the first
