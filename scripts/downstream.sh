@@ -14,10 +14,26 @@
 # (`npm pack`, so only what "files" publishes), and its Go module is
 # pointed at go/ through a workspace file in a temp dir.
 #
+# The Rust half runs each sibling's own Rust gate, ci/rust/run.sh, the
+# script that sibling's rust.yml runs. Nothing is swapped in for it: every
+# front-end crate depends on this one by PATH,
+# `tabnas-bnf = { path = "../../bnf/rs" }`, so a sibling beside this
+# checkout already builds against it -- provided this checkout IS the
+# ../bnf those paths name. Under any other directory name they would build
+# some other bnf, or none, so that is refused rather than graded. The gates
+# also need the other sibling crates they name (parser and support, and
+# abnf for gbnf) checked out beside them, and each gate says which is
+# missing. This half is what the other two cannot see: bnf 0.1.20 and
+# 0.1.21 made the Rust compiles of ipv6.abnf, jid.abnf and jsonpath.abnf
+# five to ten times slower, which put them past the 60 s budget of abnf's
+# Rust conformance sweep on CI (tabnas/abnf#95), and both shipped while
+# this script, which had no Rust half, stayed green.
+#
 # Nothing in any checkout is left modified. The sibling's installed
 # @tabnas/bnf is moved aside and restored on exit, failure included, and
 # no go.mod is touched -- the workspace file lives outside every repo, the
-# way AGENTS.md requires.
+# way AGENTS.md requires. Each Rust gate puts back any Cargo.lock that
+# cargo rewrote.
 #
 # Only the bnf dependency is swapped. Everything else resolves the way it
 # normally does for that sibling, so a failure here is about this tree and
@@ -36,12 +52,19 @@
 # and why a sibling bump lands AFTER the tag rather than beside it.
 #
 # Usage:
-#   scripts/downstream.sh              # abnf ebnf gbnf
-#   scripts/downstream.sh gbnf ebnf    # just those
+#   scripts/downstream.sh                    # abnf ebnf gbnf, every runtime
+#   scripts/downstream.sh gbnf ebnf          # just those
+#   RUNTIMES="ts go" scripts/downstream.sh   # without the Rust half
+#
+# RUNTIMES names the halves to run, from ts, go and rs; all three when it
+# is unset. The Rust half without the TypeScript one still BUILDS each
+# sibling's TypeScript against this tree, because abnf's Rust gate runs
+# node over that build to measure the canonical half of each DIVERGENCE.md
+# entry, and a stale dist/ would measure some other bnf.
 #
 # A sibling that is not checked out FAILS the run rather than being
 # skipped: a gate that passes because it found nothing to run is worse
-# than no gate.
+# than no gate. So does a Rust half with no cargo to run it.
 #
 # What each sibling is sitting on is printed, and a checkout behind its
 # own tracking ref is called out. Grading a feature branch is legitimate,
@@ -50,15 +73,22 @@
 # on a pre-#23 commit reported 554/185, the exact signature of #41, from
 # a bnf tree that was fine. (Read from the tracking ref, so it is only as
 # fresh as the last fetch in that checkout.)
+#
+# Each step prints a line when it starts, with its place in the run, and
+# a heartbeat every 30 s while it runs: a Go conformance suite or a Rust
+# gate can be quiet for minutes, and a quiet step reads as a hung one.
 
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PEERS=(${@:-abnf ebnf gbnf})
+RUNTIMES=${RUNTIMES:-ts go rs}
 WORK=$(mktemp -d)
 SAVED=()
+BEAT=""
 
 restore() {
+  if [ -n "$BEAT" ]; then kill "$BEAT" 2>/dev/null || true; fi
   for s in ${SAVED+"${SAVED[@]}"}; do
     rm -rf "${s%%:*}"
     [ -d "${s#*:}" ] && mv "${s#*:}" "${s%%:*}"
@@ -66,6 +96,23 @@ restore() {
   rm -rf "$WORK"
 }
 trap restore EXIT
+
+wants() {
+  case " $RUNTIMES " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+n=0
+for r in $RUNTIMES; do
+  case "$r" in
+    ts|go|rs) n=$((n + 1)) ;;
+    *) echo "downstream: unknown runtime '$r' in RUNTIMES; use ts, go and rs" >&2; exit 1 ;;
+  esac
+done
+if [ "$n" = 0 ]; then
+  echo "downstream: RUNTIMES names no runtime; use ts, go and rs" >&2
+  exit 1
+fi
 
 # What a sibling is sitting on, and whether that is behind what it last
 # fetched.
@@ -80,6 +127,24 @@ state() {
   echo "[$at]"
 }
 
+# Run a step with a heartbeat: one line every 30 s until it ends, so that
+# nothing here is silent for longer. The step's own output streams as
+# usual, and its exit status is the step's.
+beat() {
+  local label=$1 start rc=0
+  shift
+  start=$(date +%s)
+  ( while sleep 30; do
+      echo "==> $label: still running, $(( $(date +%s) - start ))s, percentage unknown"
+    done ) &
+  BEAT=$!
+  "$@" || rc=$?
+  kill "$BEAT" 2>/dev/null || true
+  wait "$BEAT" 2>/dev/null || true
+  BEAT=""
+  return "$rc"
+}
+
 missing=()
 for p in "${PEERS[@]}"; do
   [ -d "$ROOT/../$p" ] || missing+=("$p")
@@ -89,6 +154,46 @@ if [ ${#missing[@]} -gt 0 ]; then
   echo "downstream: clone them beside $(basename "$ROOT")/ or name the ones you have" >&2
   exit 1
 fi
+
+if wants rs; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "downstream: the Rust half needs cargo, and there is none on PATH" >&2
+    echo 'downstream: install Rust, or leave the Rust half out: RUNTIMES="ts go"' >&2
+    exit 1
+  fi
+  # Every sibling crate names this one as ../../bnf/rs. The siblings sit
+  # at $ROOT/.., so that path reaches this tree only when this tree is
+  # $ROOT/../bnf -- the same directory, not merely one with the name.
+  if ! [ "$ROOT/../bnf" -ef "$ROOT" ]; then
+    echo "downstream: the Rust half needs this tree at $(dirname "$ROOT")/bnf" >&2
+    echo "downstream: the sibling crates depend on ../../bnf/rs by path, so from" >&2
+    echo "downstream: $ROOT they would build some other bnf, or none" >&2
+    exit 1
+  fi
+  for s in parser support; do
+    if [ -d "$ROOT/../$s" ]; then
+      echo "==> $s, a sibling crate of the Rust half $(state "$ROOT/../$s")"
+    fi
+  done
+fi
+
+# Every step this run will take, for the "step i of N" in each header.
+total=0
+for p in "${PEERS[@]}"; do
+  if wants ts || wants rs; then total=$((total + 1)); fi
+  if wants go && [ -d "$ROOT/../$p/go" ]; then total=$((total + 1)); fi
+  if wants rs && [ -f "$ROOT/../$p/rs/Cargo.toml" ]; then total=$((total + 1)); fi
+done
+if [ "$total" = 0 ]; then
+  echo "downstream: nothing to run for ${PEERS[*]} in RUNTIMES=\"$RUNTIMES\"" >&2
+  exit 1
+fi
+step=0
+header() {
+  step=$((step + 1))
+  echo
+  echo "==> $1, step $step of $total ($(( 100 * (step - 1) / total ))%)"
+}
 
 echo "==> packing $(basename "$ROOT") as npm would publish it"
 (cd "$ROOT/ts" && npm run --silent build)
@@ -113,19 +218,35 @@ for p in "${PEERS[@]}"; do
   mkdir -p "$dest"
   tar xzf "$TARBALL" --strip-components=1 -C "$dest"
 
-  echo
-  echo "==> $p (ts) $(state "$peer")"
   # Build explicitly. Most siblings rebuild in `pretest`, but abnf's
   # pretest fetches its conformance corpus instead, so `npm test` there
   # grades whatever dist/ was left lying around -- which looks exactly
   # like a failure in this tree.
-  (cd "$peer/ts" && npm run --silent build && npm test) || failed+=("$p (ts)")
+  if wants ts; then
+    header "$p (ts) $(state "$peer")"
+    beat "$p (ts)" bash -c 'cd "$1/ts" && npm run --silent build && npm test' _ "$peer" \
+      || failed+=("$p (ts)")
+  elif wants rs; then
+    header "$p (ts build, for the Rust half) $(state "$peer")"
+    beat "$p (ts build)" bash -c 'cd "$1/ts" && npm run --silent build' _ "$peer" \
+      || failed+=("$p (ts build)")
+  fi
 
-  if [ -d "$peer/go" ]; then
-    echo
-    echo "==> $p (go)"
+  if wants go && [ -d "$peer/go" ]; then
+    header "$p (go)"
     printf 'go 1.24.7\n\nuse (\n\t%s/go\n\t%s/go\n)\n' "$ROOT" "$peer" > "$WORK/go.work"
-    (cd "$peer/go" && GOWORK="$WORK/go.work" go test ./...) || failed+=("$p (go)")
+    beat "$p (go)" bash -c 'cd "$1/go" && GOWORK="$2" go test ./...' _ "$peer" "$WORK/go.work" \
+      || failed+=("$p (go)")
+  fi
+
+  if wants rs && [ -f "$peer/rs/Cargo.toml" ]; then
+    header "$p (rs)"
+    if [ -f "$peer/ci/rust/run.sh" ]; then
+      beat "$p (rs)" bash "$peer/ci/rust/run.sh" || failed+=("$p (rs)")
+    else
+      echo "downstream: $p has a crate but no ci/rust/run.sh to grade it with" >&2
+      failed+=("$p (rs)")
+    fi
   fi
 done
 
@@ -134,4 +255,4 @@ if [ ${#failed[@]} -gt 0 ]; then
   echo "==> downstream RED: ${failed[*]}" >&2
   exit 1
 fi
-echo "==> downstream green: ${PEERS[*]}"
+echo "==> downstream green: ${PEERS[*]} ($RUNTIMES)"

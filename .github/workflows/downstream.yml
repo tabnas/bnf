@@ -1,6 +1,6 @@
 # The downstream gate: the abnf, ebnf and gbnf suites, run against THIS
 # tree (tabnas/bnf#48, the half of #41 that a local command could not
-# close on its own).
+# close on its own), in TypeScript, Go and Rust.
 #
 # `deps:` in ci.yml clones what this package builds AGAINST, never what
 # builds against it, so without this file every front-end suite sits
@@ -13,7 +13,11 @@
 # polyglot-ci.yml, for the reason rust.yml gives: that workflow takes no
 # such input, and adding this file needs no change in tabnas/.github.
 # Everything it does is scripts/downstream.sh, so this file and a
-# contributor's `make downstream` cannot say different things.
+# contributor's `make downstream` cannot say different things. The two
+# jobs split the script's RUNTIMES between them rather than doing anything
+# the script does not: the TypeScript and Go halves in one job, and the
+# Rust half in one job per front-end, in parallel, because abnf's Rust
+# gate alone takes about ten minutes.
 name: Downstream
 
 # Runs on EVERY branch push, not just main, with the path lists written
@@ -23,7 +27,9 @@ name: Downstream
 #
 # The paths are what reaches a front-end: the TypeScript source (and so
 # the packed dist/), the package manifest (its "files" decide what the
-# pack carries), and the Go module.
+# pack carries), the Go module, and the Rust crate, which every front-end
+# crate builds from by path. rs/ joined the list with the Rust half: until
+# then a change to the Rust port alone never ran this file.
 on:
   push:
     branches: [ '**' ]
@@ -31,6 +37,7 @@ on:
       - 'ts/src/**'
       - 'ts/package.json'
       - 'go/**'
+      - 'rs/**'
       - 'scripts/downstream.sh'
       - '.github/workflows/downstream.yml'
   pull_request:
@@ -38,6 +45,7 @@ on:
       - 'ts/src/**'
       - 'ts/package.json'
       - 'go/**'
+      - 'rs/**'
       - 'scripts/downstream.sh'
       - '.github/workflows/downstream.yml'
   workflow_dispatch:
@@ -85,6 +93,64 @@ jobs:
       # one goes red, and fails at the end naming each red suite. What it
       # does NOT prove is that a clean consumer can RESOLVE this package:
       # the Go half runs under a workspace, which never consults go.sum.
-      # See the script's header.
+      # See the script's header. The Rust half is the job below.
       - name: Downstream suites
+        env:
+          RUNTIMES: ts go
         run: bnf/scripts/downstream.sh
+
+  rust:
+    # Each front-end's own Rust gate, ci/rust/run.sh, against this tree:
+    # the Rust half of the same script. Without it, bnf 0.1.20 and 0.1.21
+    # both shipped a Rust compile-time regression that the TypeScript and
+    # Go halves could not see, and abnf's own Rust gate caught it only
+    # after the releases (tabnas/abnf#95). One job per front-end, so they
+    # run in parallel and each reports on its own. abnf's is the long one,
+    # most of it a conformance sweep that budgets every compile at 60 s.
+    # The limit only stops a hung gate from holding a runner.
+    name: rust (${{ matrix.peer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        peer: [ abnf, ebnf, gbnf ]
+    env:
+      PEER: ${{ matrix.peer }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: bnf
+
+      # Node builds the TypeScript halves: this tree's pack, and the
+      # front-end's dist/, which abnf's gate runs to measure the canonical
+      # half of each DIVERGENCE.md entry.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24.x'
+
+      # The front-end, and the sibling crates its rs/Cargo.toml names by
+      # path, each at its default branch as the front-end's own rust.yml
+      # clones them: parser and support for abnf and ebnf, parser and abnf
+      # for gbnf. This checkout is the ../bnf that every one of them names.
+      - name: Clone the front-end and its sibling crates
+        run: |
+          set -e
+          for p in "$PEER" parser support abnf; do
+            [ -d "$p" ] || git clone --depth 1 "https://github.com/tabnas/$p.git" "$p"
+          done
+          (cd "$PEER/ts" && npm i --no-audit --no-fund)
+          (cd bnf/ts && npm i --no-audit --no-fund)
+
+      # The toolchain the front-end's own rust.yml runs its gate on: the
+      # MSRV its rs/Cargo.toml declares, with the components the gate uses.
+      - name: Set up the front-end's MSRV
+        run: |
+          MSRV=$(awk -F'"' '/^rust-version = /{print $2; exit}' "$PEER/rs/Cargo.toml")
+          rustup toolchain install "$MSRV" --profile minimal --component rustfmt,clippy
+          rustup default "$MSRV"
+
+      - name: Downstream Rust gate
+        env:
+          RUNTIMES: rs
+        run: bnf/scripts/downstream.sh "$PEER"
