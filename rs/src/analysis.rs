@@ -753,6 +753,12 @@ pub(crate) struct DispatchPrefixes {
     pub nullable: bool,
 }
 
+/// The most token pairs one decision's contest table in
+/// `dispatch_prefixes` holds, a byte each: four million, four megabytes. A
+/// wider decision asks `contest` for every pair it meets instead, as it
+/// did before the table. Mirrors TS `MEMO_PAIRS`.
+const MEMO_PAIRS: usize = 1 << 22;
+
 /// The dispatch prefixes of a choice, using the least lookahead each
 /// decision needs (tabnas/bnf#71). Mirrors the TypeScript
 /// `dispatchPrefixes`.
@@ -861,16 +867,67 @@ pub(crate) fn dispatch_prefixes(
         );
     }
 
+    // The depth scan below compares every contested path with every
+    // rival's, position by position, and so asks `contest` about the same
+    // few pairs of tokens over and over: millions of times for RFC 4291's
+    // IPv6address, and each answer is looked up in `heads_contest`'s cache
+    // by a key it formats and hashes. That took ex_abnf's ipv6.abnf from
+    // 5 s to 50 s to compile in a debug build, and past the 60 s budget
+    // abnf's conformance sweep gives one grammar on CI (tabnas/abnf#95).
+    // So the tokens are numbered here, once, and each ordered pair is
+    // asked once and its answer kept in a table; the answers, and so the
+    // output, are the ones `contest` gives. A decision too wide for the
+    // table asks `contest` directly, as before. Mirrors TS
+    // `dispatchPrefixes`.
+    fn intern<'a>(interned: &mut IndexSet<&'a str>, tokens: &'a [String]) -> Vec<usize> {
+        tokens
+            .iter()
+            .map(|t| interned.insert_full(t.as_str()).0)
+            .collect()
+    }
+    let mut interned: IndexSet<&str> = IndexSet::new();
+    let mut deep_ids: Vec<Vec<Vec<usize>>> = Vec::with_capacity(deep.len());
+    for paths in &deep {
+        let mut ids = Vec::with_capacity(paths.len());
+        for p in paths {
+            ids.push(intern(&mut interned, &p.tokens));
+        }
+        deep_ids.push(ids);
+    }
+    let mut exit_ids: Vec<Vec<usize>> = Vec::with_capacity(exit_paths.len());
+    for e in exit_paths {
+        exit_ids.push(intern(&mut interned, e));
+    }
+    let width = interned.len();
+    // 0 not yet asked, 1 no, 2 yes.
+    let dense = width
+        .checked_mul(width)
+        .filter(|pairs| *pairs <= MEMO_PAIRS);
+    let answers = std::cell::RefCell::new(vec![0u8; dense.unwrap_or(0)]);
+    let meets = |a: usize, b: usize| -> bool {
+        if dense.is_none() {
+            return contest(interned[a], interned[b]);
+        }
+        let slot = a * width + b;
+        let known = answers.borrow()[slot];
+        if known != 0 {
+            return 2 == known;
+        }
+        let yes = contest(interned[a], interned[b]);
+        answers.borrow_mut()[slot] = if yes { 2 } else { 1 };
+        yes
+    };
+
     // The depth at which `p` stops colliding with every rival: the
     // position after the first one where they differ, over all rivals;
     // or the whole path when some rival never differs within what both
     // have.
-    let depth_of = |p: &PrefixPath, i: usize| -> usize {
+    let depth_of = |p: &[usize], i: usize| -> usize {
         let mut d = 1usize;
-        let mut against = |q: &[String]| -> bool {
-            let m = p.tokens.len().min(q.len());
+        let mut against = |q: &[usize]| -> bool {
+            let m = p.len().min(q.len());
             let mut k = 0;
-            while k < m && contest(&p.tokens[k], &q[k]) {
+            while k < m && meets(p[k], q[k]) {
                 k += 1;
             }
             if k == m {
@@ -881,19 +938,19 @@ pub(crate) fn dispatch_prefixes(
             }
             true
         };
-        for (j, paths) in deep.iter().enumerate() {
+        for (j, paths) in deep_ids.iter().enumerate() {
             if j == i {
                 continue;
             }
             for q in paths {
-                if !against(&q.tokens) {
-                    return p.tokens.len();
+                if !against(q) {
+                    return p.len();
                 }
             }
         }
-        for e in exit_paths {
+        for e in &exit_ids {
             if !against(e) {
-                return p.tokens.len();
+                return p.len();
             }
         }
         d
@@ -910,11 +967,11 @@ pub(crate) fn dispatch_prefixes(
                 }
                 continue;
             }
-            for p in &deep[i] {
+            for (at, p) in deep[i].iter().enumerate() {
                 if &p.tokens[0] != h {
                     continue;
                 }
-                let d = depth_of(p, i);
+                let d = depth_of(&deep_ids[i][at], i);
                 let prefix: Vec<String> = p.tokens[..d].to_vec();
                 if seen.insert(prefix.join(" ")) {
                     prefixes.push(prefix);

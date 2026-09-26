@@ -6622,24 +6622,58 @@ function dispatchPrefixes(
       alt, grammar, literals, regexTokens, maxK, new Set(),
       (t) => contested[i].has(t), classSets).filter((p) => 0 < p.tokens.length))
 
+  // The depth scan below compares every contested path with every
+  // rival's, position by position, and so asks `contest` about the same
+  // few pairs of tokens over and over: millions of times for RFC 4291's
+  // IPv6address, each answered from headsContest's cache under a key
+  // built afresh. That took ex_abnf's ipv6.abnf from 0.9 s to 8.5 s to
+  // compile, and the Rust port's debug build past the 60 s budget abnf's
+  // conformance sweep gives one grammar (tabnas/abnf#95). So the tokens
+  // are numbered here, once, and each ordered pair is asked once and its
+  // answer kept in a table; the answers, and so the output, are the ones
+  // `contest` gives. A decision too wide for the table asks `contest`
+  // directly, as before.
+  const ids = new Map<string, number>()
+  const names: string[] = []
+  const intern = (tokens: string[]): number[] => tokens.map((t) => {
+    let id = ids.get(t)
+    if (undefined === id) {
+      id = names.length
+      ids.set(t, id)
+      names.push(t)
+    }
+    return id
+  })
+  const deepIds = deep.map((paths) => paths.map((p) => intern(p.tokens)))
+  const exitIds = exitPaths.map(intern)
+  const width = names.length
+  // 0 not yet asked, 1 no, 2 yes.
+  const answers = width * width <= MEMO_PAIRS ? new Uint8Array(width * width) : null
+  const meets = (a: number, b: number): boolean => {
+    if (null == answers) return contest(names[a], names[b])
+    const slot = a * width + b
+    if (0 === answers[slot]) answers[slot] = contest(names[a], names[b]) ? 2 : 1
+    return 2 === answers[slot]
+  }
+
   // The depth at which `p` stops colliding with every rival: the
   // position after the first one where they differ, over all rivals; or
   // the whole path when some rival never differs within what both have.
-  const depthOf = (p: PrefixPath, i: number): number => {
+  const depthOf = (p: number[], i: number): number => {
     let d = 1
-    const against = (q: string[]): boolean => {
-      const m = Math.min(p.tokens.length, q.length)
+    const against = (q: number[]): boolean => {
+      const m = Math.min(p.length, q.length)
       let k = 0
-      while (k < m && contest(p.tokens[k], q[k])) k++
+      while (k < m && meets(p[k], q[k])) k++
       if (k === m) return false
       if (k + 1 > d) d = k + 1
       return true
     }
     for (let j = 0; j < n; j++) {
       if (j === i) continue
-      for (const q of deep[j]) if (!against(q.tokens)) return p.tokens.length
+      for (const q of deepIds[j]) if (!against(q)) return p.length
     }
-    for (const e of exitPaths) if (!against(e)) return p.tokens.length
+    for (const e of exitIds) if (!against(e)) return p.length
     return d
   }
 
@@ -6654,14 +6688,19 @@ function dispatchPrefixes(
     }
     for (const h of heads[i]) {
       if (!contested[i].has(h)) { push([h]); continue }
-      for (const p of deep[i]) {
-        if (p.tokens[0] !== h) continue
-        push(p.tokens.slice(0, depthOf(p, i)))
-      }
+      deep[i].forEach((p, at) => {
+        if (p.tokens[0] !== h) return
+        push(p.tokens.slice(0, depthOf(deepIds[i][at], i)))
+      })
     }
     return { prefixes, nullable: nullable[i] }
   })
 }
+
+// The most token pairs one decision's contest table holds, a byte each:
+// four million, four megabytes. A wider decision asks `contest` for
+// every pair it meets instead, as it did before the table.
+const MEMO_PAIRS = 1 << 22
 
 
 // A quoted-string literal is effectively case-sensitive either
