@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{match_sources, opt, prod, rx, term};
+use common::{match_sources, opt, prod, reference, rx, sens_term, term};
 use tabnas_bnf::{
     emit_grammar_spec, ConvertOptions, Element, Grammar, Production, MAX_ELEMENT_DEPTH,
 };
@@ -78,6 +78,64 @@ fn a_pattern_both_dialects_accept_still_emits() {
         ConvertOptions::tag("tst").start("top"),
     )
     .expect("a shared-dialect pattern emits");
+}
+
+/// How many tokens deep each branch of `x = <a> t u / <b> u t` looks,
+/// where `t = ";" ";"` and `u = "!" "!"`, as in `contest_test.rs`. The
+/// two branches part at the second token, so the depth says whether the
+/// dispatcher found that the two heads can meet.
+fn contest_depths(a: Element, b: Element) -> Vec<usize> {
+    let spec = emit(
+        vec![
+            prod("doc", vec![vec![reference("x")]]),
+            prod(
+                "x",
+                vec![
+                    vec![a, reference("t"), reference("u")],
+                    vec![b, reference("u"), reference("t")],
+                ],
+            ),
+            prod("t", vec![vec![sens_term(";"), sens_term(";")]]),
+            prod("u", vec![vec![sens_term("!"), sens_term("!")]]),
+        ],
+        ConvertOptions::tag("ct").start("doc"),
+    )
+    .expect("emit");
+    spec.rule["x"]
+        .as_ref()
+        .expect("x")
+        .open
+        .iter()
+        .map(|o| o.s().unwrap_or("").split_whitespace().count())
+        .collect()
+}
+
+// DIVERGENCE.md, "An escape is read in the dialect of the engine that
+// runs it". Whether a regex head can meet a literal decides how deep the
+// dispatch looks, and this port reads the head's escapes as the `regex`
+// crate, which compiles it, does. TypeScript reads them as JavaScript
+// does, so the same IR emits a different depth: a `\a` head is BEL here
+// and the letter `a` there. Each row is this port's side of the table on
+// that page. The TypeScript side is pinned in `ts/test/bnf.test.js` and
+// the Go side by TestEscapeIsReadInTheRE2Dialect in `go/bnf_test.go`, so
+// repairing any port turns its test red and the three are revisited
+// together.
+#[test]
+fn an_escape_is_read_in_the_regex_crate_dialect() {
+    for (pattern, literal, depth) in [
+        (r"\a", "\x07", 2),
+        (r"\a", "a", 1),
+        (r"\x{41}", "x", 1),
+        (r"\U00000041", "U", 1),
+    ] {
+        assert_eq!(
+            contest_depths(rx(pattern, ""), sens_term(literal)),
+            [depth, depth],
+            "{pattern} beside {literal:?}: if this port reads the escape as \
+             JavaScript does, delete this test, its twins and the page's entry \
+             together"
+        );
+    }
 }
 
 /// `depth` nested `opt` wrappers around a literal. The literal then sits

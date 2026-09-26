@@ -139,6 +139,40 @@ describe('bnf', () => {
     }
   })
 
+  // OPEN DIVERGENCE — DIVERGENCE.md, "An escape is read in the dialect of
+  // the engine that runs it". The twins are TestEscapeIsReadInTheRE2Dialect
+  // (go/bnf_test.go) and an_escape_is_read_in_the_regex_crate_dialect
+  // (rs/tests/divergence_test.rs). Whether a regex head can meet a literal
+  // decides how deep the dispatch looks, and each port reads the head's
+  // escapes as the matcher its own engine compiles does: `\a` is the
+  // letter `a` to JavaScript and BEL to RE2 and the regex crate. Each row
+  // is this port's side of the table on that page, so repairing any port
+  // turns its test red and the three are revisited together.
+  it('reads an escape as JavaScript does (Go and Rust read their own dialects)', () => {
+    const lit = (s) => ({ kind: 'term', literal: s, caseSensitive: true })
+    const semi = (a, b) => ({
+      productions: [
+        { name: 'doc', alts: [[ref('x')]] },
+        { name: 'x', alts: [[a, ref('t'), ref('u')], [b, ref('u'), ref('t')]] },
+        { name: 't', alts: [[lit(';'), lit(';')]] },
+        { name: 'u', alts: [[lit('!'), lit('!')]] },
+      ],
+    })
+    for (const [pattern, literal, depth] of [
+      ['\\a', '\x07', 1],
+      ['\\a', 'a', 2],
+      ['\\x{41}', 'x', 2],
+      ['\\U00000041', 'U', 2],
+    ]) {
+      const spec = emitGrammarSpec(semi({ kind: 'regex', pattern, flags: '' }, lit(literal)),
+        { tag: 'ct', start: 'doc' })
+      assert.deepEqual(spec.rule.x.open.map((o) => o.s.split(' ').length), [depth, depth],
+        pattern + ' beside ' + JSON.stringify(literal) + ': if this port reads the ' +
+        'escape as the others do, delete this test, its twins and the page\'s ' +
+        'entry together')
+    }
+  })
+
   it('lifts a single-literal production into a named lexer token', () => {
     const spec = emitGrammarSpec({
       productions: [

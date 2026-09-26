@@ -9,7 +9,7 @@ Rust emitter to TypeScript's serialised output byte for byte and
 registers the ENGINE-level entries below. `rs/tests/divergence_test.rs`
 is the register for the Rust port's own entries, one test per entry, so
 repairing an entry means deleting its section here and its test there.
-`go/bnf_test.go` carries the Go entry the same way. A row with no test
+`go/bnf_test.go` carries the Go entries the same way. A row with no test
 is a defect, not a record.
 
 ## Rust
@@ -48,6 +48,48 @@ engine's limit, not this compiler's.
 Registered by `a_pattern_outside_the_engine_dialect_is_refused_at_emit`
 and `a_pattern_both_dialects_accept_still_emits`, with the flag half in
 `rs/tests/regex_flags_test.rs`.
+
+### An escape is read in the dialect of the engine that runs it
+
+The dispatcher looks one token deep where two heads cannot meet and
+deeper where they can, and whether a regex head meets a literal depends
+on what its escapes mean. Each port answers for the matcher its own
+engine compiles: TypeScript for JavaScript's `RegExp`, the Rust port for
+the `regex` crate, the Go port for RE2. The three dialects read some
+escapes differently (parser `DIVERGENCE.md`, "Regex dialect in
+serialized terminals"), so the same IR emits a different dispatch depth.
+For a head written without flags, beside a one-character literal:
+
+| head | beside | TypeScript | Go | Rust |
+|---|---|---|---|---|
+| `\a` | a literal BEL | 1 | 2 | 2 |
+| `\a` | `a` | 2 | 1 | 1 |
+| `\x{41}` | `x` | 2 | 1 | 1 |
+| `\U00000041` | `U` | 2 | refused | 1 |
+
+`\a` is BEL to RE2 and to the crate, and the letter `a` to JavaScript.
+`\x{41}` is `A` to RE2 and to the crate; to JavaScript without the `u`
+flag it is `x` repeated 41 times, which the canonical reader leaves
+unnamed, so it contests every head. `\U` spells a code point to the
+crate alone, is the letter `U` to JavaScript without `u`, and is refused
+by RE2 (the Go entry below). Each port's reading is exact for its own
+engine, and the other readings are wrong on it: read as the letter `a`,
+a `\a` head is held apart from a literal BEL that the crate's matcher
+takes, and the literal's branch is never reached. That was the Rust and
+Go ports' reading until 0.1.21.
+
+The escapes the dialects read alike (`\x41`, `\.`, `\\`) emit the same
+depth in all three, and so do the control escapes (`\n`, `\t`), the
+zero-width `\A`, `\z` and `\<`, and any head a reader cannot name, all
+of which contest every head. Reading every escape whose meaning differs
+between the dialects as unnamed, in all three ports, would close this at
+the cost of a deeper dispatch where none is needed. That moves the
+canonical compiler's output, so it is left as a decision rather than
+taken here.
+
+Registered by `an_escape_is_read_in_the_regex_crate_dialect`, with the
+TypeScript side pinned in `ts/test/bnf.test.js` and the Go side by
+`TestEscapeIsReadInTheRE2Dialect` in `go/bnf_test.go`.
 
 ### Element nesting is refused past 128 levels
 
@@ -98,6 +140,25 @@ cannot pass or regress silently.
 
 ## Go
 
-The Go port records its own open divergence in `go/bnf_test.go`
-(`TestActionRefPrefixDivergesFromTypeScript`): its closure-mode action
-refs are named `@abnf_a<n>` where TypeScript and Rust say `@bnf_a<n>`.
+The Go port registers its entries in `go/bnf_test.go`. It also reads an
+escape in its own engine's dialect, RE2, as the Rust entry above records
+for all three ports; `TestEscapeIsReadInTheRE2Dialect` pins its side.
+
+### Closure-mode action refs are named `@abnf_a<n>`
+
+The Go port's closure-mode action refs are named `@abnf_a<n>` where
+TypeScript and Rust say `@bnf_a<n>`. Registered by
+`TestActionRefPrefixDivergesFromTypeScript`, with its TypeScript twin
+in `ts/test/bnf.test.js`.
+
+### A pattern RE2 cannot compile is refused at emit time
+
+As in the Rust port, the Go port compiles a regex terminal when it
+allocates the token, so a pattern JavaScript accepts and RE2 does not
+(lookaround, a backreference, JavaScript's four-digit Unicode escape,
+`\cA`, `\U`) fails the emit with the token named, where TypeScript
+emits it. Before 0.1.21 the Go port
+panicked out of `EmitGrammarSpec` on such a pattern instead of
+returning an error.
+
+Registered by `TestEmitRefusesAPatternGoCannotCompile`.

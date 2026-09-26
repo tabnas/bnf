@@ -230,6 +230,38 @@ func TestActionRefPrefixDivergesFromTypeScript(t *testing.T) {
 	}
 }
 
+// OPEN DIVERGENCE — DIVERGENCE.md, "An escape is read in the dialect of
+// the engine that runs it". Whether a regex head can meet a literal
+// decides how deep the dispatch looks, and this port reads the head's
+// escapes as RE2, which compiles it, does. TypeScript reads them as
+// JavaScript does, so the same IR emits a different depth: a `\a` head is
+// BEL here and the letter `a` there. Each row is this port's side of the
+// table on that page. The twins are the TypeScript test in
+// ts/test/bnf.test.js and an_escape_is_read_in_the_regex_crate_dialect in
+// rs/tests/divergence_test.rs, so repairing any port turns its test red
+// and the three are revisited together.
+func TestEscapeIsReadInTheRE2Dialect(t *testing.T) {
+	for _, c := range []struct {
+		pattern, literal string
+		depth            int
+	}{
+		{`\a`, "\a", 2},
+		{`\a`, "a", 1},
+		{`\x{41}`, "x", 1},
+	} {
+		spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: c.pattern}, ctLit(c.literal)),
+			&ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatalf("%s: %v", c.pattern, err)
+		}
+		if d := ctDepths(t, spec); len(d) != 2 || d[0] != c.depth || d[1] != c.depth {
+			t.Errorf("%s beside %q: depths %v, want [%d %d]; if this port reads the "+
+				"escape as JavaScript does, delete this test, its twins and the "+
+				"page's entry together", c.pattern, c.literal, d, c.depth, c.depth)
+		}
+	}
+}
+
 // actionRefPrefixes collects the notation part of every compiler-generated
 // action ref (`@<prefix>_a<n>`) in an emitted spec.
 func actionRefPrefixes(t *testing.T, doc string) []string {
@@ -1490,8 +1522,11 @@ func TestEmitFailureIsAnErrorNotAPanic(t *testing.T) {
 // terminal Go's regexp refuses. The IR carries a front-end's pattern as
 // written, and JavaScript's `\u0041` or `\cA` is no RE2 at all; compiling
 // it with MustCompile panicked out of EmitGrammarSpec on grammar input.
+// It is also the register for DIVERGENCE.md, "A pattern RE2 cannot compile
+// is refused at emit time": TypeScript emits every one of these, so the
+// lookaround, the backreference and `\U` are here for that entry.
 func TestEmitRefusesAPatternGoCannotCompile(t *testing.T) {
-	for _, p := range []string{`\u1`, `\cA`, `\u0041`, `[\u0041-\u005a]`} {
+	for _, p := range []string{`\u1`, `\cA`, `\u0041`, `[\u0041-\u005a]`, `a(?=b)`, `(a)\1`, `\U00000041`} {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
