@@ -16,15 +16,17 @@ test: test-ts test-go test-rs
 
 clean: clean-ts clean-go clean-rs
 
-# Run the front-end suites against this working tree. Required before any
-# emit-pipeline change is done, and before a release: a green build here
-# proves much less than usual, because what this package emits is executed
-# elsewhere. See scripts/downstream.sh and AGENTS.md, "Verify your work".
+# Run the front-end suites against this working tree, in TypeScript, Go and
+# Rust. Required before any emit-pipeline change is done, and before a
+# release: a green build here proves much less than usual, because what
+# this package emits is executed elsewhere. See scripts/downstream.sh and
+# AGENTS.md, "Verify your work".
 #
-#   make downstream                # abnf ebnf gbnf
-#   make downstream PEERS="gbnf"   # just that one
+#   make downstream                    # abnf ebnf gbnf, every runtime
+#   make downstream PEERS="gbnf"       # just that one
+#   make downstream RUNTIMES="ts go"   # without the Rust half
 downstream:
-	./scripts/downstream.sh $(PEERS)
+	RUNTIMES="$(RUNTIMES)" ./scripts/downstream.sh $(PEERS)
 
 # --- TypeScript (package in ts/) ---
 build-ts:

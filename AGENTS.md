@@ -98,6 +98,7 @@ are not:
 | `rs/` | Rust port (follows TS): the `tabnas-bnf` crate. Depends on the engine's `tabnas` crate via a `path` dependency on the sibling checkout (`../../parser/rs`). Library only. Holds its emitter to the TypeScript compiler's serialised output byte for byte in `rs/tests/oracle_test.rs`. See `rs/AGENTS.md`. |
 | `ci/` | `ci/rust/run.sh`, the Rust gate: what `.github/workflows/rust.yml` runs, and what you run locally. The workflows once staged under `ci/workflows/` now live in `.github/workflows/`. |
 | `scripts/downstream.sh` | Runs the front-end suites against this working tree: `make downstream` locally, `.github/workflows/downstream.yml` in CI. |
+| `scripts/heartbeat.sh` | Runs a command and prints a line every 30 s until it ends. `scripts/downstream.sh` and the Downstream workflow run their long steps and installs through it. |
 
 ## Provenance, and why the tests live downstream
 
@@ -123,10 +124,19 @@ this repo stayed green throughout.
 **`.github/workflows/downstream.yml` does** (tabnas/bnf#48). It runs
 `scripts/downstream.sh`, the script behind `make downstream`, over abnf,
 ebnf and gbnf at their default branches, on every push and pull request
-that changes `ts/src/`, `ts/package.json` or `go/`. It is a workflow of
-its own rather than a `downstream:` input on the org-shared
-`polyglot-ci.yml`, which has no such input, for the reason `rust.yml`
-gives: adding it needs no change in `tabnas/.github`.
+that changes `ts/src/`, `ts/package.json`, `go/` or `rs/`. One job runs
+the TypeScript and Go halves, and one job per front-end runs its Rust
+gate against this tree's crate. It is a workflow of its own rather than a
+`downstream:` input on the org-shared `polyglot-ci.yml`, which has no
+such input, for the reason `rust.yml` gives: adding it needs no change in
+`tabnas/.github`.
+
+The Rust half came late, and what it cost is the reason it exists. bnf
+0.1.20 and 0.1.21 made the Rust compiles of `ipv6.abnf`, `jid.abnf` and
+`jsonpath.abnf` five to ten times slower. On CI that put them past the 60 s
+budget of abnf's Rust conformance sweep, and both releases shipped with
+this repo and the Downstream workflow green. abnf's own Rust gate found
+the regression after the releases (tabnas/abnf#95), and 0.1.22 fixed it.
 
 ## Authority and alignment rules
 
@@ -216,9 +226,25 @@ order of authority:
    grades a stale `dist/` — which reads exactly like a failure in this
    tree.
 
+   The Rust half runs each sibling's own Rust gate, `ci/rust/run.sh`.
+   Nothing is swapped in for it, because every front-end crate already
+   depends on this one by path, as `../../bnf/rs`. That path reaches this
+   tree only when this checkout is the `bnf` directory beside the
+   siblings, so the script refuses a checkout under any other name rather
+   than grade some other bnf. The gates also need the sibling crates they
+   name: `parser` and `support` beside abnf and ebnf, and `parser` and
+   `abnf` beside gbnf. They need `cargo` too, and without it the run fails.
+   abnf's gate is the slow one, several minutes, most of it the
+   conformance sweep that budgets each compile at 60 s.
+
    A sibling that is not checked out fails the run rather than being
-   skipped. Narrow it deliberately instead:
-   `make downstream PEERS="gbnf ebnf"`.
+   skipped, and so does a requested half that a named sibling does not
+   have. Narrow it deliberately instead:
+   `make downstream PEERS="gbnf ebnf"`, or `make downstream
+   RUNTIMES="ts go"` to leave the Rust half out. Leaving it out does not
+   make a change done: a change to `rs/` needs the Rust half, and the
+   Downstream workflow runs it on every pull request that touches
+   `ts/src/`, `ts/package.json`, `go/` or `rs/`.
 
    **It does not prove a sibling can resolve this package.** Its Go half
    runs under a workspace, which takes the module from disk and never
