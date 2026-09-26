@@ -115,7 +115,7 @@ fn read_escape(chars: &[char], at: usize) -> Option<(usize, u32)> {
     }
 }
 
-pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
+pub fn pattern_char_ranges(pattern: &str, flags: &str) -> Option<Vec<CharRange>> {
     if pattern == r"[\s\S]" {
         return Some(vec![(0, MAX_CODE_POINT)]);
     }
@@ -147,11 +147,32 @@ pub fn pattern_char_ranges(pattern: &str) -> Option<Vec<CharRange>> {
         i += 1;
     }
     let mut ranges: Vec<CharRange> = Vec::new();
+    // Without `u` or `v` the canonical matcher reads a class in UTF-16
+    // code units, so an astral character written in one is two members,
+    // its lead and trail surrogates: `[😀]` takes the first half of
+    // U+1F601 as well. The crate reads the code point, which is kept, and
+    // the two units are added beside it, so the contest checks reach from
+    // the lead as the canonical compiler's do (`code_unit_reach`) and the
+    // three ports emit the same grammar. Mirrors TS `patternCharRanges`
+    // (tabnas/bnf#75 review).
+    let units = !flags.contains(['u', 'v']);
+    let split = |raw: bool, cp: u32, ranges: &mut Vec<CharRange>| {
+        if raw && units && cp > 0xFFFF {
+            let lead = 0xD800 + ((cp - 0x10000) >> 10);
+            let trail = 0xDC00 + ((cp - 0x10000) & 0x3FF);
+            ranges.push((lead, lead));
+            ranges.push((trail, trail));
+        }
+    };
     while i < chars.len() && chars[i] != ']' {
+        let raw = chars[i] != '\\';
         let lo = one(&chars, &mut i)?;
+        split(raw, lo, &mut ranges);
         if chars.get(i) == Some(&'-') && chars.get(i + 1).is_some_and(|c| *c != ']') {
             i += 1;
+            let raw = chars.get(i) != Some(&'\\');
             let hi = one(&chars, &mut i)?;
+            split(raw, hi, &mut ranges);
             ranges.push((lo, hi));
         } else {
             ranges.push((lo, lo));
@@ -314,7 +335,7 @@ fn single_code_point_coverage(pattern: &str, flags: &str) -> Option<Vec<CharRang
         return None;
     }
     if pattern == r"[\s\S]" {
-        return pattern_char_ranges(pattern);
+        return pattern_char_ranges(pattern, flags);
     }
     let chars: Vec<char> = pattern.chars().collect();
     if chars.first() == Some(&'[') {
@@ -338,7 +359,7 @@ fn single_code_point_coverage(pattern: &str, flags: &str) -> Option<Vec<CharRang
         if i != chars.len() - 1 {
             return None;
         }
-        return pattern_char_ranges(pattern);
+        return pattern_char_ranges(pattern, flags);
     }
 
     // A bare single code point, possibly escaped: `a`, `\.`, `A`,
@@ -347,7 +368,7 @@ fn single_code_point_coverage(pattern: &str, flags: &str) -> Option<Vec<CharRang
     if !is_single_code_point_pattern(&chars) {
         return None;
     }
-    pattern_char_ranges(pattern)
+    pattern_char_ranges(pattern, flags)
 }
 
 /// One unescaped character that is no regex syntax, or one escape that
@@ -682,10 +703,10 @@ mod tests {
             r"\d",
         ] {
             assert_eq!(regex_head_atom_end(p), None, "{p}");
-            assert_eq!(pattern_char_ranges(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), None, "{p}");
         }
         for p in [r"[\p{L}]", r"[a\1]", r"[\u1]"] {
-            assert_eq!(pattern_char_ranges(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), None, "{p}");
         }
         for (p, end, cp) in [
             (r"\u0041", 6, 0x41),
@@ -694,7 +715,7 @@ mod tests {
             (r"\.", 2, 0x2E),
         ] {
             assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
-            assert_eq!(pattern_char_ranges(p), Some(vec![(cp, cp)]), "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), Some(vec![(cp, cp)]), "{p}");
         }
     }
 
@@ -712,10 +733,10 @@ mod tests {
             (r"\#", 2, 0x23),
         ] {
             assert_eq!(regex_head_atom_end(p), Some(end), "{p}");
-            assert_eq!(pattern_char_ranges(p), Some(vec![(cp, cp)]), "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), Some(vec![(cp, cp)]), "{p}");
         }
         assert_eq!(
-            pattern_char_ranges(r"[\a-\x{0D}]"),
+            pattern_char_ranges(r"[\a-\x{0D}]", ""),
             Some(vec![(0x07, 0x0D)])
         );
         // Zero-width assertions, letters the crate does not define, and
@@ -736,7 +757,7 @@ mod tests {
             r"\U{110000}",
         ] {
             assert_eq!(regex_head_atom_end(p), None, "{p}");
-            assert_eq!(pattern_char_ranges(p), None, "{p}");
+            assert_eq!(pattern_char_ranges(p, ""), None, "{p}");
         }
         // The partition sees the same reading.
         assert_eq!(
@@ -749,19 +770,29 @@ mod tests {
 
     #[test]
     fn pattern_char_ranges_reads_the_emitter_shapes() {
-        assert_eq!(pattern_char_ranges("[a-c]"), Some(vec![(97, 99)]));
-        assert_eq!(pattern_char_ranges(r"A"), Some(vec![(65, 65)]));
+        assert_eq!(pattern_char_ranges("[a-c]", ""), Some(vec![(97, 99)]));
+        // In code units an astral character in a class is also its two
+        // surrogates; under `u` it is the code point alone.
         assert_eq!(
-            pattern_char_ranges(r"[\x41-\x43x]"),
+            pattern_char_ranges("[\u{1F600}]", ""),
+            Some(vec![(0xD83D, 0xD83D), (0xDE00, 0xDE00), (0x1F600, 0x1F600)])
+        );
+        assert_eq!(
+            pattern_char_ranges("[\u{1F600}]", "u"),
+            Some(vec![(0x1F600, 0x1F600)])
+        );
+        assert_eq!(pattern_char_ranges(r"A", ""), Some(vec![(65, 65)]));
+        assert_eq!(
+            pattern_char_ranges(r"[\x41-\x43x]", ""),
             Some(vec![(65, 67), (120, 120)])
         );
         assert_eq!(
-            pattern_char_ranges(r"[\s\S]"),
+            pattern_char_ranges(r"[\s\S]", ""),
             Some(vec![(0, MAX_CODE_POINT)])
         );
-        assert_eq!(pattern_char_ranges(r"\d"), None);
+        assert_eq!(pattern_char_ranges(r"\d", ""), None);
         assert_eq!(
-            pattern_char_ranges("[^a]"),
+            pattern_char_ranges("[^a]", ""),
             Some(vec![(0, 96), (98, MAX_CODE_POINT)])
         );
     }

@@ -227,6 +227,25 @@ describe('contest', () => {
     }
   })
 
+  it('a class read in code units takes an astral character it holds as two', () => {
+    // Without `u` or `v` JavaScript reads `[😀]` as its lead and trail
+    // surrogates, so it takes the first half of U+1F601 as well. Read as
+    // U+1F600 alone, it and a `😁` head were disjoint, and the class took
+    // the lead surrogate of `😁` from the literal's branch (tabnas/bnf#75
+    // review).
+    for (const pattern of ['[\u{1F600}]', '[b\u{1F600}]']) {
+      const spec = emitGrammarSpec(semi(rx(pattern), lit('\u{1F601}')), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [2, 2], pattern)
+      assert.ok(parses(spec, '\u{1F601}!!;;', { lex: { relex: true } }), pattern)
+    }
+    // Under `u` the class holds the code point alone, and a bare `😀`, a
+    // sequence, takes only the whole pair.
+    for (const [pattern, flags] of [['[\u{1F600}]', 'u'], ['\u{1F600}', '']]) {
+      const spec = emitGrammarSpec(semi(rx(pattern, flags), lit('\u{1F601}')), { tag: 'ct', start: 'doc' })
+      assert.deepEqual(depthsOf(spec), [1, 1], pattern + ' ' + flags)
+    }
+  })
+
   it('a repetition ending on a surrogate escape keeps its exit guard', () => {
     // doc = *[\u0041-\ud800] "A" ";" -- ABNF `*%x41-D800 %x41 %x3B`. The
     // class covers the `A` the tail needs, so the loop carries a two-token

@@ -270,3 +270,23 @@ fn a_head_read_in_code_units_naming_a_lead_surrogate_meets_an_astral_head() {
         assert!(parses(&spec, "\u{10000}!!;;", false), "{label}");
     }
 }
+
+// A class the canonical matcher reads in code units (no `u` or `v`) holds
+// an astral character written in it as its lead and trail surrogates, so
+// `[😀]` meets a `😁` head through the lead. The crate reads the code
+// point, but this port adds the units beside it, so the three ports emit
+// the same grammar (tabnas/bnf#75 review). Mirrors the TS and Go tests.
+#[test]
+fn a_class_read_in_code_units_takes_an_astral_character_as_two() {
+    let emit =
+        |g: Grammar| emit_grammar_spec(&g, &ConvertOptions::tag("ct").start("doc")).expect("emit");
+    for p in ["[\u{1F600}]", "[b\u{1F600}]"] {
+        let spec = emit(semi(rx(p, ""), sens_term("\u{1F601}")));
+        assert_eq!(depths(&spec), [2, 2], "{p}");
+        assert!(parses(&spec, "\u{1F601}!!;;", true), "{p}");
+    }
+    for (p, f) in [("[\u{1F600}]", "u"), ("\u{1F600}", "")] {
+        let spec = emit(semi(rx(p, f), sens_term("\u{1F601}")));
+        assert_eq!(depths(&spec), [1, 1], "{p} {f}");
+    }
+}

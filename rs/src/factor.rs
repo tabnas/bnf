@@ -197,7 +197,7 @@ fn first_char_ranges_of_element(
             Some(code_unit_reach(&[(cp, cp)], ""))
         }
         Kind::Regex { pattern, flags } => {
-            pattern_char_ranges(pattern).map(|r| code_unit_reach(&r, flags))
+            pattern_char_ranges(pattern, flags).map(|r| code_unit_reach(&r, flags))
         }
         Kind::Ref { name, .. } => {
             if visited.contains(name) {

@@ -163,6 +163,10 @@ describe('bnf', () => {
       ['\\a', 'a', 2],
       ['\\x{41}', 'x', 2],
       ['\\U00000041', 'U', 2],
+      ['\\A', 'x', 1],
+      ['\\z', 'x', 1],
+      ['\\<', 'x', 1],
+      ['\\>', 'x', 1],
     ]) {
       const spec = emitGrammarSpec(semi({ kind: 'regex', pattern, flags: '' }, lit(literal)),
         { tag: 'ct', start: 'doc' })

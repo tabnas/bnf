@@ -5822,14 +5822,31 @@ function patternCharRanges(
     i++
   }
   const ranges: Array<[number, number]> = []
+  // Without `u` or `v` a class is read in UTF-16 code units, so an astral
+  // character written in one is two members, its lead and trail
+  // surrogates: `[😀]` takes the first half of U+1F601 as well. Both are
+  // kept beside the code point, whose reading a range needs, and the
+  // contest checks reach from the lead (codeUnitReach). Read as the code
+  // point alone, `[😀]` and a `😁` head were disjoint (tabnas/bnf#75
+  // review).
+  const units = !/[uv]/.test(flags)
+  const split = (cp: number): void => {
+    if (units && 0xFFFF < cp) {
+      const lead = 0xD800 + ((cp - 0x10000) >> 10)
+      const trail = 0xDC00 + ((cp - 0x10000) & 0x3FF)
+      ranges.push([lead, lead], [trail, trail])
+    }
+  }
   while (i < pattern.length && ']' !== pattern[i]) {
     const lo = one()
     if (null == lo) return null
+    split(lo)
     if ('-' === pattern[i] && ']' !== pattern[i + 1] &&
       i + 1 < pattern.length) {
       i++
       const hi = one()
       if (null == hi) return null
+      split(hi)
       ranges.push([lo, hi])
     } else {
       ranges.push([lo, lo])

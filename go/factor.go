@@ -183,7 +183,7 @@ func firstCharRangesOfElement(el *Element, grammar *Grammar, visited map[string]
 		}
 		return codeUnitReach([]charRange{{cp, cp}}, "")
 	case KindRegex:
-		if r := patternCharRanges(el.Pattern); r != nil {
+		if r := patternCharRanges(el.Pattern, el.Flags); r != nil {
 			return codeUnitReach(r, el.Flags)
 		}
 		return nil

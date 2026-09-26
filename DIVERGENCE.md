@@ -67,26 +67,31 @@ For a head written without flags, beside a one-character literal:
 | `\a` | `a` | 2 | 1 | 1 |
 | `\x{41}` | `x` | 2 | 1 | 1 |
 | `\U00000041` | `U` | 2 | refused | 1 |
+| `\A`, `\z` | `x` | 1 | 2 | 2 |
+| `\<`, `\>` | `x` | 1 | 1 | 2 |
 
 `\a` is BEL to RE2 and to the crate, and the letter `a` to JavaScript.
 `\x{41}` is `A` to RE2 and to the crate; to JavaScript without the `u`
 flag it is `x` repeated 41 times, which the canonical reader leaves
 unnamed, so it contests every head. `\U` spells a code point to the
 crate alone, is the letter `U` to JavaScript without `u`, and is refused
-by RE2 (the Go entry below). Each port's reading is exact for its own
-engine, and the other readings are wrong on it: read as the letter `a`,
-a `\a` head is held apart from a literal BEL that the crate's matcher
-takes, and the literal's branch is never reached. That was the Rust and
-Go ports' reading until 0.1.21.
+by RE2 (the Go entry below). `\A` and `\z` are the start and end of the
+text to RE2 and to the crate, and `\<` and `\>` the start and end of a
+word to the crate alone. JavaScript without `u` reads each of the four
+as the character it escapes, as RE2 reads `\<` and `\>`. A zero-width
+head names no first character, so it contests every head.
+Each port's reading is exact for its own engine, and the other readings
+are wrong on it: read as the letter `a`, a `\a` head is held apart from
+a literal BEL that the crate's matcher takes, and the literal's branch
+is never reached. That was the Rust and Go ports' reading until 0.1.21.
 
 The escapes the dialects read alike (`\x41`, `\.`, `\\`) emit the same
-depth in all three, and so do the control escapes (`\n`, `\t`), the
-zero-width `\A`, `\z` and `\<`, and any head a reader cannot name, all
-of which contest every head. Reading every escape whose meaning differs
-between the dialects as unnamed, in all three ports, would close this at
-the cost of a deeper dispatch where none is needed. That moves the
-canonical compiler's output, so it is left as a decision rather than
-taken here.
+depth in all three, and so do the control escapes (`\n`, `\t`) and any
+head no reader can name, all of which contest every head. Reading every
+escape whose meaning differs between the dialects as unnamed, in all
+three ports, would close this at the cost of a deeper dispatch where
+none is needed. That moves the canonical compiler's output, so it is
+left as a decision rather than taken here.
 
 Registered by `an_escape_is_read_in_the_regex_crate_dialect`, with the
 TypeScript side pinned in `ts/test/bnf.test.js` and the Go side by

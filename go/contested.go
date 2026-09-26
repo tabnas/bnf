@@ -335,7 +335,11 @@ func (c *contestCtx) tokenRangesOf(tok string) []charRange {
 		if strings.HasPrefix(src, "(?:") && strings.HasSuffix(src, ")") {
 			src = src[3 : len(src)-1]
 		}
-		r = patternCharRanges(src)
+		flags := ""
+		if c.codePoints[tok] {
+			flags = "u"
+		}
+		r = patternCharRanges(src, flags)
 		// A case-insensitive matcher covers both cases of every letter
 		// it names, and the pattern text only spells one of them. ABNF
 		// literals are case-insensitive by default, so without this an
@@ -346,8 +350,8 @@ func (c *contestCtx) tokenRangesOf(tok string) []charRange {
 		if r != nil && fold {
 			r = foldCaseRanges(r)
 		}
-		if r != nil && !c.codePoints[tok] {
-			r = codeUnitReach(r, "")
+		if r != nil {
+			r = codeUnitReach(r, flags)
 		}
 	}
 

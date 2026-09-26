@@ -248,6 +248,10 @@ func TestEscapeIsReadInTheRE2Dialect(t *testing.T) {
 		{`\a`, "\a", 2},
 		{`\a`, "a", 1},
 		{`\x{41}`, "x", 1},
+		{`\A`, "x", 2},
+		{`\z`, "x", 2},
+		{`\<`, "x", 1},
+		{`\>`, "x", 1},
 	} {
 		spec, err := EmitGrammarSpec(ctSemi(&Element{Kind: KindRegex, Pattern: c.pattern}, ctLit(c.literal)),
 			&ConvertOptions{Tag: "ct", Start: "doc"})

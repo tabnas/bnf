@@ -268,7 +268,7 @@ impl ContestCtx {
                 if let Some(inner) = src.strip_prefix("(?:").and_then(|s| s.strip_suffix(')')) {
                     src = inner.to_string();
                 }
-                r = pattern_char_ranges(&src);
+                r = pattern_char_ranges(&src, &re.flags);
                 if let Some(rr) = &r {
                     if re.flags.contains('i') {
                         r = Some(fold_case_ranges(rr));

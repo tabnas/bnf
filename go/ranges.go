@@ -147,7 +147,7 @@ func hexDigits(r []rune, min, max int) bool {
 	return true
 }
 
-func patternCharRanges(pattern string) []charRange {
+func patternCharRanges(pattern, flags string) []charRange {
 	if pattern == `[\s\S]` {
 		return []charRange{{0, maxCodePoint}}
 	}
@@ -194,17 +194,36 @@ func patternCharRanges(pattern string) []charRange {
 	}
 
 	out := []charRange{}
+	// Without `u` or `v` the canonical matcher reads a class in UTF-16 code
+	// units, so an astral character written in one is two members, its
+	// lead and trail surrogates: `[😀]` takes the first half of U+1F601 as
+	// well. RE2 reads the code point, which is kept, and the two units are
+	// added beside it, so the contest checks reach from the lead as the
+	// canonical compiler's do (codeUnitReach) and the three ports emit the
+	// same grammar. Mirrors TS patternCharRanges (tabnas/bnf#75 review).
+	units := !strings.ContainsAny(flags, "uv")
+	split := func(raw bool, cp rune) {
+		if raw && units && cp > 0xFFFF {
+			lead := 0xD800 + (cp-0x10000)>>10
+			trail := 0xDC00 + (cp-0x10000)&0x3FF
+			out = append(out, charRange{lead, lead}, charRange{trail, trail})
+		}
+	}
 	for i < len(r) && r[i] != ']' {
+		raw := r[i] != '\\'
 		lo, ok := one()
 		if !ok {
 			return nil
 		}
+		split(raw, lo)
 		if i < len(r) && r[i] == '-' && i+1 < len(r) && r[i+1] != ']' {
 			i++
+			raw := r[i] != '\\'
 			hi, ok := one()
 			if !ok {
 				return nil
 			}
+			split(raw, hi)
 			out = append(out, charRange{lo, hi})
 			continue
 		}
@@ -434,7 +453,7 @@ func singleCodePointCoverage(pattern, flags string) []charRange {
 		return nil
 	}
 	if pattern == `[\s\S]` {
-		return patternCharRanges(pattern)
+		return patternCharRanges(pattern, flags)
 	}
 
 	if strings.HasPrefix(pattern, "[") {
@@ -457,7 +476,7 @@ func singleCodePointCoverage(pattern, flags string) []charRange {
 		if i != len(pattern)-1 {
 			return nil
 		}
-		return patternCharRanges(pattern)
+		return patternCharRanges(pattern, flags)
 	}
 
 	// A bare single code point, possibly escaped: `a`, `\.`, `\x41`,
@@ -466,7 +485,7 @@ func singleCodePointCoverage(pattern, flags string) []charRange {
 	if !singleCodePointRe.MatchString(pattern) {
 		return nil
 	}
-	return patternCharRanges(pattern)
+	return patternCharRanges(pattern, flags)
 }
 
 var singleCodePointRe = regexp.MustCompile(

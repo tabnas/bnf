@@ -127,6 +127,10 @@ fn an_escape_is_read_in_the_regex_crate_dialect() {
         (r"\a", "a", 1),
         (r"\x{41}", "x", 1),
         (r"\U00000041", "U", 1),
+        (r"\A", "x", 2),
+        (r"\z", "x", 2),
+        (r"\<", "x", 2),
+        (r"\>", "x", 2),
     ] {
         assert_eq!(
             contest_depths(rx(pattern, ""), sens_term(literal)),

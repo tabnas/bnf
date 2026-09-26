@@ -285,12 +285,12 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 		if end := regexHeadAtomEnd(p); end != -1 {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
 		}
-		if r := patternCharRanges(p); r != nil {
+		if r := patternCharRanges(p, ""); r != nil {
 			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
 		}
 	}
 	for _, p := range []string{`[\p{L}]`, `[a\1]`, `[\u1]`} {
-		if r := patternCharRanges(p); r != nil {
+		if r := patternCharRanges(p, ""); r != nil {
 			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
 		}
 	}
@@ -304,7 +304,7 @@ func TestContestEscapeWhoseCodePointCannotBeReadIsNotExact(t *testing.T) {
 		if end := regexHeadAtomEnd(c.p); end != c.end {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
 		}
-		if r := patternCharRanges(c.p); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
+		if r := patternCharRanges(c.p, ""); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
 			t.Errorf("patternCharRanges(%q) = %v, want %U", c.p, r, c.cp)
 		}
 	}
@@ -337,18 +337,18 @@ func TestContestEscapeIsReadAsRE2ReadsIt(t *testing.T) {
 		if end := regexHeadAtomEnd(c.p); end != c.end {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want %d", c.p, end, c.end)
 		}
-		if r := patternCharRanges(c.p); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
+		if r := patternCharRanges(c.p, ""); len(r) != 1 || r[0] != (charRange{c.cp, c.cp}) {
 			t.Errorf("patternCharRanges(%q) = %v, want %U", c.p, r, c.cp)
 		}
 	}
-	if r := patternCharRanges(`[\a-\x{0d}]`); len(r) != 1 || r[0] != (charRange{0x07, 0x0D}) {
+	if r := patternCharRanges(`[\a-\x{0d}]`, ""); len(r) != 1 || r[0] != (charRange{0x07, 0x0D}) {
 		t.Errorf(`patternCharRanges([\a-\x{0d}]) = %v, want U+0007-U+000D`, r)
 	}
 	for _, p := range []string{`\A`, `\z`, `\Qa\E`, `\Q+\E`, `\C`, `\E`, `\e`, `\U00000041`} {
 		if end := regexHeadAtomEnd(p); end != -1 {
 			t.Errorf("regexHeadAtomEnd(%q) = %d, want -1", p, end)
 		}
-		if r := patternCharRanges(p); r != nil {
+		if r := patternCharRanges(p, ""); r != nil {
 			t.Errorf("patternCharRanges(%q) = %v, want unknown", p, r)
 		}
 	}
@@ -439,5 +439,43 @@ func TestContestCodeUnitLeadSurrogateMeetsAstralHead(t *testing.T) {
 		if d := ctDepths(t, spec); d[0] != 1 || d[1] != 1 {
 			t.Errorf("%s: depths %v, want [1 1]", label, d)
 		}
+	}
+}
+
+// TestContestCodeUnitClassTakesAnAstralCharacterAsTwo pins that a class
+// the canonical matcher reads in code units (no `u` or `v`) holds an
+// astral character written in it as its lead and trail surrogates, so
+// `[😀]` meets a `😁` head through the lead. RE2 reads the code point, but
+// this port adds the units beside it, so the three ports emit the same
+// grammar (tabnas/bnf#75 review). Mirrors the TS test.
+func TestContestCodeUnitClassTakesAnAstralCharacterAsTwo(t *testing.T) {
+	rx := func(p, f string) *Element { return &Element{Kind: KindRegex, Pattern: p, Flags: f} }
+	emit := func(g *Grammar) *tabnas.GrammarSpec {
+		spec, err := EmitGrammarSpec(g, &ConvertOptions{Tag: "ct", Start: "doc"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return spec
+	}
+	for _, p := range []string{"[\U0001F600]", "[b\U0001F600]"} {
+		spec := emit(ctSemi(rx(p, ""), ctLit("\U0001F601")))
+		if d := ctDepths(t, spec); d[0] != 2 || d[1] != 2 {
+			t.Errorf("%s: depths %v, want [2 2]", p, d)
+		}
+		if !ctParses(t, spec, "\U0001F601!!;;", true) {
+			t.Errorf("%s: U+1F601 then !!;; should parse", p)
+		}
+	}
+	for _, c := range [][2]string{{"[\U0001F600]", "u"}, {"\U0001F600", ""}} {
+		spec := emit(ctSemi(rx(c[0], c[1]), ctLit("\U0001F601")))
+		if d := ctDepths(t, spec); d[0] != 1 || d[1] != 1 {
+			t.Errorf("%s %s: depths %v, want [1 1]", c[0], c[1], d)
+		}
+	}
+	if r := patternCharRanges("[\U0001F600]", ""); len(r) != 3 {
+		t.Errorf("[😀] in code units: %v, want U+1F600 and its two units", r)
+	}
+	if r := patternCharRanges("[\U0001F600]", "u"); len(r) != 1 {
+		t.Errorf("[😀] under u: %v, want U+1F600 alone", r)
 	}
 }
