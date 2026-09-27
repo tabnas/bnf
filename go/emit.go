@@ -12,6 +12,7 @@ package bnf
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -870,7 +871,7 @@ func (rr *refRegistry) node(cfg map[string]any) map[string]any {
 	rule, _ := cfg["rule"].(string)
 	kind, _ := cfg["kind"].(string)
 	nterms, _ := cfg["nterms"].(int)
-	ref := rr.registerAction(func(r *tabnas.Rule, _ *tabnas.Context) {
+	ref := rr.registerAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 		if init {
 			r.Node = mkAstNode(rule, kind)
 		}
@@ -879,10 +880,11 @@ func (rr *refRegistry) node(cfg map[string]any) map[string]any {
 			return
 		}
 		src, _ := n["src"].(string)
-		for i := 0; i < nterms && i < len(r.O); i++ {
-			src += r.O[i].Src
-		}
 		n["src"] = src
+		acc := srcAccOf(ctx)
+		for i := 0; i < nterms && i < len(r.O); i++ {
+			acc.append(n, r.O[i].Src)
+		}
 	})
 	return map[string]any{"a": string(ref)}
 }
@@ -894,7 +896,7 @@ func (rr *refRegistry) capture(cfg map[string]any) map[string]any {
 	}
 	rule, _ := cfg["rule"].(string)
 	kind, _ := cfg["kind"].(string)
-	ref := rr.registerAction(func(r *tabnas.Rule, _ *tabnas.Context) {
+	ref := rr.registerAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 		if r.Node == nil {
 			r.Node = mkAstNode(rule, kind)
 		}
@@ -918,9 +920,8 @@ func (rr *refRegistry) capture(cfg map[string]any) map[string]any {
 		if sameMap(cm, n) {
 			return
 		}
-		ns, _ := n["src"].(string)
 		cs, _ := cm["src"].(string)
-		n["src"] = ns + cs
+		srcAccOf(ctx).append(n, cs)
 		if rv, ok := cm["rule"]; ok && rv != nil && rv != "" {
 			n["kids"] = append(asAnyKids(n["kids"]), cm)
 		} else if ck, ok := cm["kids"].([]any); ok {
@@ -955,7 +956,7 @@ func (rr *refRegistry) fold(cN int) map[string]any {
 		}
 		return map[string]any{"a": "@fold$", "k": map[string]any{"fold$": cfg}}
 	}
-	ref := rr.registerAction(func(r *tabnas.Rule, _ *tabnas.Context) {
+	ref := rr.registerAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 		if r.Parent == nil {
 			return
 		}
@@ -966,11 +967,11 @@ func (rr *refRegistry) fold(cN int) map[string]any {
 		if _, hasSrc := p["src"]; !hasSrc {
 			return
 		}
+		acc := srcAccOf(ctx)
 		if own, ok := r.Node.(map[string]any); ok && own != nil && !sameMap(own, p) {
 			if _, hasSrc := own["src"]; hasSrc {
-				ps, _ := p["src"].(string)
 				os, _ := own["src"].(string)
-				p["src"] = ps + os
+				acc.append(p, os)
 				if rv, ok := own["rule"]; ok && rv != nil && rv != "" {
 					p["kids"] = append(asAnyKids(p["kids"]), own)
 				} else if ok2, okk := own["kids"].([]any); okk {
@@ -980,13 +981,90 @@ func (rr *refRegistry) fold(cN int) map[string]any {
 		}
 		for i := 0; i < cN && i < len(r.C); i++ {
 			if r.C[i] != nil {
-				ps, _ := p["src"].(string)
-				p["src"] = ps + r.C[i].Src
+				acc.append(p, r.C[i].Src)
 			}
 		}
 		r.Node = tabnas.Undefined
 	})
 	return map[string]any{"a": string(ref)}
+}
+
+// ---- src accumulation ----------------------------------------------
+
+// srcAcc grows the `src` of the tree nodes a closure-mode parse builds, in
+// time linear in the text it adds.
+//
+// A node's src is the text of everything it matched, and it grows one
+// piece at a time: a token (`node`), a captured child's text (`capture`),
+// an iteration folded into its parent (`fold`). Go strings are immutable,
+// so `n["src"] = src + piece` copies all of src to add the piece, and a
+// node that grows piece by piece costs the square of its length. A
+// repetition is exactly that: its loop runs in one frame and every item
+// grows the one node the loop's entry allocated, so ten thousand items
+// copied the first item's text ten thousand times. TypeScript's strings
+// are ropes and Rust appends in place (`push_str`), so both were linear
+// already; this makes Go linear too, with the same text.
+//
+// Each growing node gets a strings.Builder, which appends in place,
+// doubling its buffer when full, and whose String() is the text so far
+// without a copy. The value stored in the node is still a plain string,
+// the one String() returned, so nothing that reads a node can tell. Before
+// it appends, the accumulator checks that the node's src is still the text
+// its builder holds: anything else that set src (a user action, a node
+// that arrived with text already in it) is honoured by starting a new
+// builder from what is there. The check is by value, so it is right
+// whatever set src; it costs nothing in the usual case, where src IS the
+// builder's string and the comparison stops at the shared pointer.
+//
+// Short text is cheaper to copy than to build, so a node only gets a
+// builder once its src reaches srcAccMin bytes; below that, and without a
+// parse context to keep builders in, a piece is appended by concatenation
+// as before. The builders are the parse's own, kept in its plugin bag
+// (ctx.U) under srcAccKey and dropped with it: nothing outlives a parse,
+// and two parses on one grammar share nothing.
+type srcAcc map[uintptr]*strings.Builder
+
+// srcAccKey is where a parse keeps its builders in ctx.U.
+const srcAccKey = "bnf$src"
+
+// srcAccMin is the length at which a node's src starts growing in place.
+const srcAccMin = 256
+
+// srcAccOf is the parse's accumulator, made on first use; nil when there
+// is no parse context to keep it in.
+func srcAccOf(ctx *tabnas.Context) srcAcc {
+	if ctx == nil || ctx.U == nil {
+		return nil
+	}
+	if acc, ok := ctx.U[srcAccKey].(srcAcc); ok {
+		return acc
+	}
+	acc := srcAcc{}
+	ctx.U[srcAccKey] = acc
+	return acc
+}
+
+// append sets n's src to its text followed by piece.
+func (acc srcAcc) append(n map[string]any, piece string) {
+	cur, _ := n["src"].(string)
+	if piece == "" {
+		n["src"] = cur
+		return
+	}
+	if acc == nil || len(cur)+len(piece) < srcAccMin {
+		n["src"] = cur + piece
+		return
+	}
+	key := reflect.ValueOf(n).Pointer()
+	b := acc[key]
+	if b == nil || b.Len() != len(cur) || b.String() != cur {
+		b = &strings.Builder{}
+		b.Grow(2 * (len(cur) + len(piece)))
+		b.WriteString(cur)
+		acc[key] = b
+	}
+	b.WriteString(piece)
+	n["src"] = b.String()
 }
 
 // ---- AST node helpers ----------------------------------------------
