@@ -60,14 +60,28 @@ const parser = (productions, opts = {}) => {
 // wall time: other processes on a loaded machine stretch the wall clock
 // of a run without adding to the work it does, and a verdict about the
 // work must not depend on them.
+//
+// The CPU clock is coarse on some platforms (about 15.6 ms on Windows),
+// so a single parse of a thousand items can read as zero. Each sample
+// therefore repeats the parse until it has used at least SAMPLE_MS of CPU
+// and reports the cost per parse, and the fastest of the samples counts.
+const SAMPLE_MS = 150
+const cpuMs = (t0) => {
+  const t = process.cpuUsage(t0)
+  return (t.user + t.system) / 1000
+}
 const fastest = (fn, runs = 3) => {
   let best = Infinity
   for (let i = 0; i < runs; i++) {
     const t0 = process.cpuUsage()
-    fn()
-    const t = process.cpuUsage(t0)
-    const ms = (t.user + t.system) / 1000
-    if (ms < best) best = ms
+    let n = 0
+    let ms = 0
+    do {
+      fn()
+      n++
+      ms = cpuMs(t0)
+    } while (ms < SAMPLE_MS && n < 10000)
+    if (ms / n < best) best = ms / n
   }
   return best
 }
@@ -91,11 +105,11 @@ const assertLinear = (p, make, label) => {
   p.parse(large) // warm both sizes before timing either
   let seen = ''
   for (let attempt = 0; attempt < 3; attempt++) {
-    const tSmall = Math.max(fastest(() => p.parse(small), 5), 1)
-    const tLarge = fastest(() => p.parse(large))
+    const tSmall = fastest(() => p.parse(small))
+    const tLarge = fastest(() => p.parse(large), 2)
     if (tLarge < 50 * tSmall) return
-    seen += ` ${(tLarge / tSmall).toFixed(1)}x (${tLarge.toFixed(1)} ms against ` +
-      `${tSmall.toFixed(1)} ms);`
+    seen += ` ${(tLarge / tSmall).toFixed(1)}x (${tLarge.toFixed(2)} ms against ` +
+      `${tSmall.toFixed(2)} ms per parse);`
   }
   assert.fail(`${label}: ${N} items against ${N / 10} took${seen} not linear`)
 }
