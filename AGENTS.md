@@ -89,14 +89,14 @@ are not:
 
 The rule above says what this package may not know; this one says what
 it must emit. **Every repetition compiles to a same-depth replace
-loop.** A tabnas alternate either pushes a child rule (`p:`), opening a
-stack frame that closes when the child does, or replaces the current
-rule (`r:`), re-entering a rule in the same frame. Push is for
+loop.** When a tabnas alternate hands control to another rule, it either
+pushes a child rule (`p:`), opening a stack frame that closes when the
+child does, or replaces the current rule (`r:`), re-entering a rule in
+the same frame; a terminal-only or closing alternate does neither. Push is for
 structure, a child the tree has to nest; replace is for sequence, the
 next item of a list. A star, a plus and an unbounded `m*` rep are
 sequence, so the loop they desugar to is `r`, the item inside it may be
-`p`, and rule depth is bounded by the grammar's nesting and never by
-the input's length. (A bounded `m*n` nests at most `n - m` optionals,
+`p`, and the loop's iterations add no depth. Real recursion still nests with its input, as it should: a grammar with `node = "(" node ")" / "x"` is as deep as its brackets. What a repetition may never do is make rule depth grow with a list's length. (A bounded `m*n` nests at most `n - m` optionals,
 which is the grammar's own bound.) This is the compiler contract, and
 it holds in all three runtimes: TypeScript is canonical, Go follows it,
 and the Rust oracle holds the emitted text to it byte for byte.
