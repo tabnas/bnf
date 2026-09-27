@@ -444,20 +444,24 @@ describe('bnf', () => {
         return list.map((a) => ({ rule: name, ...a }))
       }))
 
-    // An alt guarded by a suffix-debt COUNTER. Every repeat loop's close
-    // carries a condition of its own (`u.rep`, whether the open took an
-    // item), so "has a condition" no longer means "is guarded by debt".
+    // An alt guarded by, or counting, a suffix-debt counter. Every repeat
+    // loop keeps a counter of its own (`rep`, whether it has been entered
+    // yet: its entry is conditioned on it, and its iteration counts it),
+    // so "has a condition" or "counts" no longer means "is about debt".
     const guard = (a) =>
-      null != a.c && Object.keys(a.c).some((k) => k.startsWith('n.'))
+      null != a.c && Object.keys(a.c).some((k) => k.startsWith('n.debt_'))
+    const debt = (a) => null == a.n ? null : Object.fromEntries(
+      Object.entries(a.n).filter(([k]) => k.startsWith('debt_')))
+    const counts = (a) => null != debt(a) && 0 < Object.keys(debt(a)).length
 
     it('counts the debt on the push and guards the loop with it', () => {
       const spec = emitGrammarSpec(
         hidden([{ kind: 'opt', inner: x }, ref('A'), y], [z]), { tag: 'demo' })
 
       // The alternative that pushes the inner A increments the counter…
-      const pushes = alts(spec).filter((a) => a.n)
+      const pushes = alts(spec).filter(counts)
       assert.equal(pushes.length, 1, JSON.stringify(pushes))
-      const [counter] = Object.keys(pushes[0].n)
+      const [counter] = Object.keys(debt(pushes[0]))
       assert.equal(pushes[0].n[counter], 1, 'the push must add one debt')
       assert.equal(pushes[0].p, 'A', 'the debt rides on the push of A')
 
@@ -467,19 +471,21 @@ describe('bnf', () => {
       assert.equal(guarded.length, 1, JSON.stringify(guarded))
       assert.match(guarded[0].rule, /_star_/, 'the guard belongs to the loop')
       assert.deepEqual(guarded[0].c, { ['n.' + counter]: 0 })
-      // The guarded alt takes an iteration: it pushes the repeated tail,
-      // not the loop. The loop re-enters itself by replacement, from its
-      // close, in the same frame — the back-edge is `r`, never `p`.
-      assert.notEqual(
-        guarded[0].p, guarded[0].rule, 'the guarded alt must not push the loop')
-      assert.equal(
-        spec.rule[guarded[0].rule].close[0].r, guarded[0].rule,
-        'the loop back-edge is a replace from its close')
+      // The guarded alt takes an iteration, and takes it in the loop's
+      // own frame: it hands over to the iteration by replacement, and the
+      // iteration's step comes back the same way. The back-edge is `r`,
+      // never `p`.
+      // (The tail here is the terminal `"y"`, so the iteration is the
+      // guarded alt itself: it matches the `y` and replaces the loop with
+      // itself. A tail that is a rule hands over to `$alt0` instead.)
+      const loopName = guarded[0].rule
+      assert.equal(guarded[0].p, undefined, 'the guarded alt must not push')
+      assert.equal(guarded[0].r, loopName, 'the loop back-edge is a replace')
 
       // The loop's exits stay unguarded, so it yields rather than fails.
-      const loop = spec.rule[guarded[0].rule].open
+      const loop = spec.rule[loopName].open
       assert.ok(
-        loop.slice(1).every((a) => !a.c),
+        loop.filter((a) => null == a.r).every((a) => !a.c),
         'the exit peeks and the bare fallback must stay unconditional')
     })
 
@@ -493,11 +499,11 @@ describe('bnf', () => {
           [z]),
         { tag: 'demo' })
 
-      const deltas = alts(spec).filter((a) => a.n).map((a) => Object.values(a.n)[0])
+      const deltas = alts(spec).filter(counts).map((a) => Object.values(debt(a))[0])
       assert.deepEqual(
         deltas.slice().sort(), [0, 1],
         'expected one increment and one barrier reset, got ' +
-        JSON.stringify(alts(spec).filter((a) => a.n)))
+        JSON.stringify(alts(spec).filter(counts)))
     })
 
     it('leaves a loop the suffix cannot contest alone', () => {
@@ -508,7 +514,7 @@ describe('bnf', () => {
         hidden([ref('A'), w], [lp, ref('A'), rp], [z]), { tag: 'demo' })
 
       assert.deepEqual(
-        alts(spec).filter((a) => a.n || guard(a)), [],
+        alts(spec).filter((a) => counts(a) || guard(a)), [],
         'an uncontested loop must compile exactly as before')
     })
 
@@ -522,12 +528,12 @@ describe('bnf', () => {
           [z]),
         { tag: 'demo' })
 
-      assert.deepEqual(alts(spec).filter((a) => a.n || guard(a)), [])
+      assert.deepEqual(alts(spec).filter((a) => counts(a) || guard(a)), [])
     })
 
     it('leaves plain direct left recursion alone', () => {
       const spec = emitGrammarSpec(hidden([ref('A'), y], [z]), { tag: 'demo' })
-      assert.deepEqual(alts(spec).filter((a) => a.n || guard(a)), [])
+      assert.deepEqual(alts(spec).filter((a) => counts(a) || guard(a)), [])
     })
 
     it('emits a counter per contested rule', () => {
@@ -570,11 +576,55 @@ describe('bnf', () => {
       // by the head token that decides which branch they are.
       const heads = (list) =>
         [...new Set(list.map((a) => String(a.s).split(' ')[0]))].sort()
-      const cont = loop.open.filter((a) => a.p)
+      const cont = loop.open.filter((a) => null != a.s && null != a.r)
       assert.deepEqual(
-        heads(cont.filter((a) => a.c)), [tokenOf('y')], JSON.stringify(loop.open))
+        heads(cont.filter(guard)), [tokenOf('y')], JSON.stringify(loop.open))
       assert.deepEqual(
         heads(cont.filter((a) => !a.c)), [tokenOf('w')], JSON.stringify(loop.open))
+    })
+
+    it('keeps the loop counter and the debt counters apart', () => {
+      // `guard`, `debt` and `counts` above read only the `debt_…`
+      // counters, and every test here relies on that being a true split:
+      // were the loop counter a `debt_` name, or a debt ever kept under
+      // `rep`, they would pass by reading the wrong one. This grammar has
+      // every kind at once — a debt counted on a push, a debt reset at a
+      // re-anchoring alternative, a guarded and an unguarded branch of a
+      // tail loop whose item is a rule, and that loop's entry, take and
+      // step back — and each alt that conditions or counts is exactly one
+      // of them.
+      const spec = emitGrammarSpec(
+        hidden([ref('A'), y], [ref('A'), w], [x, ref('A'), y], [lp, ref('A'), rp], [z]),
+        { tag: 'demo' })
+      const loop = alts(spec).find(guard).rule
+      const take = loop + '$alt0'
+      const kinds = alts(spec).filter((a) => null != a.c || null != a.n).map((a) => {
+        const c = Object.keys(a.c ?? {})
+        const n = Object.keys(a.n ?? {})
+        if (a.rule === loop && null == a.s) {
+          assert.deepEqual([a.c, a.n, a.r], [{ 'n.rep': 0 }, { rep: 1 }, loop])
+          return 'entry'
+        }
+        if (a.rule === take && null != a.p) {
+          assert.deepEqual([c, a.n], [[], { rep: 0 }])
+          return 'take'
+        }
+        if (a.rule === take) {
+          assert.deepEqual([c, a.n, a.r], [[], { rep: 1 }, take + '$step1'])
+          return 'back'
+        }
+        if (guard(a)) {
+          assert.deepEqual([a.rule, a.n, a.r], [loop, undefined, take])
+          assert.ok(c.every((k) => k.startsWith('n.debt_')), JSON.stringify(a.c))
+          return 'guard'
+        }
+        assert.ok(counts(a) && 0 === c.length, JSON.stringify(a))
+        assert.ok(n.every((k) => k.startsWith('debt_')), JSON.stringify(a.n))
+        return 1 === Object.values(a.n)[0] ? 'debt' : 'reset'
+      })
+      assert.deepEqual([...new Set(kinds)].sort(),
+        ['back', 'debt', 'entry', 'guard', 'reset', 'take'])
+      assert.equal(kinds.filter((k) => 'entry' === k).length, 1)
     })
 
     it('sees a self-reference buried in a group', () => {

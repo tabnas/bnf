@@ -55,14 +55,18 @@ const parser = (productions, opts = {}) => {
   }
 }
 
-// The fastest of a few runs, in milliseconds, so one slow run (a GC, a
-// JIT tier-up) does not decide the verdict.
+// The cheapest of a few runs, in milliseconds of CPU time, so one slow
+// run (a GC, a JIT tier-up) does not decide the verdict. CPU time and not
+// wall time: other processes on a loaded machine stretch the wall clock
+// of a run without adding to the work it does, and a verdict about the
+// work must not depend on them.
 const fastest = (fn, runs = 3) => {
   let best = Infinity
   for (let i = 0; i < runs; i++) {
-    const t0 = process.hrtime.bigint()
+    const t0 = process.cpuUsage()
     fn()
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6
+    const t = process.cpuUsage(t0)
+    const ms = (t.user + t.system) / 1000
     if (ms < best) best = ms
   }
   return best
@@ -77,17 +81,23 @@ const fastest = (fn, runs = 3) => {
 // loop costs 15 to 31 times; the push chain it replaced cost 44 to 99
 // times wherever the item is a rule, because each level of the chain
 // copied the kids of every level below it, and it ran out of memory at a
-// hundred thousand items.
+// hundred thousand items. A measurement that lands above the bound is
+// taken again, up to three times, before it counts: a quadratic parse
+// is over it every time.
 const assertLinear = (p, make, label) => {
   const small = make(N / 10)
   const large = make(N)
   for (let i = 0; i < 3; i++) p.parse(small)
   p.parse(large) // warm both sizes before timing either
-  const tSmall = Math.max(fastest(() => p.parse(small), 5), 1)
-  const tLarge = fastest(() => p.parse(large))
-  assert.ok(tLarge < 50 * tSmall,
-    `${label}: ${N} items took ${tLarge.toFixed(1)} ms, ${N / 10} took ` +
-    `${tSmall.toFixed(1)} ms — ${(tLarge / tSmall).toFixed(1)}x, not linear`)
+  let seen = ''
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tSmall = Math.max(fastest(() => p.parse(small), 5), 1)
+    const tLarge = fastest(() => p.parse(large))
+    if (tLarge < 50 * tSmall) return
+    seen += ` ${(tLarge / tSmall).toFixed(1)}x (${tLarge.toFixed(1)} ms against ` +
+      `${tSmall.toFixed(1)} ms);`
+  }
+  assert.fail(`${label}: ${N} items against ${N / 10} took${seen} not linear`)
 }
 
 const times = (n, s, sep = '') => Array(n).fill(s).join(sep)
@@ -164,6 +174,52 @@ const cases = [
     check: (out, n) => assert.equal(out.kids.length, n),
   },
   {
+    name: 'doc = *a *b (two sibling stars)',
+    grammar: [
+      prod('doc', [star(ref('a')), star(ref('b'))]),
+      prod('a', [lit('a')], [lit('A')]),
+      prod('b', [lit('b')], [lit('B')]),
+    ],
+    make: (n) => times(n, 'a') + times(n, 'b'),
+    one: 1,
+    check: (out, n) => {
+      assert.equal(out.kids.length, 2 * n)
+      assert.equal(out.kids[n].src, 'b')
+    },
+  },
+  {
+    name: '*( "(" *item ")" ) (a star directly inside a star\'s group)',
+    grammar: [prod('doc', [star(group([lit('('), star(ref('item')), lit(')')]))]), item],
+    make: (n) => times(n, '(ab cd)'),
+    one: 1,
+    check: (out, n) => assert.equal(out.kids.length, 2 * n),
+  },
+  {
+    // The item builds a value, and each of its members is a star: the
+    // loops over `key`'s letters and `val`'s digits run inside an item of
+    // the loop over `pair`, side by side. Each allocates the node it
+    // accumulates into on its own way in, which is what the member reads
+    // back; a loop that took its pusher's instead would write its letters
+    // into the object (see 'the loop counter' below).
+    name: '*pair, pair = key "=" val ";" ; @object (stars in an item that builds a value)',
+    grammar: [
+      prod('doc', [star(ref('pair'))]),
+      {
+        name: 'pair',
+        value: { kind: 'object', members: ['key', 'val'] },
+        alts: [[ref('key'), lit('='), ref('val'), lit(';')]],
+      },
+      prod('key', [star(rx('[a-z]'))]),
+      prod('val', [star(rx('[0-9]'))]),
+    ],
+    make: (n) => times(n, 'ab=12;'),
+    one: 1,
+    check: (out, n) => {
+      assert.equal(out.kids.length, n)
+      assert.deepEqual(out.kids[n - 1], { key: 'ab', val: '12' })
+    },
+  },
+  {
     // Left recursion is rewritten to `seed tail*`: the star it
     // synthesises is a loop like any other, and the tree stays flat.
     name: 'sum = sum "+" item / item (left recursion)',
@@ -191,13 +247,16 @@ describe('repetition depth', () => {
           `${one.deepest}`)
       })
     }
-    it(`${c.name}: time is linear in the item count`, () => {
-      assertLinear(parser(c.grammar, { builtins: true }), c.make, c.name)
-    })
+    for (const opts of [{}, { builtins: true }]) {
+      const mode = opts.builtins ? 'builtins' : 'closures'
+      it(`${c.name}: time is linear in the item count (${mode})`, () => {
+        assertLinear(parser(c.grammar, opts), c.make, `${c.name} (${mode})`)
+      })
+    }
   }
 
   it('holds in a recognition-only grammar', () => {
-    // The loop's back-edge and its `u.rep` flag are structural, so a spec
+    // The loop's back-edge and its `rep` counter are structural, so a spec
     // stripped of every tree builder still loops in one frame.
     const g = [prod('doc', [ref('item'), star(group([lit(','), ref('item')]))]), item]
     const p = parser(g, { builtins: true, recognition: true })
@@ -208,7 +267,7 @@ describe('repetition depth', () => {
 
   it('collects one element per item into an array, at one depth', () => {
     // `list = "(" *( item ";" ) ")"  ; @array` — the array-collection
-    // planner hands the loop the array its entry inherited, and each
+    // planner hands the loop the array it inherits, and each
     // iteration pushes one element into it.
     const g = [
       { name: 'list', alts: [[lit('('), star(group([ref('item'), lit(';')])), lit(')')]], value: { kind: 'array' } },
@@ -257,42 +316,225 @@ describe('repetition depth', () => {
   })
 
   it('emits the loop as a replace, never a push of itself', () => {
-    // The shape, for `doc = *item`: the entry allocates the node and
-    // hands over by replacement; the loop's open takes one item (flagging
-    // `u.rep`) or exits; its close replaces the loop with itself when the
-    // open took an item.
+    // The shape, for `doc = *item`. The loop's first alternative is its
+    // entry: on the way in (counter `rep` still 0) it allocates the node
+    // and re-enters the loop, counted. Every other alternative decides
+    // continue or exit as the right-recursive helper always did, but
+    // continuing hands over to the iteration by replacement: `$alt0`
+    // pushes the item (clearing the counter for whatever the item holds)
+    // and replaces itself, counted again, with `$step1`, which replaces
+    // itself with the loop. The rule names are the ones the helper
+    // always compiled to.
     const { spec } = parser([prod('doc', [star(ref('item'))]), item], { builtins: true })
     const loop = Object.keys(spec.rule).find((n) => /^_gen\d+_star_item$/.test(n))
     assert.ok(loop, Object.keys(spec.rule).join(' '))
-    const entry = loop + '$in'
+    const iter = loop + '$alt0'
+    const step = iter + '$step1'
+    assert.deepEqual(Object.keys(spec.rule).sort(),
+      ['__start__', loop, iter, step, 'doc', 'item'].sort())
 
-    assert.deepEqual(spec.rule.doc.open.map((a) => a.p), [entry])
-    assert.deepEqual(spec.rule[entry].open.map((a) => a.r), [loop])
-    assert.equal(spec.rule[entry].close, undefined)
+    assert.deepEqual(spec.rule.doc.open.map((a) => a.p), [loop])
 
-    const open = spec.rule[loop].open
-    const takes = open.filter((a) => null != a.p)
+    const [entry, ...open] = spec.rule[loop].open
+    assert.deepEqual(entry.c, { 'n.rep': 0 })
+    assert.deepEqual(entry.n, { rep: 1 })
+    assert.equal(entry.r, loop)
+    assert.equal(entry.a, '@node$')
+    assert.equal(entry.k.node$.init, true)
+    const takes = open.filter((a) => null != a.r)
     assert.ok(0 < takes.length)
     for (const a of takes) {
-      assert.equal(a.p, 'item', 'an iteration pushes the item')
-      assert.deepEqual(a.u, { rep: 1 })
+      assert.equal(a.r, iter, 'continuing hands over to the iteration')
+      assert.equal(a.p, undefined)
+      assert.equal(a.c, undefined)
+      assert.equal(a.a, undefined, 'an iteration allocates nothing')
     }
-    for (const a of open.filter((a) => null == a.p)) {
-      assert.equal(a.u, undefined, 'an exit takes no item')
-      assert.equal(a.r, undefined)
+    for (const a of open.filter((a) => null == a.r)) {
+      assert.equal(a.p, undefined, 'an exit takes no item')
+      assert.equal(a.a, undefined, 'an exit allocates nothing')
     }
-    const close = spec.rule[loop].close
-    assert.deepEqual(close[0].c, { 'u.rep': 1 })
-    assert.equal(close[0].r, loop, 'the back-edge is a replace')
-    assert.equal(close[1].r, undefined)
-    assert.equal(close[1].c, undefined)
+    assert.equal(spec.rule[loop].close, undefined)
 
-    // Nothing anywhere pushes a loop or re-enters an entry.
+    assert.deepEqual(spec.rule[iter].open.map((a) => [a.p, a.n]),
+      [['item', { rep: 0 }]])
+    assert.deepEqual(spec.rule[iter].close.map((a) => [a.r, a.n, a.a]),
+      [[step, { rep: 1 }, '@capture$']])
+    assert.deepEqual(spec.rule[step].open.map((a) => a.r), [loop])
+    assert.equal(spec.rule[step].close, undefined)
+
+    // Nothing but the enclosing rule pushes the loop, and nothing pushes
+    // the iteration or its step.
     for (const [name, rs] of Object.entries(spec.rule)) {
       for (const a of [...(rs.open ?? []), ...(rs.close ?? [])]) {
-        assert.notEqual(a.p, loop, `${name} pushes the loop`)
-        if (name !== 'doc') assert.notEqual(a.p, entry, `${name} pushes the entry`)
+        if (name !== 'doc') assert.notEqual(a.p, loop, `${name} pushes the loop`)
+        assert.notEqual(a.p, iter, `${name} pushes the iteration`)
+        assert.notEqual(a.p, step, `${name} pushes the step`)
       }
     }
   })
+
+  it('matches a terminal item and re-enters the loop in one alternative', () => {
+    // `*"x"` needs no iteration rule: the loop is the one rule the helper
+    // always was, and its continue alternative matches the item and
+    // replaces the loop with itself.
+    const { spec } = parser([prod('doc', [star(lit('x')), lit(';')])], { builtins: true })
+    const loop = Object.keys(spec.rule).find((n) => /^_gen\d+_star_/.test(n))
+    assert.deepEqual(Object.keys(spec.rule).filter((n) => n.startsWith('_gen')), [loop])
+    const [entry, ...open] = spec.rule[loop].open
+    assert.deepEqual(entry.c, { 'n.rep': 0 })
+    const takes = open.filter((a) => null != a.r)
+    assert.equal(takes.length, 1)
+    assert.equal(takes[0].r, loop)
+    assert.equal(takes[0].k.node$.init, false)
+    assert.equal(takes[0].k.node$.nterms, 1)
+    assert.equal(spec.rule[loop].close, undefined)
+  })
+
+  it('enters a loop afresh inside an item of the same loop', () => {
+    // `v = "[" *v "]" / "x"`: the loop over `v` is reached again from
+    // inside one of its own items. The counter the outer loop holds at 1
+    // is cleared by the push of the item, so the inner loop allocates a
+    // node of its own and the trees nest as the brackets do.
+    const g = [prod('v', [lit('['), star(ref('v')), lit(']')], [lit('x')])]
+    const p = parser(g)
+    const out = p.parse('[x[xx]x]').out
+    assert.equal(out.src, '[x[xx]x]')
+    assert.deepEqual(out.kids.map((k) => k.src), ['x', '[xx]', 'x'])
+    assert.deepEqual(out.kids[1].kids.map((k) => k.src), ['x', 'x'])
+  })
+})
+
+
+// Every loop allocates the node its iterations accumulate into once, on
+// the way in, and it is a node of its own rather than the node of the
+// rule that pushed it. The `rep` counter is what tells the way in from
+// the way back, and counters are INHERITED: a pushed rule and a replacing
+// rule both start with a copy of their predecessor's. So a loop reached
+// inside an item of another loop, beside another loop, or inside a
+// loop's group could see the 1 its neighbour set, skip its entry and
+// write into whatever node it was pushed with. The push of an item clears
+// the counter, which is what prevents that; these watch the engine to
+// show it does, from every place a loop can be reached.
+describe('the loop counter', () => {
+  const cell = prod('cell', [rx('[a-z]')])
+  const entryCases = [
+    {
+      name: 'a star inside the item of a star',
+      grammar: [prod('doc', [star(ref('row'))]),
+        prod('row', [lit('['), star(ref('cell')), lit(']')]), cell],
+      src: '[ab][][c]',
+    },
+    {
+      name: 'two sibling stars',
+      grammar: [prod('doc', [star(ref('cell')), lit(';'), star(ref('cell'))]), cell],
+      src: 'ab;cd',
+    },
+    {
+      name: 'two sibling stars inside the item of a star',
+      grammar: [prod('doc', [star(ref('row'))]),
+        prod('row', [lit('['), star(ref('cell')), lit(';'), star(ref('cell')), lit(']')]),
+        cell],
+      src: '[ab;cd][;][a;]',
+    },
+    {
+      name: 'a star directly inside a star\'s group',
+      grammar: [prod('doc', [star(group([lit('('), star(ref('cell')), lit(')')]))]), cell],
+      src: '(ab)()(c)',
+    },
+    {
+      name: 'three stars, each in the group of the one outside it',
+      grammar: [prod('doc', [star(group([lit('['),
+        star(group([lit('('), star(ref('cell')), lit(')')])), lit(']')]))]), cell],
+      src: '[(ab)()][][(c)]',
+    },
+    {
+      name: 'a plus and an m* inside a star\'s group',
+      grammar: [prod('doc', [star(group([lit('<'), plus(ref('cell')), lit(';'),
+        rep(2, Infinity, ref('cell')), lit('>')]))]), cell],
+      src: '<a;bc><abc;def>',
+    },
+    {
+      name: 'a star of a terminal inside a star\'s group',
+      grammar: [prod('doc', [star(group([lit('('), star(lit('x')), lit(')')]))])],
+      src: '(xx)()(x)',
+    },
+    {
+      name: 'a loop reached again inside one of its own items',
+      grammar: [prod('v', [lit('['), star(ref('v')), lit(']')], [lit('x')])],
+      src: '[x[xx[]]x]',
+    },
+    {
+      name: 'stars in an item that builds a value',
+      grammar: [
+        prod('doc', [star(ref('pair'))]),
+        {
+          name: 'pair',
+          value: { kind: 'object', members: ['key', 'val'] },
+          alts: [[ref('key'), lit('='), ref('val'), lit(';')]],
+        },
+        prod('key', [star(rx('[a-z]'))]),
+        prod('val', [star(rx('[0-9]'))]),
+      ],
+      src: 'ab=12;=;c=3;',
+      value: {
+        rule: 'doc', src: '',
+        kids: [{ key: 'ab', val: '12' }, { key: '', val: '' }, { key: 'c', val: '3' }],
+      },
+    },
+  ]
+
+  // The loops of a spec that its start rule can reach: the rules whose
+  // first alternative is a loop's entry. (A production whose only use was
+  // inlined, as a leading member is, keeps its own loop, which nothing
+  // runs.)
+  const loopsOf = (spec) => {
+    const reached = new Set([spec.options.rule.start])
+    for (const name of reached) {
+      const rs = spec.rule[name]
+      for (const a of [...(rs.open ?? []), ...(rs.close ?? [])]) {
+        for (const to of [a.p, a.r]) if (null != to) reached.add(to)
+      }
+    }
+    return [...reached].filter((name) => 0 === spec.rule[name].open?.[0]?.c?.['n.rep'])
+  }
+
+  for (const c of entryCases) {
+    for (const opts of [{}, { builtins: true }]) {
+      const mode = opts.builtins ? 'builtins' : 'closures'
+      it(`enters afresh: ${c.name} (${mode})`, () => {
+        const spec = emitGrammarSpec({ productions: c.grammar },
+          { tag: 'depth', start: c.grammar[0].name, ...opts })
+        const loops = loopsOf(spec)
+        assert.ok(0 < loops.length)
+        const tn = new Tabnas()
+        tn.grammar(spec)
+        // For each pusher and loop, the nodes the loop's rules ran in.
+        const ran = new Map()
+        const borrowed = []
+        tn.sub({
+          ruleDone: (rule) => {
+            if (!loops.includes(rule.name)) return
+            if (rule.node === rule.parent.node) borrowed.push(rule.name)
+            if (!ran.has(rule.parent)) ran.set(rule.parent, new Map())
+            const byLoop = ran.get(rule.parent)
+            if (!byLoop.has(rule.name)) byLoop.set(rule.name, new Set())
+            byLoop.get(rule.name).add(rule.node)
+          },
+        })
+        const out = tn.parse(c.src)
+        if (c.value) assert.deepEqual(out, c.value)
+
+        assert.deepEqual(borrowed, [], 'a loop ran in the node of its pusher')
+        const entered = new Set()
+        for (const byLoop of ran.values()) {
+          for (const [name, nodes] of byLoop) {
+            entered.add(name)
+            assert.equal(nodes.size, 1, `${name} allocated ${nodes.size} nodes on one entry`)
+          }
+        }
+        assert.deepEqual([...entered].sort(), [...loops].sort(),
+          'the input must reach every loop')
+      })
+    }
+  }
 })

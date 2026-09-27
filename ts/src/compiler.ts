@@ -199,18 +199,11 @@ type Production = {
   // `alts` stay `[[A, self], []]`, which is the language the loop
   // describes and what FIRST, FOLLOW, the dispatch prefixes and the
   // suffix-debt analysis all read. The EMITTER does not compile the
-  // self-reference as a push: it emits a same-depth loop, whose open
-  // takes one item (pushing it, or matching it when it is a terminal)
-  // or exits, and whose close replaces the rule with itself (`r:`) when
-  // the open took an item. See `emitProduction`, and AGENTS.md
-  // "Repetition is replacement, never a push chain".
+  // self-reference as a push: it emits a same-depth loop, every
+  // iteration of which runs in the frame the loop was pushed into, and
+  // re-enters the loop by replacement (`r:`). See `emitRepeatLoop`, and
+  // AGENTS.md "Repetition is replacement, never a push chain".
   repeatLoop?: boolean
-  // Set by `desugar` on the entry of a repeat loop: the rule every
-  // reference to the repetition names, whose one alternative allocates
-  // the node the loop's iterations accumulate into and hands over to
-  // the loop (named here) in the same frame. Its `alts` are
-  // `[[loop]]`, so the analyses see an ordinary reference.
-  loopEntry?: string
   // Set by `desugar` on the star helper generated for a left-recursion
   // tail loop whose greediness contests a suffix of the rule it was
   // derived from, and confirmed by `resolveSuffixDebts`. Names the
@@ -598,17 +591,25 @@ interface ValuePlan {
 const SRC_FIELD = 'src'
 
 
-// The key a repeat loop's open alternate sets in the rule's `u` bag when
-// it takes an item, and its close tests before replacing the rule with
-// itself (see `Production.repeatLoop`). `u` and not `n` or `k`: `u` is
-// the one bag the engine neither copies to a pushed child nor hands on
-// through a replace, so the flag says what THIS iteration did — a fresh
-// iteration starts without it, and the item's own rules never see it.
-// The open is where the loop decides (FIRST, FOLLOW and FOLLOW₂ guards,
-// K-token prefixes, the suffix-debt counter), so the close does not
-// decide again: an iteration that exited, even on a token the item can
-// start with, ends the loop.
-const LOOP_FLAG = 'rep'
+// The counter a repeat loop keeps in the rule's `n` bag, to tell the
+// iteration that enters the loop from the ones that come back to it
+// (see `emitRepeatLoop`). Only the entering one allocates the node every
+// iteration accumulates into; one that allocated again would discard
+// what the iterations before it matched. The loop cannot tell by its
+// name, which is the same every time, so it counts: 0 (or unset, which
+// every engine reads as 0) on the way in, 1 once it has entered.
+//
+// `n` because it has to survive a replace, which `u` does not, and
+// because a counter that was never set reads as 0 in every engine, so
+// the entering iteration needs nothing from whoever pushed the loop (an
+// unset `k` is absent, which only `$exist` or an operator that fails
+// open can match). `n` also reaches every rule the loop pushes, so
+// the push of an item clears it: a loop reached from inside an item
+// enters afresh. One name serves every loop for the same reason — a
+// counter at 1 never reaches a rule the loop did not replace itself
+// with. Debt counters are `debt_…` (freshDebtCounter), so none can be
+// this one.
+const LOOP_COUNTER = 'rep'
 
 
 // The first value-building rule that a COLLECTING part would still take
@@ -1962,11 +1963,6 @@ function inlineHeadRef(
 function desugar(grammar: Grammar): Grammar {
   const extra: Production[] = []
   const used = new Set(grammar.productions.map((p) => p.name))
-  // The entry of each repeat loop, keyed by the loop's name. Kept out of
-  // `extra` while desugaring, because `freshName` numbers from
-  // `extra.length`: an entry counted there would renumber every helper
-  // minted after it. Each is placed right after its loop at the end.
-  const entries = new Map<string, Production>()
 
   // Origin of the production currently being desugared: every helper
   // minted below belongs to it, and says so, so the emitted provenance
@@ -1997,26 +1993,16 @@ function desugar(grammar: Grammar): Grammar {
   // textbook helper `H = inner H / (empty)` — right recursion is the
   // language a loop describes, and FIRST, FOLLOW, the dispatch prefixes
   // and the suffix-debt pass all read it as that. What the emitter makes
-  // of it is a LOOP (`repeatLoop`): one frame for every iteration, the
-  // item pushed (or matched) from it and the rule replacing itself
-  // (`r: H`) from its close, so rule depth over a repetition is what one
-  // item needs, whatever the item count.
-  //
-  // References name the loop's ENTRY, `H$in`, not the loop. The loop
-  // accumulates into the node it inherits, which has to be a node of its
-  // own and not the pusher's: a member or element taken as source text
-  // reads it back whole, and an iteration that allocated its own would
-  // discard what the ones before it matched. So the entry allocates it
-  // and replaces itself with the loop, in the same frame, and every
-  // iteration after that inherits it. (A loop that fills an `; @array`
-  // allocates nothing at all: the entry only hands over.)
+  // of it is a LOOP (`repeatLoop`): every iteration in one frame, the
+  // item pushed (or matched) from it and the loop re-entered by
+  // replacement (`r: H`), so rule depth over a repetition is what one
+  // item needs, whatever the item count. See `emitRepeatLoop`.
   function repeatLoop(
     name: string, inner: Element, debtGuard?: string,
   ): Element {
-    const selfRef: Element = { kind: 'ref', name }
     const loop: Production = {
       name,
-      alts: [[inner, selfRef], []],
+      alts: [[inner, { kind: 'ref', name }], []],
       nodeKind: 'helper',
       repeatHelper: true,
       repeatLoop: true,
@@ -2024,17 +2010,7 @@ function desugar(grammar: Grammar): Grammar {
     }
     if (debtGuard) loop.debtGuard = debtGuard
     extra.push(loop)
-    let entry = name + '$in'
-    for (let i = 2; used.has(entry); i++) entry = name + '$in' + i
-    used.add(entry)
-    entries.set(name, {
-      name: entry,
-      alts: [[selfRef]],
-      nodeKind: 'helper',
-      loopEntry: name,
-      origin,
-    })
-    return { kind: 'ref', name: entry }
+    return { kind: 'ref', name }
   }
 
   function desugarElement(el: Element): Element {
@@ -2187,13 +2163,7 @@ function desugar(grammar: Grammar): Grammar {
     return out
   })
 
-  const minted: Production[] = []
-  for (const p of extra) {
-    minted.push(p)
-    const entry = entries.get(p.name)
-    if (null != entry) minted.push(entry)
-  }
-  return { productions: [...rewritten, ...minted] }
+  return { productions: [...rewritten, ...extra] }
 }
 
 
@@ -4342,6 +4312,12 @@ function emitProduction(
     return out
   }
 
+  // Where an entry goes once it matches: the rule it pushes, or, for a
+  // repeat loop's continue alternative, the rule it hands over to by
+  // replacement. Two entries going to the same place are the same
+  // decision, whichever way they get there.
+  const descentOf = (o: any): string | undefined => o.p ?? o.r
+
   const reorderKeywordShadow = (
     entries: Array<{ o: any; alt: Sequence | null }>,
   ): any[] => {
@@ -4421,7 +4397,9 @@ function emitProduction(
           if (0 === hits[k]) continue
           const c = classIdx[k]
           // Same descent target either way — order is moot.
-          if (null != o.p && entries[c].o.p === o.p) continue
+          if (null != descentOf(o) && descentOf(entries[c].o) === descentOf(o)) {
+            continue
+          }
           if (-1 === firstC) firstC = c
           lastC = c
         }
@@ -4505,7 +4483,8 @@ function emitProduction(
         // excludes the whole rule from the permutation, so
         // `[0-9] / [2] [0-3]` keeps its 1-token entry first and
         // misparses `23`.
-        if (null != entries[i].o.p && entries[j].o.p === entries[i].o.p) {
+        const to = descentOf(entries[i].o)
+        if (null != to && descentOf(entries[j].o) === to) {
           continue
         }
         if (charRangesOverlap(ri, ranges[j] as Array<[number, number]>)) {
@@ -4664,62 +4643,29 @@ function emitProduction(
     return
   }
 
-  // The entry of a repeat loop (`Production.loopEntry`): allocate the
-  // node every iteration of the loop accumulates into, then replace
-  // this rule with the loop, in the same frame. Its close never runs —
-  // a replaced rule is not on the stack — so the pusher's close captures
-  // this rule's node, which is the loop's.
-  if (null != prod.loopEntry) {
+  // A repeat loop (`Production.repeatLoop`). Its alternatives are
+  // `[[item, self], []]`, and every decision is made from them as they
+  // stand, exactly as the right-recursive helper always was: the
+  // continue alternative is dispatched on the prefixes of `item self`,
+  // the exit on FOLLOW and FOLLOW₂, the debt guard on the item's head.
+  // What changes is what taking the continue alternative DOES — it
+  // replaces rather than pushes. See `emitRepeatLoop`.
+  const loopItem: Element | null = prod.repeatLoop ? loopItemOf(prod) : null
+  const loopEntry = (): any => {
     const kind = prod.nodeKind ?? 'helper'
     const o: any = {
-      r: prod.loopEntry,
+      c: { ['n.' + LOOP_COUNTER]: 0 },
+      n: { [LOOP_COUNTER]: 1 },
+      r: prod.name,
       ...refs.node(
         { init: true, rule: prod.name, kind, nterms: 0 },
         (r: Rule) => { r.node = mkAstNode(prod.name, kind) }),
       g: tag,
     }
-    // Inside an `; @array` the loop fills the array it inherits, so the
-    // entry allocates nothing and only hands over.
+    // Inside an `; @array` the loop fills the array it inherits, so its
+    // entry allocates nothing and only counts.
     if (arrayElem) useValueActions(o, [])
-    ruleSpec[prod.name] = { open: [o] }
-    return
-  }
-
-  // A repeat loop (`Production.repeatLoop`). Its alternatives are
-  // `[[item, self], []]`, and every decision below is made from them as
-  // they stand — the continue alternative is dispatched on the prefixes
-  // of `item self`, the exit on FOLLOW and FOLLOW₂, the debt guard on
-  // the item's head — exactly as the right-recursive helper always was.
-  // What changes is what a decision DOES:
-  //
-  //   continue  pushes the item (or matches it, when it is a terminal)
-  //             and sets `u.rep`; no node is allocated, because the
-  //             node is the one the entry allocated, inherited
-  //   exit      matches nothing more (the FOLLOW peeks push back)
-  //   close     `{c: {u.rep: 1}, r: self}` captures the item and
-  //             replaces the rule with itself; otherwise the loop ends
-  //
-  // so every iteration runs in one frame: rule depth over a repetition
-  // is what one item needs, whatever the item count.
-  const loopItem: Element | null = prod.repeatLoop ? loopItemOf(prod) : null
-  const loopTarget = null != loopItem && 'ref' === loopItem.kind
-    ? loopItem.name : null
-  const loopFlag = () => ({ u: { [LOOP_FLAG]: 1 } })
-  const loopClose = (): any[] => {
-    const again: any = { c: { ['u.' + LOOP_FLAG]: 1 }, r: prod.name }
-    if (null != loopTarget) {
-      Object.assign(again, captureChildFields(refs, prod.name, 'helper'))
-    }
-    again.g = tag
-    const end: any = { g: tag }
-    if (arrayElem) {
-      // The item is an element unless it is itself a helper filling the
-      // same array; a terminal item is never one.
-      pushElement(again,
-        null != loopTarget && !arrayHelpers.has(loopTarget) ? loopTarget : null,
-        valueRules)
-    }
-    return [again, end]
+    return o
   }
 
   const allSimple = prod.alts.every(isSingleSegment)
@@ -4821,18 +4767,19 @@ function emitProduction(
         }
       }
       // A loop's item, when it reaches this path, is one terminal: the
-      // continue alternative matches it into the inherited node and
-      // pushes nothing, and neither alternative allocates a node.
-      const o = null == loopItem
-        ? segmentToAlt(seg, tag, refs, true, prod.name, prodKind)
-        : 0 < alt.length
-          ? {
-              ...segmentToAlt(
-                { terms: seg.terms, ref: null }, tag, refs, false,
-                prod.name, prodKind),
-              ...loopFlag(),
-            }
-          : segmentToAlt(seg, tag, refs, false, prod.name, prodKind)
+      // continue alternative matches it into the node the loop's entry
+      // allocated and re-enters the loop at once (`r:`), and neither
+      // alternative allocates a node.
+      let o: any
+      if (null == loopItem) {
+        o = segmentToAlt(seg, tag, refs, true, prod.name, prodKind)
+      } else if (0 < alt.length) {
+        const { g, s, ...acts } = segmentToAlt(
+          { terms: seg.terms, ref: null }, tag, refs, false, prod.name, prodKind)
+        o = { g, s, r: prod.name, ...acts }
+      } else {
+        o = segmentToAlt(seg, tag, refs, false, prod.name, prodKind)
+      }
       if (mark) o.m = mark
       // The terminating alternative of a repetition helper names no
       // token, so the lexer is never asked to produce whatever follows
@@ -4890,8 +4837,8 @@ function emitProduction(
     // returned child. Add a universal fallback close alt whose
     // action is a no-op when there was no push.
     if (null != loopItem) {
-      rs.close = loopClose()
       if (arrayElem) for (const e of entries) useValueActions(e.o, [])
+      rs.open.unshift(loopEntry())
       ruleSpec[prod.name] = rs
       return
     }
@@ -4989,17 +4936,18 @@ function emitProduction(
       continue
     }
 
-    // A loop's continue alternative is `item self`, and it compiles to
-    // no rule of its own: its entries push the item, flag the
-    // iteration, and leave the self-reference to the loop's close.
-    if (null == loopItem) {
+    // A loop's continue alternative is `item self`, and its rule is the
+    // iteration: see `emitRepeatLoop`.
+    if (null != prov) prov.set(implName, originOf(prod))
+    if (null != loopItem) {
+      emitRepeatLoop(prod, implName, loopItem, tag, ruleSpec, refs, prov,
+        arrayElem, arrayHelpers, valueRules)
+    } else {
       // One impl rule per alternative of a multi-segment dispatch: the
       // author wrote one rule with alternatives, not N rules. Recorded
       // here, beside the emission, because an EMPTY alternative returns
       // above without emitting anything — claiming a rule that does not
       // exist is worse than omitting one that does.
-      if (null != prov) prov.set(implName, originOf(prod))
-
       emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs,
         'helper', prov, originOf(prod), undefined, undefined, undefined,
         arrayHelpers, valueRules, arrayElem)
@@ -5018,14 +4966,13 @@ function emitProduction(
     // would be shared and the dispatcher's captureChildRef would
     // mutate the parent's tree.
     const dispatchKind = prod.nodeKind ?? 'user'
-    // A loop pushes its item into the node its entry allocated, so an
-    // iteration allocates nothing; it only records that it took one.
-    const target = null == loopTarget ? implName : loopTarget
-    const initDispatchFields = null != loopItem
-      ? loopFlag()
-      : refs.node(
-        { init: true, rule: prod.name, kind: dispatchKind, nterms: 0 },
-        (r: Rule) => { r.node = mkAstNode(prod.name, dispatchKind) })
+    // A loop hands over to its iteration in the same frame, and the
+    // iteration accumulates into the node the loop's entry allocated, so
+    // it allocates nothing.
+    const via = null == loopItem ? 'p' : 'r'
+    const initDispatchFields = null != loopItem ? {} : refs.node(
+      { init: true, rule: prod.name, kind: dispatchKind, nterms: 0 },
+      (r: Rule) => { r.node = mkAstNode(prod.name, dispatchKind) })
 
     // An alternative that can derive ε (all elements nullable — a
     // complete zero-token path, not a cycle truncation) has no prefix
@@ -5049,7 +4996,7 @@ function emitProduction(
         const o: any = {
           s: p.join(' '),
           b: p.length,
-          p: target,
+          [via]: implName,
           ...initDispatchFields,
           g: tag,
         }
@@ -5067,7 +5014,7 @@ function emitProduction(
       }
       for (const tok of firstTokens) {
         const o: any = {
-          s: tok, b: 1, p: target, ...initDispatchFields, g: tag,
+          s: tok, b: 1, [via]: implName, ...initDispatchFields, g: tag,
         }
         if (mark) o.m = mark
         dispatchEntries.push({ o, alt })
@@ -5117,6 +5064,21 @@ function emitProduction(
     dispatchEntries.push({ o, alt: null })
   }
 
+  // The impl rule this dispatches to inherits the array and fills it
+  // directly, so the dispatcher allocates nothing and captures nothing.
+  if (arrayElem) {
+    for (const e of dispatchEntries) useValueActions(e.o, [])
+  }
+  applyDebtGuard(dispatchEntries)
+  specificityPermute(dispatchEntries)
+  const open = reorderKeywordShadow(dispatchEntries)
+  // A loop ends by exiting: nothing it did in its open is left to
+  // capture, because the iteration captures its own item. So it has no
+  // close, and registers no capture for one.
+  if (null != loopItem) {
+    ruleSpec[prod.name] = { open: [loopEntry(), ...open] }
+    return
+  }
   const dispClose: any = {
     // Merge the chosen impl's result up into the dispatcher's node,
     // tagged with the user rule name (so the enclosing rule sees a
@@ -5126,18 +5088,72 @@ function emitProduction(
     g: tag,
   }
   if (dispatchMarks) dispClose.m = '_'
-  // The impl rule this dispatches to inherits the array and fills it
-  // directly, so the dispatcher allocates nothing and captures nothing.
+  if (arrayElem) useValueActions(dispClose, [])
+  ruleSpec[prod.name] = { open, close: [dispClose] }
+}
+
+
+// Emit a repeat loop's iteration: the rule the loop's continue
+// alternative hands over to, which takes one item and comes back.
+//
+//   H             open   {c: {n.rep: 0}, n: {rep: 1}, r: H}   the entry: allocate
+//                        {s: <prefix>, b: <n>, r: H$alt0} …    continue (dispatch)
+//                        {s: <follow>, b: 1} … {}              exit
+//   H$alt0        open   {p: item, n: {rep: 0}}                push the item
+//                 close  {r: H$alt0$step1, n: {rep: 1}}        capture it
+//   H$alt0$step1  open   {r: H}                                back to the loop
+//
+// Every one of those is the frame the loop was pushed into: `H` hands
+// over by replacement, the iteration replaces itself with its step and
+// the step with `H`. The item is the only push, so rule depth over the
+// whole repetition is what one item needs. The names are the ones the
+// continue alternative `item H` always compiled to — `$alt0` pushing the
+// item, `$step1` its self-reference — and only the self-reference has
+// changed, from a push to a replace.
+//
+// A loop whose item is a terminal needs none of this: its continue
+// alternative matches the item and re-enters the loop directly
+// (`{s: item, r: H}`).
+//
+// The entry consumes nothing and names the loop itself, so for what the
+// grammar recognises it does nothing: it allocates and counts. A reader
+// that renders a spec back to a notation and ignores conditions has to
+// skip it, or it reads as the loop being one of its own alternatives
+// (`H = [ H / H$alt0 ]`), a cycle that recognises less once recompiled.
+function emitRepeatLoop(
+  loop: Production,
+  name: string,
+  item: Element,
+  tag: string,
+  ruleSpec: NonNullable<GrammarSpec['rule']>,
+  refs: RefRegistry,
+  prov: Map<string, string> | undefined,
+  arrayElem: boolean,
+  arrayHelpers: Set<string>,
+  valueRules: Set<string>,
+): void {
+  if ('ref' !== item.kind) {
+    throw new Error(
+      `${diagName()}: internal — repeat loop '${loop.name}' dispatches a ` +
+      `terminal item through an iteration rule`)
+  }
+  const step = name + '$step1'
+  if (null != prov) prov.set(step, originOf(loop))
+  const take: any = { p: item.name, n: { [LOOP_COUNTER]: 0 }, g: tag }
+  const back: any = {
+    r: step,
+    n: { [LOOP_COUNTER]: 1 },
+    ...captureChildFields(refs, name, 'helper'),
+    g: tag,
+  }
+  // Inside an `; @array` the item is an element, unless it is a helper
+  // that fills the same array itself.
   if (arrayElem) {
-    for (const e of dispatchEntries) useValueActions(e.o, [])
-    useValueActions(dispClose, [])
+    pushElement(back,
+      arrayHelpers.has(item.name) ? null : item.name, valueRules)
   }
-  applyDebtGuard(dispatchEntries)
-  specificityPermute(dispatchEntries)
-  ruleSpec[prod.name] = {
-    open: reorderKeywordShadow(dispatchEntries),
-    close: null != loopItem ? loopClose() : [dispClose],
-  }
+  ruleSpec[name] = { open: [take], close: [back] }
+  ruleSpec[step] = { open: [{ r: loop.name, g: tag }] }
 }
 
 

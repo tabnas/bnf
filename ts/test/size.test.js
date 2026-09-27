@@ -44,14 +44,15 @@ const largest = (spec) =>
 
 describe('size', () => {
   it('a repeated N-way entry dispatches on N heads, not N^4 paths', () => {
-    // The star helper: one entry per keyword head, one FOLLOW peek for
-    // the `}` that ends the loop, and the bare fallback.
+    // The star helper: the loop's entry, one continue alternative per
+    // keyword head, one FOLLOW peek for the `}` that ends the loop, and
+    // the bare fallback.
     for (const N of [2, 8, 26]) {
       const spec = emitGrammarSpec(
         { productions: starred(N) }, { tag: 'rp', start: 'doc', wordKeywords: true })
       const [name, count] = largest(spec)
       assert.match(name, /star_entry/)
-      assert.equal(count, N + 2, `N=${N}: ${name} has ${count} open alternates`)
+      assert.equal(count, N + 3, `N=${N}: ${name} has ${count} open alternates`)
     }
   })
 
@@ -66,13 +67,14 @@ describe('size', () => {
     const spec = emitGrammarSpec(
       { productions: starred(26) },
       { tag: 'rp', start: 'doc', wordKeywords: true, tokenClasses: true })
-    // The class is a set; the helper peeks it once. The class rule
+    // The class is a set; the helper peeks it once (beside its entry, the
+    // FOLLOW peek and the fallback). The class rule
     // itself keeps its 26 alternates, one per member: it is the rule
     // that builds the node.
     assert.deepEqual(Object.keys(spec.options.tokenSet), ['kw'])
     assert.equal(spec.options.tokenSet.kw.length, 26)
     const helper = Object.keys(spec.rule).find((n) => /star_entry$/.test(n))
-    assert.equal(opens(spec, helper), 3, `${helper} has ${opens(spec, helper)} open alternates`)
+    assert.equal(opens(spec, helper), 4, `${helper} has ${opens(spec, helper)} open alternates`)
     assert.equal(opens(spec, 'kw'), 26)
     const x = emitGrammarSpec(
       { productions: choice(26) },
@@ -150,7 +152,8 @@ describe('size', () => {
       ],
     }, { tag: 'rp', start: 'start' })
     const helper = Object.keys(spec.rule).find((n) => /star.*group$/.test(n))
-    const s = spec.rule[helper].open.map((o) => [o.s, o.b])
+    // The loop's first alternative is its entry, which peeks nothing.
+    const s = spec.rule[helper].open.filter((o) => null != o.s).map((o) => [o.s, o.b])
     assert.ok(s[0][0].startsWith('#A #X') && 2 <= s[0][1], JSON.stringify(s))
     const tn = new Tabnas().grammar(spec)
     for (const src of ['ab', 'axxab', 'axxaxxab']) assert.equal(tn.parse(src).rule, 'start')
