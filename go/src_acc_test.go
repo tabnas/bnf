@@ -5,7 +5,8 @@ package bnf
 // The closure-mode tree builders grow a node's `src` in place (srcAcc), so
 // that a repetition, which grows one node by one item at a time, costs time
 // linear in its text. What they build must be exactly what concatenation
-// built: these hold the accumulator to that, piece by piece.
+// built: these hold the accumulator to that, piece by piece and on every
+// repetition shape, against the engine's own builtins.
 
 import (
 	"strings"
@@ -89,5 +90,22 @@ func TestSrcAccWithoutAParseConcatenates(t *testing.T) {
 	}
 	if srcAccOf(nil) != nil || srcAccOf(&tabnas.Context{}) != nil {
 		t.Error("an accumulator without a parse bag to keep it in")
+	}
+}
+
+func TestSrcAccBuildsTheTreesTheBuiltinsBuild(t *testing.T) {
+	// The engine's builtins grow src by concatenation; the closures grow it
+	// in place. Over two thousand items, text well past srcAccMin, on every
+	// repetition shape, the two build the same value.
+	const n = rdN / 5
+	for _, c := range rdCases() {
+		t.Run(c.name, func(t *testing.T) {
+			src := c.make(n)
+			closures, _ := newRdParser(t, c.grammar(), rdOpts{}).parse(t, src)
+			builtins, _ := newRdParser(t, c.grammar(), rdOpts{builtins: true}).parse(t, src)
+			if !valueEquals(closures, builtins) {
+				t.Errorf("closures and builtins built different values over %d items", n)
+			}
+		})
 	}
 }

@@ -603,6 +603,19 @@ func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f stri
 // while its 1-token original drops BEHIND the class entries so it can
 // no longer steal; entries that already carry multi-token prefixes
 // simply move ahead.
+// descentOf is where an entry goes once it matches: the rule it pushes,
+// or, for a repeat loop's continue alternative, the rule it hands over to
+// by replacement. Two entries going to the same place are the same
+// decision, whichever way they get there. Empty when the entry goes
+// nowhere (a terminal match or an exit). Mirrors the TS `descentOf`.
+func descentOf(o map[string]any) string {
+	if p, ok := o["p"].(string); ok && p != "" {
+		return p
+	}
+	r, _ := o["r"].(string)
+	return r
+}
+
 func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Grammar,
 	literals, regexTokens map[string]string, followSets map[string]map[string]bool,
 	cc *contestCtx) []map[string]any {
@@ -708,7 +721,7 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 					continue
 				}
 				// Same descent target either way — order is moot.
-				if p, ok := e.o["p"]; ok && p != nil && entries[c].o["p"] == p {
+				if to := descentOf(e.o); to != "" && descentOf(entries[c].o) == to {
 					continue
 				}
 				if firstC == -1 {
@@ -862,9 +875,7 @@ func specificityPermute(entries []dispatchEntry, cc *contestCtx,
 			// excludes the whole rule from the permutation, so
 			// `[0-9] / [2] [0-3]` keeps its 1-token entry first and
 			// misparses `23`.
-			pi, iHasP := entries[i].o["p"]
-			pj, jHasP := entries[j].o["p"]
-			if iHasP && jHasP && pi == pj {
+			if to := descentOf(entries[i].o); to != "" && descentOf(entries[j].o) == to {
 				continue
 			}
 			if charRangesOverlap(ranges[i], ranges[j]) {

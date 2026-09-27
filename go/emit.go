@@ -54,6 +54,25 @@ import (
 // Mirrors the TS `syncG`.
 func syncG(tag, group string) string { return tag + "," + group }
 
+// loopCounter is the counter a repeat loop keeps in the rule's `n` bag,
+// to tell the iteration that enters the loop from the ones that come back
+// to it (see emitRepeatLoop). Only the entering one allocates the node
+// every iteration accumulates into; one that allocated again would
+// discard what the iterations before it matched. The loop cannot tell by
+// its name, which is the same every time, so it counts: 0 (or unset,
+// which every engine reads as 0) on the way in, 1 once it has entered.
+//
+// `n` because it has to survive a replace, which `u` does not, and
+// because a counter that was never set reads as 0 in every engine, so the
+// entering iteration needs nothing from whoever pushed the loop (an unset
+// `k` is absent, which only `$exist` or an operator that fails open can
+// match). `n` also reaches every rule the loop pushes, so the push of an
+// item clears it: a loop reached from inside an item enters afresh. One name serves every loop for the same reason — a
+// counter at 1 never reaches a rule the loop did not replace itself with.
+// Debt counters are `debt_…` (freshDebtCounter), so none can be this one.
+// Mirrors the TS `LOOP_COUNTER`.
+const loopCounter = "rep"
+
 // emitGrammarSpec converts an ABNF grammar AST into a tabnas GrammarSpec.
 // regexDerivesEmpty reports whether a regex terminal can match nothing.
 //
@@ -1424,6 +1443,35 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		return nil
 	}
 
+	// A repeat loop (Production.RepeatLoop). Its alternatives are
+	// `[[item, self], []]`, and every decision is made from them as they
+	// stand, exactly as the right-recursive helper always was: the continue
+	// alternative is dispatched on the prefixes of `item self`, the exit on
+	// FOLLOW and FOLLOW₂, the debt guard on the item's head. What changes
+	// is what taking the continue alternative DOES — it replaces rather
+	// than pushes. See emitRepeatLoop.
+	var loopItem *Element
+	if prod.RepeatLoop {
+		loopItem = loopItemOf(prod)
+	}
+	loopEntry := func() map[string]any {
+		o := map[string]any{
+			"c": map[string]any{"n." + loopCounter: 0},
+			"n": map[string]int{loopCounter: 1},
+			"r": prod.Name,
+			"g": tag,
+		}
+		merge(o, refs.node(map[string]any{
+			"init": true, "rule": prod.Name, "kind": prod.kind(), "nterms": 0,
+		}))
+		// Inside an `; @array` the loop fills the array it inherits, so its
+		// entry allocates nothing and only counts.
+		if arrayElem {
+			useValueActions(o, nil, nil)
+		}
+		return o
+	}
+
 	allSimple := prod.Value == nil
 	for _, alt := range prod.Alts {
 		if !isSingleSegment(alt) {
@@ -1538,7 +1586,20 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 					continue
 				}
 			}
-			o := segmentToAlt(seg, tag, refs, true, prod.Name, prodKind)
+			// A loop's item, when it reaches this path, is one terminal: the
+			// continue alternative matches it into the node the loop's entry
+			// allocated and re-enters the loop at once (`r:`), and neither
+			// alternative allocates a node.
+			var o map[string]any
+			switch {
+			case loopItem == nil:
+				o = segmentToAlt(seg, tag, refs, true, prod.Name, prodKind)
+			case len(alt) > 0:
+				o = segmentToAlt(segment{terms: seg.terms}, tag, refs, false, prod.Name, prodKind)
+				o["r"] = prod.Name
+			default:
+				o = segmentToAlt(seg, tag, refs, false, prod.Name, prodKind)
+			}
 			if mark != "" {
 				o["m"] = mark
 			}
@@ -1613,6 +1674,18 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		specificityPermute(entries, cc, grammar, regexTokens)
 		opens := reorderKeywordShadow(prod, entries, grammar,
 			literals, regexTokens, followSets, cc)
+		// A loop has no close: every alternative either re-enters it by
+		// replacement or ends it, and nothing it did is left to capture.
+		if loopItem != nil {
+			if arrayElem {
+				for _, o := range opens {
+					useValueActions(o, nil, nil)
+				}
+			}
+			opens = append([]map[string]any{loopEntry()}, opens...)
+			ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
+			return nil
+		}
 		rs := &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
 		closes := []map[string]any{}
 		if anyHasRef(prod.Alts) {
@@ -1734,16 +1807,30 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			prov[implName] = originOf(prod)
 		}
 
-		if err := emitChainArray(implName, alt, literals, regexTokens, tag, ruleSpec,
+		// A loop's continue alternative is `item self`, and its rule is the
+		// iteration: see emitRepeatLoop.
+		if loopItem != nil {
+			emitRepeatLoop(prod, implName, loopItem, tag, ruleSpec, refs, prov,
+				arrayElem, arrayHelpers, valueRules)
+		} else if err := emitChainArray(implName, alt, literals, regexTokens, tag, ruleSpec,
 			refs, "helper", prov, originOf(prod), nil, nil, nil,
 			arrayHelpers, valueRules, arrayElem); err != nil {
 			return err
 		}
 
+		// A loop hands over to its iteration in the same frame, and the
+		// iteration accumulates into the node the loop's entry allocated,
+		// so it allocates nothing.
 		dispatchKind := prodKind
-		initDispatchFields := refs.node(map[string]any{
-			"init": true, "rule": prod.Name, "kind": dispatchKind, "nterms": 0,
-		})
+		via := "p"
+		initDispatchFields := map[string]any{}
+		if loopItem != nil {
+			via = "r"
+		} else {
+			initDispatchFields = refs.node(map[string]any{
+				"init": true, "rule": prod.Name, "kind": dispatchKind, "nterms": 0,
+			})
+		}
 
 		// One dispatch entry per prefix this alternative needs to be told
 		// apart from its rivals: its first token where that decides, and
@@ -1760,7 +1847,14 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		// that ends the statement with nothing in the token column that can
 		// lex it, and a valid C program is rejected one character from the
 		// end.
-		if dispatch[i].nullable {
+		//
+		// Not for a loop. An iteration whose item matched nothing makes no
+		// progress, and a loop that took one would take the next the same
+		// way, in the same frame, until the engine's step budget ran out: a
+		// star of something that can match nothing (`*[x]`) means a star of
+		// what it matches when it does, and the loop's exit is its empty
+		// derivation.
+		if dispatch[i].nullable && loopItem == nil {
 			nullableImpls = append(nullableImpls, nullableImpl{
 				implName: implName, fields: initDispatchFields, mark: mark,
 			})
@@ -1768,7 +1862,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		usable := dispatch[i].prefixes
 		if len(usable) > 0 {
 			for _, p := range usable {
-				o := map[string]any{"s": strings.Join(p, " "), "b": len(p), "p": implName, "g": tag}
+				o := map[string]any{"s": strings.Join(p, " "), "b": len(p), via: implName, "g": tag}
 				merge(o, copyMap(initDispatchFields))
 				if mark != "" {
 					o["m"] = mark
@@ -1788,7 +1882,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				}
 			}
 			for _, tok := range sortedKeys(firstTokens) {
-				o := map[string]any{"s": tok, "b": 1, "p": implName, "g": tag}
+				o := map[string]any{"s": tok, "b": 1, via: implName, "g": tag}
 				merge(o, copyMap(initDispatchFields))
 				if mark != "" {
 					o["m"] = mark
@@ -1823,9 +1917,12 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	if emptyAltSeen {
 		fallbackKind := prodKind
 		o := map[string]any{"g": tag}
-		merge(o, refs.node(map[string]any{
-			"init": true, "rule": prod.Name, "kind": fallbackKind, "nterms": 0,
-		}))
+		// A loop's exit ends the loop in the node it inherited.
+		if loopItem == nil {
+			merge(o, refs.node(map[string]any{
+				"init": true, "rule": prod.Name, "kind": fallbackKind, "nterms": 0,
+			}))
+		}
 		if dispatchMarks != nil {
 			o["m"] = "_"
 		}
@@ -1847,11 +1944,6 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
 	}
 
-	dispClose := captureChildFields(refs, prod.Name, prodKind)
-	dispClose["g"] = tag
-	if dispatchMarks != nil {
-		dispClose["m"] = "_"
-	}
 	specificityPermute(dispatchEntries, cc, grammar, regexTokens)
 	dispOpens := reorderKeywordShadow(prod, dispatchEntries, grammar,
 		literals, regexTokens, followSets, cc)
@@ -1861,6 +1953,22 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		for _, o := range dispOpens {
 			useValueActions(o, nil, nil)
 		}
+	}
+	// A loop ends by exiting: nothing it did in its open is left to
+	// capture, because the iteration captures its own item. So it has no
+	// close, and registers no capture for one.
+	if loopItem != nil {
+		ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
+			Open: mapsToAlts(append([]map[string]any{loopEntry()}, dispOpens...)),
+		}
+		return nil
+	}
+	dispClose := captureChildFields(refs, prod.Name, prodKind)
+	dispClose["g"] = tag
+	if dispatchMarks != nil {
+		dispClose["m"] = "_"
+	}
+	if arrayElem {
 		useValueActions(dispClose, nil, nil)
 	}
 	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
@@ -1868,6 +1976,91 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		Close: mapsToAlts([]map[string]any{dispClose}),
 	}
 	return nil
+}
+
+// emitRepeatLoop emits a repeat loop's iteration: the rule the loop's
+// continue alternative hands over to, which takes one item and comes back.
+//
+//	H             open   {c: {n.rep: 0}, n: {rep: 1}, r: H}   the entry: allocate
+//	                     {s: <prefix>, b: <n>, r: H$alt0} …    continue (dispatch)
+//	                     {s: <follow>, b: 1} … {}              exit
+//	H$alt0        open   {p: item, n: {rep: 0}}                push the item
+//	              close  {r: H$alt0$step1, n: {rep: 1}}        capture it
+//	H$alt0$step1  open   {r: H}                                back to the loop
+//
+// Every one of those is the frame the loop was pushed into: `H` hands over
+// by replacement, the iteration replaces itself with its step and the step
+// with `H`. The item is the only push, so rule depth over the whole
+// repetition is what one item needs. The names are the ones the continue
+// alternative `item H` always compiled to — `$alt0` pushing the item,
+// `$step1` its self-reference — and only the self-reference has changed,
+// from a push to a replace.
+//
+// A loop whose item is a terminal needs none of this: its continue
+// alternative matches the item and re-enters the loop directly
+// (`{s: item, r: H}`).
+//
+// The entry consumes nothing and names the loop itself, so for what the
+// grammar recognises it does nothing: it allocates and counts. A reader
+// that renders a spec back to a notation and ignores conditions has to
+// skip it, or it reads as the loop being one of its own alternatives
+// (`H = [ H / H$alt0 ]`), a cycle that recognises less once recompiled.
+// Mirrors the TS `emitRepeatLoop`.
+func emitRepeatLoop(loop *Production, name string, item *Element, tag string,
+	ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
+	prov map[string]string, arrayElem bool, arrayHelpers, valueRules map[string]bool) {
+
+	if item.Kind != KindRef {
+		panic(fmt.Sprintf(diagName()+": internal — repeat loop '%s' dispatches a "+
+			"terminal item through an iteration rule", loop.Name))
+	}
+	step := name + "$step1"
+	if prov != nil {
+		prov[step] = originOf(loop)
+	}
+	take := map[string]any{"p": item.Name, "n": map[string]int{loopCounter: 0}, "g": tag}
+	back := map[string]any{"r": step, "n": map[string]int{loopCounter: 1}}
+	merge(back, captureChildFields(refs, name, "helper"))
+	back["g"] = tag
+	// Inside an `; @array` the item is an element, unless it is a helper
+	// that fills the same array itself.
+	if arrayElem {
+		elem := item.Name
+		if arrayHelpers[item.Name] {
+			elem = ""
+		}
+		pushElement(back, elem, valueRules)
+	}
+	ruleSpec[name] = &tabnas.GrammarRuleSpec{
+		Open:  []*tabnas.GrammarAltSpec{mapToAlt(take)},
+		Close: []*tabnas.GrammarAltSpec{mapToAlt(back)},
+	}
+	ruleSpec[step] = &tabnas.GrammarRuleSpec{
+		Open: []*tabnas.GrammarAltSpec{mapToAlt(map[string]any{"r": loop.Name, "g": tag})},
+	}
+}
+
+// loopItemOf is the item a repeat loop repeats: its alternatives are
+// `[[item, self], []]`, as desugar mints them. Anything else is a compiler
+// defect, not a grammar the author could have written, so it is refused
+// as one. Mirrors the TS `loopItemOf`.
+func loopItemOf(prod *Production) *Element {
+	var body Sequence
+	hasEmpty := false
+	for _, alt := range prod.Alts {
+		if len(alt) == 0 {
+			hasEmpty = true
+		} else if body == nil {
+			body = alt
+		}
+	}
+	if len(prod.Alts) != 2 || !hasEmpty || len(body) != 2 ||
+		body[1].Kind != KindRef || body[1].Name != prod.Name ||
+		(body[0].Kind == KindRef && body[0].Debt != nil) {
+		panic(fmt.Sprintf(diagName()+": internal — repeat loop '%s' is not "+
+			"`item self / (empty)`", prod.Name))
+	}
+	return body[0]
 }
 
 // emitChain emits a (possibly single-step) chain of rules for one alt.

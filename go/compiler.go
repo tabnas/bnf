@@ -651,6 +651,16 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 // is what makes r.Parent.Node usable from user actions, and flattens
 // the tree. Mirrors the TS `rewriteTailRepeats`; the guards MUST stay
 // identical (the alignment TSVs pin the emitted shape cross-engine).
+//
+// This is the special case of the rule every repetition follows (see
+// Production.RepeatLoop): a star, a plus and an unbounded rep are
+// sequence, and compile to a loop that replaces itself. What is special
+// here is only where the loop comes from. The author wrote a repetition
+// as right recursion through an option, so the loop is the author's own
+// rule rather than a generated helper, and each iteration folds a node of
+// that rule into the parent — a list of `X` siblings, which a star over
+// the same text would not give. The general path does not subsume it for
+// that reason, and it stays.
 func rewriteTailRepeats(grammar *Grammar, start string) *Grammar {
 	isTerminal := func(el *Element) bool {
 		return el.Kind == KindTerm || el.Kind == KindToken || el.Kind == KindRegex
@@ -745,6 +755,24 @@ func desugar(grammar *Grammar) *Grammar {
 		return name
 	}
 
+	// Every unbounded repetition, and only those, comes through here: the
+	// star, and the tail of a plus or of an `m*` rep. The IR keeps the
+	// textbook helper `H = inner H / (empty)` — right recursion is the
+	// language a loop describes, and FIRST, FOLLOW, the dispatch prefixes
+	// and the suffix-debt pass all read it as that. What the emitter makes
+	// of it is a LOOP (RepeatLoop): every iteration in one frame, the item
+	// pushed (or matched) from it and the loop re-entered by replacement
+	// (`r: H`), so rule depth over a repetition is what one item needs,
+	// whatever the item count. See emitRepeatLoop. Mirrors the TS
+	// `repeatLoop` in desugar.
+	repeatLoop := func(name string, inner *Element, debtGuard string) *Element {
+		extra = append(extra, &Production{
+			Name: name, Alts: []Sequence{{inner, {Kind: KindRef, Name: name}}, {}},
+			NodeKind: "helper", RepeatHelper: true, RepeatLoop: true,
+			DebtGuard: debtGuard, Origin: origin})
+		return &Element{Kind: KindRef, Name: name}
+	}
+
 	var desugarElement func(el *Element) *Element
 	desugarAlt := func(alt Sequence) Sequence {
 		out := make(Sequence, len(alt))
@@ -797,24 +825,19 @@ func desugar(grammar *Grammar) *Grammar {
 				RepeatHelper: true, Origin: origin})
 			return &Element{Kind: KindRef, Name: name}
 		case KindStar:
+			// H = inner H / (empty), emitted as a same-depth loop.
 			name := freshName("star_" + hint)
-			selfRef := &Element{Kind: KindRef, Name: name}
-			helper := &Production{
-				Name: name, Alts: []Sequence{{inner, selfRef}, {}}, NodeKind: "helper",
-				RepeatHelper: true, Origin: origin}
 			// A left-recursion tail loop that may have to yield to an enclosing
 			// suffix carries its counter onto the helper it becomes — the rule
 			// the guard is actually emitted on.
-			helper.DebtGuard = el.DebtGuard
-			extra = append(extra, helper)
-			return &Element{Kind: KindRef, Name: name}
+			return repeatLoop(name, inner, el.DebtGuard)
 		case KindPlus:
+			// H = inner Tail   where   Tail = inner Tail / (empty) is the
+			// same-depth loop a star becomes. The first item is H's own push;
+			// every later one is an iteration of Tail, in Tail's one frame.
 			tailName := freshName("star_" + hint)
 			plusName := freshName("plus_" + hint)
-			tailRef := &Element{Kind: KindRef, Name: tailName}
-			extra = append(extra, &Production{
-				Name: tailName, Alts: []Sequence{{inner, tailRef}, {}}, NodeKind: "helper",
-				RepeatHelper: true, Origin: origin})
+			tailRef := repeatLoop(tailName, inner, "")
 			extra = append(extra, &Production{
 				Name: plusName, Alts: []Sequence{{inner, tailRef}}, NodeKind: "helper",
 				Origin: origin})
@@ -829,12 +852,9 @@ func desugar(grammar *Grammar) *Grammar {
 			repAlt = append(repAlt, inner)
 		}
 		if max == MaxInfinity {
+			// Tail: unbounded star of inner, the same-depth loop a star is.
 			tailStarName := freshName("star_" + hint)
-			tailStarRef := &Element{Kind: KindRef, Name: tailStarName}
-			extra = append(extra, &Production{
-				Name: tailStarName, Alts: []Sequence{{inner, tailStarRef}, {}}, NodeKind: "helper",
-				RepeatHelper: true, Origin: origin})
-			repAlt = append(repAlt, tailStarRef)
+			repAlt = append(repAlt, repeatLoop(tailStarName, inner, ""))
 		} else {
 			// Nest (max - min) optionals: [A [A [A ...]]].
 			//
