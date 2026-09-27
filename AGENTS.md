@@ -104,9 +104,9 @@ and the Rust oracle holds the emitted text to it byte for byte.
 The helper `desugar` mints for a star, `H = inner H / (empty)`, is
 right recursion, and emitted as written it pushes a fresh `H` per
 item: a flat file of a few thousand records costs a frame per record,
-trips the engine's and the hosts' depth guards (aless refuses at 256
-rules, tabnas-json at 128), grows rule history and memory with the
-item count, and comes out nested where the source is flat. That is
+trips the engine's and the hosts' depth guards (aless refuses past
+3,000 open rules, tabnas-json past 128 levels of nesting), grows the
+rule stack and memory with the item count, and comes out nested where the source is flat. That is
 what a 1,500-line hosts file did through the ABNF front-end.
 `rewriteTailRepeats` already compiles `X = prefix [ sep X ]` to `r: X`
 from the close phase, the shape a hand-written tabnas grammar uses; it
