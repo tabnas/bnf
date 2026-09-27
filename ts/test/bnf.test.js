@@ -444,6 +444,12 @@ describe('bnf', () => {
         return list.map((a) => ({ rule: name, ...a }))
       }))
 
+    // An alt guarded by a suffix-debt COUNTER. Every repeat loop's close
+    // carries a condition of its own (`u.rep`, whether the open took an
+    // item), so "has a condition" no longer means "is guarded by debt".
+    const guard = (a) =>
+      null != a.c && Object.keys(a.c).some((k) => k.startsWith('n.'))
+
     it('counts the debt on the push and guards the loop with it', () => {
       const spec = emitGrammarSpec(
         hidden([{ kind: 'opt', inner: x }, ref('A'), y], [z]), { tag: 'demo' })
@@ -457,12 +463,18 @@ describe('bnf', () => {
 
       // …and the tail loop's continue alternative refuses to run while
       // any debt is outstanding.
-      const guarded = alts(spec).filter((a) => a.c)
+      const guarded = alts(spec).filter(guard)
       assert.equal(guarded.length, 1, JSON.stringify(guarded))
       assert.match(guarded[0].rule, /_star_/, 'the guard belongs to the loop')
       assert.deepEqual(guarded[0].c, { ['n.' + counter]: 0 })
+      // The guarded alt takes an iteration: it pushes the repeated tail,
+      // not the loop. The loop re-enters itself by replacement, from its
+      // close, in the same frame — the back-edge is `r`, never `p`.
+      assert.notEqual(
+        guarded[0].p, guarded[0].rule, 'the guarded alt must not push the loop')
       assert.equal(
-        guarded[0].p, guarded[0].rule, 'the guarded alt is the loop back-edge')
+        spec.rule[guarded[0].rule].close[0].r, guarded[0].rule,
+        'the loop back-edge is a replace from its close')
 
       // The loop's exits stay unguarded, so it yields rather than fails.
       const loop = spec.rule[guarded[0].rule].open
@@ -496,7 +508,7 @@ describe('bnf', () => {
         hidden([ref('A'), w], [lp, ref('A'), rp], [z]), { tag: 'demo' })
 
       assert.deepEqual(
-        alts(spec).filter((a) => a.n || a.c), [],
+        alts(spec).filter((a) => a.n || guard(a)), [],
         'an uncontested loop must compile exactly as before')
     })
 
@@ -510,12 +522,12 @@ describe('bnf', () => {
           [z]),
         { tag: 'demo' })
 
-      assert.deepEqual(alts(spec).filter((a) => a.n || a.c), [])
+      assert.deepEqual(alts(spec).filter((a) => a.n || guard(a)), [])
     })
 
     it('leaves plain direct left recursion alone', () => {
       const spec = emitGrammarSpec(hidden([ref('A'), y], [z]), { tag: 'demo' })
-      assert.deepEqual(alts(spec).filter((a) => a.n || a.c), [])
+      assert.deepEqual(alts(spec).filter((a) => a.n || guard(a)), [])
     })
 
     it('emits a counter per contested rule', () => {
@@ -537,7 +549,7 @@ describe('bnf', () => {
       }, { tag: 'demo' })
 
       const counters = new Set(
-        alts(spec).filter((a) => a.c).map((a) => Object.keys(a.c)[0]))
+        alts(spec).filter(guard).map((a) => Object.keys(a.c)[0]))
       assert.equal(counters.size, 2, [...counters].join(' '))
     })
 
@@ -572,7 +584,7 @@ describe('bnf', () => {
       const spec = emitGrammarSpec(
         hidden([ref('A'), y], [{ kind: 'group', alts: [[x, ref('A'), y], [z]] }]),
         { tag: 'demo' })
-      assert.equal(alts(spec).filter((a) => a.c).length, 1)
+      assert.equal(alts(spec).filter(guard).length, 1)
     })
 
     it('reduces a rule name to a counter name Go agrees on', () => {
@@ -583,7 +595,7 @@ describe('bnf', () => {
         const spec = emitGrammarSpec(
           { productions: [{ name, alts: [[{ kind: 'opt', inner: x }, ref(name), y], [z]] }] },
           { tag: 'demo' })
-        return Object.keys(alts(spec).find((a) => a.c).c)[0]
+        return Object.keys(alts(spec).find(guard).c)[0]
       }
       assert.equal(counter('a-b'), 'n.debt_a_b')
       assert.equal(counter('\u{1F600}'), 'n.debt__')
