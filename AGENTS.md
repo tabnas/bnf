@@ -92,7 +92,7 @@ it must emit. **Every repetition compiles to a same-depth replace
 loop.** When a tabnas alternate hands control to another rule, it either
 pushes a child rule (`p:`), opening a stack frame that closes when the
 child does, or replaces the current rule (`r:`), re-entering a rule in
-the same frame; a terminal-only or closing alternate does neither. Push is for
+the same frame; an alternate that only matches its tokens, or pops the frame to end the rule, does neither. Push is for
 structure, a child the tree has to nest; replace is for sequence, the
 next item of a list. A star, a plus and an unbounded `m*` rep are
 sequence, so the loop they desugar to is `r`, the item inside it may be
