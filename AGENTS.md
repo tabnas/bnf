@@ -85,6 +85,44 @@ are not:
   The front-end states the intent; the emitter lowers it. Neither
   default is baked in here.
 
+## Repetition is replacement, never a push chain
+
+The rule above says what this package may not know; this one says what
+it must emit. **Every repetition compiles to a same-depth replace
+loop.** A tabnas alternate either pushes a child rule (`p:`), opening a
+stack frame that closes when the child does, or replaces the current
+rule (`r:`), re-entering a rule in the same frame. Push is for
+structure, a child the tree has to nest; replace is for sequence, the
+next item of a list. A star, a plus and an unbounded `m*` rep are
+sequence, so the loop they desugar to is `r`, the item inside it may be
+`p`, and rule depth is bounded by the grammar's nesting and never by
+the input's length. (A bounded `m*n` nests at most `n - m` optionals,
+which is the grammar's own bound.) This is the compiler contract, and
+it holds in all three runtimes: TypeScript is canonical, Go follows it,
+and the Rust oracle holds the emitted text to it byte for byte.
+
+The helper `desugar` mints for a star, `H = inner H / (empty)`, is
+right recursion, and emitted as written it pushes a fresh `H` per
+item: a flat file of a few thousand records costs a frame per record,
+trips the engine's and the hosts' depth guards (aless refuses at 256
+rules, tabnas-json at 128), grows rule history and memory with the
+item count, and comes out nested where the source is flat. That is
+what a 1,500-line hosts file did through the ABNF front-end.
+`rewriteTailRepeats` already compiles `X = prefix [ sep X ]` to `r: X`
+from the close phase, the shape a hand-written tabnas grammar uses; it
+was the special case, and this rule is the general one it belongs to.
+The array-collection planner (`planArrayHelpers`) and the
+left-recursion rewrite build on the same shape: one frame collects
+every item of an annotated array, and a tail loop that yields to an
+enclosing suffix keeps its suffix-debt counter on one rule rather than
+on a chain of them. A grammar author or a port never writes a
+repetition as a push chain, and a rewrite of the compiler's own that
+spells a star as recursion is wrong even when it parses.
+
+Rule depth over a repetition is constant; a test that repeats an item
+ten thousand times and asserts the maximum `d` stays what a single item
+needs is the proof.
+
 ## Repository map
 
 | Path | What it is |
