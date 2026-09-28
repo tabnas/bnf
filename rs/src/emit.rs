@@ -633,11 +633,10 @@ struct Entry {
     alt: Option<Sequence>,
 }
 
-/// An alternate placed by the keyword-shadow reordering, with the index
-/// of the entry it IS (as opposed to a guard synthesised from one).
+/// An alternate placed by the keyword-shadow reordering: an entry, or a
+/// guard synthesised from one. The two are treated alike from here on.
 struct Placed {
     o: AltSpec,
-    origin: Option<usize>,
     rank: f64,
     seq: usize,
 }
@@ -1809,7 +1808,6 @@ impl Emitter<'_> {
                 .enumerate()
                 .map(|(i, e)| Placed {
                     o: e.o.clone(),
-                    origin: Some(i),
                     rank: i as f64,
                     seq: i,
                 })
@@ -1818,13 +1816,8 @@ impl Emitter<'_> {
 
         let mut placed: Vec<Placed> = Vec::new();
         let mut seq = 0usize;
-        let mut put = |o: AltSpec, origin: Option<usize>, rank: f64| {
-            placed.push(Placed {
-                o,
-                origin,
-                rank,
-                seq,
-            });
+        let mut put = |o: AltSpec, rank: f64| {
+            placed.push(Placed { o, rank, seq });
             seq += 1;
         };
 
@@ -1869,7 +1862,7 @@ impl Emitter<'_> {
             }
 
             let Some(first_c) = first_c else {
-                put(e.o.clone(), Some(i), i as f64);
+                put(e.o.clone(), i as f64);
                 continue;
             };
             let front = first_c as f64 - 0.5;
@@ -1877,7 +1870,7 @@ impl Emitter<'_> {
 
             if s_lens[i] >= 2 {
                 // Already carries its own lookahead: just outrank the class.
-                put(e.o.clone(), Some(i), (i as f64).min(front));
+                put(e.o.clone(), (i as f64).min(front));
                 continue;
             }
 
@@ -1894,13 +1887,13 @@ impl Emitter<'_> {
                 None
             };
             let Some(guards) = guards else {
-                put(e.o.clone(), Some(i), i as f64);
+                put(e.o.clone(), i as f64);
                 continue;
             };
             for g in guards {
-                put(g, None, (i as f64).min(front));
+                put(g, (i as f64).min(front));
             }
-            put(e.o.clone(), Some(i), (i as f64).max(back));
+            put(e.o.clone(), (i as f64).max(back));
         }
 
         placed.sort_by(|a, b| {
