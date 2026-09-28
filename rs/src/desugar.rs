@@ -195,6 +195,7 @@ pub(crate) fn desugar(grammar: &Grammar) -> Grammar {
         out.probe_helper = p.probe_helper.clone();
         out.tail_repeat = p.tail_repeat.clone();
         out.repeat_helper = p.repeat_helper;
+        out.repeat_loop = p.repeat_loop;
         out.debt_guard = p.debt_guard.clone();
         rewritten.push(out);
     }

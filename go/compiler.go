@@ -925,6 +925,9 @@ func desugar(grammar *Grammar) *Grammar {
 		if p.RepeatHelper {
 			out.RepeatHelper = true
 		}
+		if p.RepeatLoop {
+			out.RepeatLoop = true
+		}
 		rewritten = append(rewritten, out)
 	}
 	return &Grammar{Productions: append(rewritten, extra...)}

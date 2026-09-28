@@ -329,6 +329,28 @@ describe('repetition depth', () => {
     assert.equal(p.parse(times(N, 'x') + ';').deepest, p.parse('x;').deepest)
   })
 
+  it('takes two hundred thousand items whose item has kids (closures)', () => {
+    // The loop's node collects the kids of every item: each iteration
+    // capturing its item appends the item's kids to the node it inherits.
+    // Appended one at a time, the node grows as the input does; appended
+    // as a spread (`push(...kids)`), every item's kids went on the
+    // engine's call stack as arguments, and past about a hundred and
+    // thirty thousand of them the capture threw `RangeError` from inside
+    // a parse whose rule depth was two. The closure mode is the compiler's
+    // own code; the builtins mode runs the engine's `@capture$` and
+    // `@fold$`, which join this test once the engine release that appends
+    // the same way is what the package depends on.
+    const n = 200000
+    const g = [prod('doc', [star(ref('item'))]), prod('item', [lit('a'), lit('b')])]
+    const p = parser(g)
+    const one = p.parse('ab')
+    const many = p.parse(times(n, 'ab'))
+    assert.equal(many.out.kids.length, n)
+    assert.equal(many.out.kids[n - 1].src, 'ab')
+    assert.equal(many.out.src.length, 2 * n)
+    assert.equal(many.deepest, one.deepest)
+  })
+
   it('emits the loop as a replace, never a push of itself', () => {
     // The shape, for `doc = *item`. The loop's first alternative is its
     // entry: on the way in (counter `rep` still 0) it allocates the node

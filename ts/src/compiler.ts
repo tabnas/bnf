@@ -2159,6 +2159,7 @@ function desugar(grammar: Grammar): Grammar {
     if (p.probeHelper) out.probeHelper = p.probeHelper
     if (p.tailRepeat) out.tailRepeat = p.tailRepeat
     if (p.repeatHelper) out.repeatHelper = p.repeatHelper
+    if (p.repeatLoop) out.repeatLoop = p.repeatLoop
     if (p.debtGuard) out.debtGuard = p.debtGuard
     return out
   })
@@ -3986,7 +3987,10 @@ function mkFoldClosure(cN: number): (r: Rule) => void {
     if (null != own && 'object' === typeof own && 'src' in own && own !== p) {
       p.src += own.src
       if (own.rule) p.kids.push(own)
-      else if (Array.isArray(own.kids)) p.kids.push(...own.kids)
+      // One push per kid, never a spread: a loop's node holds every
+      // item it matched, and a spread of a hundred thousand and more
+      // arguments overflows the call stack.
+      else if (Array.isArray(own.kids)) for (const k of own.kids) p.kids.push(k)
     }
     for (let i = 0; i < cN; i++) p.src += r.c[i].src
     r.node = undefined
@@ -4114,7 +4118,8 @@ function captureChildFields(
     if (c === n) return
     n.src += c.src
     if (c.rule) n.kids.push(c)
-    else if (Array.isArray(c.kids)) n.kids.push(...c.kids)
+    // One push per kid, never a spread (see mkFoldClosure).
+    else if (Array.isArray(c.kids)) for (const k of c.kids) n.kids.push(k)
   })
 }
 
@@ -4831,13 +4836,18 @@ function emitProduction(
 
     applyDebtGuard(entries)
     specificityPermute(entries)
+    // Inside an `; @array` the rule allocates nothing: the value actions
+    // come off the entries BEFORE the keyword reordering copies them into
+    // guards, so a guard carries exactly what its entry carries. (Applied
+    // after, a guard kept the entry's action over a `k` the strip had
+    // emptied through the shared object.)
+    if (arrayElem) for (const e of entries) useValueActions(e.o, [])
     const rs: any = { open: reorderKeywordShadow(entries) }
 
     // If any alt has a push, the close state must capture the
     // returned child. Add a universal fallback close alt whose
     // action is a no-op when there was no push.
     if (null != loopItem) {
-      if (arrayElem) for (const e of entries) useValueActions(e.o, [])
       rs.open.unshift(loopEntry())
       ruleSpec[prod.name] = rs
       return
@@ -4851,7 +4861,6 @@ function emitProduction(
       rs.close = [close]
     }
     if (arrayElem) {
-      for (const e of entries) useValueActions(e.o, [])
       // At most one distinct pushed rule is an ELEMENT here: the only
       // multi-alt shapes left on this path are an option (one pushing
       // alternative) and a group whose alternatives were checked to

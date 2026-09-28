@@ -2336,12 +2336,16 @@ impl Emitter<'_> {
             let placed = self.reorder_keyword_shadow(prod, &entries);
 
             // A loop has no close: the entry goes first, and the
-            // continue alternative re-enters the loop itself.
+            // continue alternative re-enters the loop itself. Inside an
+            // `; @array` every placed entry is stripped of its value
+            // actions, the keyword guards the reordering copied off the
+            // entries included: the canonical strips the entries before
+            // it copies them, so a guard carries what its entry carries.
             if loop_item.is_some() {
                 let mut opens: Vec<AltSpec> = Vec::with_capacity(placed.len() + 1);
                 for p in placed {
                     let mut o = p.o;
-                    if array_elem && p.origin.is_some() {
+                    if array_elem {
                         use_value_actions(&mut o, &[], None);
                     }
                     opens.push(o);
@@ -2370,9 +2374,9 @@ impl Emitter<'_> {
             let mut opens: Vec<AltSpec> = Vec::with_capacity(placed.len());
             for p in placed {
                 let mut o = p.o;
-                // The value actions are applied to the entries themselves,
-                // after the reordering copied the keyword guards off them.
-                if array_elem && p.origin.is_some() {
+                // Every placed entry, the keyword guards the reordering
+                // copied off the entries included (see the loop above).
+                if array_elem {
                     use_value_actions(&mut o, &[], None);
                 }
                 opens.push(o);

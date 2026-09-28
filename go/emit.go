@@ -1461,8 +1461,14 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			"r": prod.Name,
 			"g": tag,
 		}
+		// A loop is a helper unless the IR says otherwise, as the TS
+		// `prod.nodeKind ?? 'helper'` has it (kind() defaults to user).
+		loopKind := prod.NodeKind
+		if loopKind == "" {
+			loopKind = "helper"
+		}
 		merge(o, refs.node(map[string]any{
-			"init": true, "rule": prod.Name, "kind": prod.kind(), "nterms": 0,
+			"init": true, "rule": prod.Name, "kind": loopKind, "nterms": 0,
 		}))
 		// Inside an `; @array` the loop fills the array it inherits, so its
 		// entry allocates nothing and only counts.
