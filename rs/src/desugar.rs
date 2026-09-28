@@ -40,6 +40,25 @@ impl Desugar {
         Element::reference(name)
     }
 
+    /// Every unbounded repetition, and only those, comes through here: the
+    /// star, and the tail of a plus or of an `m*` rep. The IR keeps the
+    /// textbook helper `H = inner H / (empty)`: right recursion is the
+    /// language a loop describes, and FIRST, FOLLOW, the dispatch prefixes
+    /// and the suffix-debt pass all read it as that. What the emitter
+    /// makes of it is a LOOP (`repeat_loop`): every iteration in one
+    /// frame, the item pushed (or matched) from it and the loop re-entered
+    /// by replacement (`r: H`), so rule depth over a repetition is what
+    /// one item needs, whatever the item count. See `emit_repeat_loop`.
+    fn repeat_loop(&mut self, name: String, inner: Element, debt_guard: Option<String>) -> Element {
+        let self_ref = Element::reference(name.clone());
+        let mut prod = Production::helper(&name, vec![vec![inner, self_ref], vec![]], &self.origin);
+        prod.repeat_helper = true;
+        prod.repeat_loop = true;
+        prod.debt_guard = debt_guard;
+        self.extra.push(prod);
+        Element::reference(name)
+    }
+
     fn alt(&mut self, alt: &[Element]) -> Sequence {
         alt.iter().map(|el| self.element(el)).collect()
     }
@@ -88,29 +107,21 @@ impl Desugar {
                 self.helper(name, vec![vec![inner], vec![]], true)
             }
             Kind::Star { debt_guard, .. } => {
-                // H = inner H / (empty)
+                // H = inner H / (empty), emitted as a same-depth loop.
                 let name = self.fresh_name(&format!("star_{hint}"));
-                let self_ref = Element::reference(name.clone());
-                let mut prod =
-                    Production::helper(&name, vec![vec![inner, self_ref], vec![]], &self.origin);
-                prod.repeat_helper = true;
                 // A left-recursion tail loop that may have to yield to an
                 // enclosing suffix carries its counter onto the helper it
-                // becomes.
-                prod.debt_guard = debt_guard.clone();
-                self.extra.push(prod);
-                Element::reference(name)
+                // becomes: the rule the guard is actually emitted on.
+                self.repeat_loop(name, inner, debt_guard.clone())
             }
             Kind::Plus { .. } => {
-                // H = inner Tail   where   Tail = inner Tail / (empty)
+                // H = inner Tail   where   Tail = inner Tail / (empty) is
+                // the same-depth loop a star becomes. The first item is
+                // H's own push; every later one is an iteration of Tail,
+                // in Tail's one frame.
                 let tail_name = self.fresh_name(&format!("star_{hint}"));
                 let plus_name = self.fresh_name(&format!("plus_{hint}"));
-                let tail_ref = Element::reference(tail_name.clone());
-                self.helper(
-                    tail_name,
-                    vec![vec![inner.clone(), tail_ref.clone()], vec![]],
-                    true,
-                );
+                let tail_ref = self.repeat_loop(tail_name, inner.clone(), None);
                 self.helper(plus_name, vec![vec![inner, tail_ref]], false)
             }
             Kind::Rep { min, max, .. } => {
@@ -124,14 +135,10 @@ impl Desugar {
                 }
                 match max {
                     None => {
-                        // Tail: unbounded star of inner.
+                        // Tail: unbounded star of inner, the same-depth
+                        // loop a star is.
                         let tail_star_name = self.fresh_name(&format!("star_{hint}"));
-                        let tail_star_ref = Element::reference(tail_star_name.clone());
-                        self.helper(
-                            tail_star_name,
-                            vec![vec![inner.clone(), tail_star_ref.clone()], vec![]],
-                            true,
-                        );
+                        let tail_star_ref = self.repeat_loop(tail_star_name, inner.clone(), None);
                         rep_alt.push(tail_star_ref);
                     }
                     Some(max) => {

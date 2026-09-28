@@ -247,18 +247,15 @@ const ENGINE_VALUE_DIVERGENCES: &[(&str, &str)] = &[];
 /// parser's, not this compiler's: the text both compilers emit for the
 /// fixture is byte identical, so there is nothing here to repair.
 ///
-/// `ir-nullable-suffix` is `A = [ "x" ] A [ "y" ] / "z"`, hidden left
-/// recursion whose suffix is nullable, so no suffix debt is owed and the
-/// tail loop stays greedy. The TypeScript engine recognises `x* z y*`
-/// (and returns `undefined` rather than a node for it); this engine
-/// rejects every one of those sources with `unexpected`. Read
-/// `DIVERGENCE.md`.
-const ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS: &[(&str, &str)] = &[
-    ("ir-nullable-suffix", "z"),
-    ("ir-nullable-suffix", "xz"),
-    ("ir-nullable-suffix", "xzy"),
-    ("ir-nullable-suffix", "zy"),
-];
+/// Empty today. `ir-nullable-suffix` (`A = [ "x" ] A [ "y" ] / "z"`,
+/// hidden left recursion whose suffix is nullable, so no suffix debt is
+/// owed and the tail loop stays greedy) was listed while the loop that
+/// rewrite synthesises was a chain of pushes, one per item: the
+/// TypeScript engine recognised `x* z y*` from it, with `undefined` for
+/// the value, and this engine rejected every one of those sources with
+/// `unexpected`. Since every repetition compiles to a same-depth replace
+/// loop, both engines accept them and build the same tree.
+const ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS: &[(&str, &str)] = &[];
 
 fn install(pure: Value) -> tabnas::Tabnas {
     let engine = tabnas::GrammarSpec::from_value(pure).expect("the engine loads the document");

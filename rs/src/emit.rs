@@ -61,6 +61,33 @@ impl MatchToken {
     }
 }
 
+/// The counter a repeat loop keeps in the rule's `n` bag, to tell the
+/// iteration that enters the loop from the ones that come back to it (see
+/// `emit_repeat_loop`). Only the entering one allocates the node every
+/// iteration accumulates into; one that allocated again would discard
+/// what the iterations before it matched. The loop cannot tell by its
+/// name, which is the same every time, so it counts: 0 (or unset, which
+/// every engine reads as 0) on the way in, 1 once it has entered.
+///
+/// `n` because it has to survive a replace, which `u` does not, and
+/// because a counter that was never set reads as 0 in every engine, so
+/// the entering iteration needs nothing from whoever pushed the loop (an
+/// unset `k` is absent, which only `$exist` or an operator that fails
+/// open can match). `n` also reaches every rule the loop pushes, so the
+/// push of an item clears it: a loop reached from inside an item enters
+/// afresh. One name serves every loop for the same reason: a counter at 1
+/// never reaches a rule the loop did not replace itself with. Debt
+/// counters are `debt_…` (`fresh_debt_counter`), so none can be this one.
+const LOOP_COUNTER: &str = "rep";
+
+/// Where an entry goes once it matches: the rule it pushes, or, for a
+/// repeat loop's continue alternative, the rule it hands over to by
+/// replacement. Two entries going to the same place are the same
+/// decision, whichever way they get there.
+fn descent_of(o: &AltSpec) -> Option<&str> {
+    o.p().or_else(|| o.r())
+}
+
 /// The recovery sync group appended to a tag: `<tag>,<group>`. Only a
 /// CLOSE alternate that names a token can be a sync point, and this
 /// emitter produces exactly two: the start wrapper's `#ZZ` (`end`) and a
@@ -1306,6 +1333,29 @@ fn assign_marks(alts: &[Sequence], tokens: &Tokens) -> Vec<String> {
         .collect()
 }
 
+/// The item a repeat loop repeats: its alternatives are `[[item, self],
+/// []]`, as `desugar` mints them. Anything else is a compiler defect, not
+/// a grammar the author could have written, so it is refused as one.
+fn loop_item_of(prod: &Production) -> Result<Element, EmitError> {
+    let alts = &prod.alts;
+    let body = alts.iter().find(|alt| !alt.is_empty());
+    let shaped = alts.len() == 2
+        && alts.iter().any(Vec::is_empty)
+        && body.is_some_and(|body| {
+            body.len() == 2
+                && matches!(&body[1].kind, Kind::Ref { name, .. } if *name == prod.name)
+                && !matches!(&body[0].kind, Kind::Ref { debt: Some(_), .. })
+        });
+    match body {
+        Some(body) if shaped => Ok(body[0].clone()),
+        _ => Err(EmitError::new(format!(
+            "{}: internal — repeat loop '{}' is not `item self / (empty)`",
+            diag_name(),
+            prod.name
+        ))),
+    }
+}
+
 fn debt_to_n(debt: &IndexMap<String, i64>) -> Map<String, Value> {
     let mut n = Map::new();
     for (k, v) in debt {
@@ -1807,7 +1857,8 @@ impl Emitter<'_> {
                         continue;
                     }
                     // Same descent target either way: order is moot.
-                    if e.o.p().is_some() && entries[*c].o.p() == e.o.p() {
+                    if descent_of(&e.o).is_some() && descent_of(&entries[*c].o) == descent_of(&e.o)
+                    {
                         continue;
                     }
                     if first_c.is_none() {
@@ -1898,7 +1949,8 @@ impl Emitter<'_> {
                 let Some(rj) = rj else { continue };
                 // Same descent target: the order between them is moot.
                 // Only when a descent EXISTS, though.
-                if entries[i].o.p().is_some() && entries[j].o.p() == entries[i].o.p() {
+                let to = descent_of(&entries[i].o);
+                if to.is_some() && descent_of(&entries[j].o) == to {
                     continue;
                 }
                 if char_ranges_overlap(ri, rj) {
@@ -2062,6 +2114,20 @@ impl Emitter<'_> {
             return Ok(());
         }
 
+        // A repeat loop (`Production::repeat_loop`). Its alternatives are
+        // `[[item, self], []]`, and every decision is made from them as
+        // they stand, exactly as the right-recursive helper always was:
+        // the continue alternative is dispatched on the prefixes of
+        // `item self`, the exit on FOLLOW and FOLLOW₂, the debt guard on
+        // the item's head. What changes is what taking the continue
+        // alternative DOES: it replaces rather than pushes. See
+        // `emit_repeat_loop`.
+        let loop_item: Option<Element> = if prod.repeat_loop {
+            Some(loop_item_of(prod)?)
+        } else {
+            None
+        };
+
         let all_simple = prod.alts.iter().all(is_single_segment);
         let prod_kind = prod.node_kind;
 
@@ -2164,7 +2230,34 @@ impl Emitter<'_> {
                         continue;
                     }
                 }
-                let mut o = self.segment_to_alt(&seg, true, &prod.name, prod_kind);
+                // A loop's item, when it reaches this path, is one
+                // terminal: the continue alternative matches it into the
+                // node the loop's entry allocated and re-enters the loop
+                // at once (`r:`), and neither alternative allocates a
+                // node.
+                let mut o = if loop_item.is_none() {
+                    self.segment_to_alt(&seg, true, &prod.name, prod_kind)
+                } else if !alt.is_empty() {
+                    // `{ g, s, r, ...acts }`
+                    let bare = Segment {
+                        terms: seg.terms.clone(),
+                        reference: None,
+                        debt: None,
+                    };
+                    let mut acts = self.segment_to_alt(&bare, false, &prod.name, prod_kind);
+                    let mut o = AltSpec::new();
+                    if let Some(g) = acts.remove("g") {
+                        o.set("g", g);
+                    }
+                    if let Some(s) = acts.remove("s") {
+                        o.set("s", s);
+                    }
+                    o.set("r", prod.name.as_str());
+                    o.assign_from(&acts);
+                    o
+                } else {
+                    self.segment_to_alt(&seg, false, &prod.name, prod_kind)
+                };
                 o.m = mark;
                 // The terminating alternative of a repetition helper
                 // names no token, so the lexer is never asked to produce
@@ -2241,6 +2334,28 @@ impl Emitter<'_> {
             Self::apply_debt_guard(prod, &mut entries);
             self.specificity_permute(&mut entries);
             let placed = self.reorder_keyword_shadow(prod, &entries);
+
+            // A loop has no close: the entry goes first, and the
+            // continue alternative re-enters the loop itself.
+            if loop_item.is_some() {
+                let mut opens: Vec<AltSpec> = Vec::with_capacity(placed.len() + 1);
+                for p in placed {
+                    let mut o = p.o;
+                    if array_elem && p.origin.is_some() {
+                        use_value_actions(&mut o, &[], None);
+                    }
+                    opens.push(o);
+                }
+                opens.insert(0, self.loop_entry(prod, array_elem));
+                self.rule_spec.insert(
+                    prod.name.clone(),
+                    Some(RuleSpec {
+                        open: opens,
+                        close: None,
+                    }),
+                );
+                return Ok(());
+            }
 
             // If any alt has a push, the close state must capture the
             // returned child.
@@ -2374,25 +2489,37 @@ impl Emitter<'_> {
                 continue;
             }
             // One impl rule per alternative of a multi-segment dispatch:
-            // the author wrote one rule with alternatives, not N rules.
+            // the author wrote one rule with alternatives, not N rules. A
+            // loop's continue alternative is `item self`, and its rule is
+            // the iteration: see `emit_repeat_loop`.
             self.record_prov(&impl_name, &origin);
 
-            self.emit_chain(
-                &impl_name,
-                alt,
-                NodeKind::Helper,
-                Some(&origin),
-                None,
-                None,
-                None,
-                array_elem,
-            )?;
+            if let Some(item) = &loop_item {
+                self.emit_repeat_loop(prod, &impl_name, item, array_elem)?;
+            } else {
+                self.emit_chain(
+                    &impl_name,
+                    alt,
+                    NodeKind::Helper,
+                    Some(&origin),
+                    None,
+                    None,
+                    None,
+                    array_elem,
+                )?;
+            }
 
             // The dispatcher itself is a user (or helper) rule: it must
-            // allocate its own AST node on every dispatch alt.
+            // allocate its own AST node on every dispatch alt. A loop
+            // hands over to its iteration in the same frame, and the
+            // iteration accumulates into the node the loop's entry
+            // allocated, so it allocates nothing.
+            let via = if loop_item.is_none() { "p" } else { "r" };
             let mut init_dispatch_fields = AltSpec::new();
-            self.refs
-                .node(&mut init_dispatch_fields, true, &prod.name, prod_kind, 0);
+            if loop_item.is_none() {
+                self.refs
+                    .node(&mut init_dispatch_fields, true, &prod.name, prod_kind, 0);
+            }
 
             // One dispatch entry per prefix this alternative needs to be
             // told apart from its rivals: its first token where that
@@ -2405,7 +2532,14 @@ impl Emitter<'_> {
             // An alternative that can derive ε has no prefix for that
             // derivation. Remember it: it is re-issued as FOLLOW-guarded
             // entries plus a bare fallback, after every content entry.
-            if dispatch[i].nullable {
+            //
+            // Not for a loop. An iteration whose item matched nothing
+            // makes no progress, and a loop that took one would take the
+            // next the same way, in the same frame, until the engine's
+            // step budget ran out: a star of something that can match
+            // nothing (`*[x]`) means a star of what it matches when it
+            // does, and the loop's exit is its empty derivation.
+            if dispatch[i].nullable && loop_item.is_none() {
                 nullable_impls.push((
                     impl_name.clone(),
                     init_dispatch_fields.clone(),
@@ -2413,12 +2547,12 @@ impl Emitter<'_> {
                 ));
             }
             let usable: Vec<Vec<String>> = dispatch[i].prefixes.clone();
-            // `{ s, b, p, a, k?, g }`.
+            // `{ s, b, p, a, k?, g }`, or `{ s, b, r, g }` for a loop.
             let mut push_entry = |s: String, b: usize| {
                 let mut o = AltSpec::new();
                 o.set("s", s);
                 o.set("b", b);
-                o.set("p", impl_name.as_str());
+                o.set(via, impl_name.as_str());
                 o.assign_from(&init_dispatch_fields);
                 o.set("g", tag.as_str());
                 o.m = mark.clone();
@@ -2482,9 +2616,12 @@ impl Emitter<'_> {
 
         if empty_alt_seen {
             // Fallback: matches any token (or none), pops immediately
-            // with an empty tree.
+            // with an empty tree. A loop's exit ends the loop in the node
+            // it inherited.
             let mut o = AltSpec::new();
-            self.refs.node(&mut o, true, &prod.name, prod_kind, 0);
+            if loop_item.is_none() {
+                self.refs.node(&mut o, true, &prod.name, prod_kind, 0);
+            }
             o.set("g", tag.as_str());
             if dispatch_marks.is_some() {
                 o.m = Some("_".into());
@@ -2507,32 +2644,157 @@ impl Emitter<'_> {
             dispatch_entries.push(Entry { o, alt: None });
         }
 
-        // Merge the chosen impl's result up into the dispatcher's node,
-        // tagged with the user rule name.
-        let mut disp_close = self.capture_close(&prod.name, prod_kind, None);
-        if dispatch_marks.is_some() {
-            disp_close.m = Some("_".into());
-        }
         // The impl rule this dispatches to inherits the array and fills
         // it directly, so the dispatcher allocates and captures nothing.
         if array_elem {
             for e in dispatch_entries.iter_mut() {
                 use_value_actions(&mut e.o, &[], None);
             }
-            use_value_actions(&mut disp_close, &[], None);
         }
         Self::apply_debt_guard(prod, &mut dispatch_entries);
         self.specificity_permute(&mut dispatch_entries);
-        let opens: Vec<AltSpec> = self
+        let mut opens: Vec<AltSpec> = self
             .reorder_keyword_shadow(prod, &dispatch_entries)
             .into_iter()
             .map(|p| p.o)
             .collect();
+        // A loop ends by exiting: nothing it did in its open is left to
+        // capture, because the iteration captures its own item. So it has
+        // no close, and registers no capture for one.
+        if loop_item.is_some() {
+            opens.insert(0, self.loop_entry(prod, array_elem));
+            self.rule_spec.insert(
+                prod.name.clone(),
+                Some(RuleSpec {
+                    open: opens,
+                    close: None,
+                }),
+            );
+            return Ok(());
+        }
+        // Merge the chosen impl's result up into the dispatcher's node,
+        // tagged with the user rule name.
+        let mut disp_close = self.capture_close(&prod.name, prod_kind, None);
+        if dispatch_marks.is_some() {
+            disp_close.m = Some("_".into());
+        }
+        if array_elem {
+            use_value_actions(&mut disp_close, &[], None);
+        }
         self.rule_spec.insert(
             prod.name.clone(),
             Some(RuleSpec {
                 open: opens,
                 close: Some(vec![disp_close]),
+            }),
+        );
+        Ok(())
+    }
+
+    /// A repeat loop's entry, its first open alternative:
+    /// `{ c: {n.rep: 0}, n: {rep: 1}, r: H, a, k?, g }`. On the way in
+    /// (the counter still 0) it allocates the node every iteration
+    /// accumulates into and re-enters the loop, counted. Inside an
+    /// `; @array` the loop fills the array it inherits, so its entry
+    /// allocates nothing and only counts.
+    fn loop_entry(&mut self, prod: &Production, array_elem: bool) -> AltSpec {
+        let mut o = AltSpec::new();
+        o.set("c", json!({ format!("n.{LOOP_COUNTER}"): 0 }));
+        o.set("n", json!({ LOOP_COUNTER: 1 }));
+        o.set("r", prod.name.as_str());
+        self.refs.node(&mut o, true, &prod.name, prod.node_kind, 0);
+        o.set("g", self.tag.as_str());
+        if array_elem {
+            use_value_actions(&mut o, &[], None);
+        }
+        o
+    }
+
+    /// Emit a repeat loop's iteration: the rule the loop's continue
+    /// alternative hands over to, which takes one item and comes back.
+    ///
+    /// ```text
+    /// H             open   {c: {n.rep: 0}, n: {rep: 1}, r: H}   the entry: allocate
+    ///                      {s: <prefix>, b: <n>, r: H$alt0} …    continue (dispatch)
+    ///                      {s: <follow>, b: 1} … {}              exit
+    /// H$alt0        open   {p: item, n: {rep: 0}}                push the item
+    ///               close  {r: H$alt0$step1, n: {rep: 1}}        capture it
+    /// H$alt0$step1  open   {r: H}                                back to the loop
+    /// ```
+    ///
+    /// Every one of those is the frame the loop was pushed into: `H`
+    /// hands over by replacement, the iteration replaces itself with its
+    /// step and the step with `H`. The item is the only push, so rule
+    /// depth over the whole repetition is what one item needs. The names
+    /// are the ones the continue alternative `item H` always compiled to
+    /// (`$alt0` pushing the item, `$step1` its self-reference), and only
+    /// the self-reference has changed, from a push to a replace.
+    ///
+    /// A loop whose item is a terminal needs none of this: its continue
+    /// alternative matches the item and re-enters the loop directly
+    /// (`{s: item, r: H}`).
+    ///
+    /// The entry consumes nothing and names the loop itself, so for what
+    /// the grammar recognises it does nothing: it allocates and counts. A
+    /// reader that renders a spec back to a notation and ignores
+    /// conditions has to skip it, or it reads as the loop being one of its
+    /// own alternatives (`H = [ H / H$alt0 ]`), a cycle that recognises
+    /// less once recompiled.
+    fn emit_repeat_loop(
+        &mut self,
+        lp: &Production,
+        name: &str,
+        item: &Element,
+        array_elem: bool,
+    ) -> Result<(), EmitError> {
+        let Kind::Ref {
+            name: item_name, ..
+        } = &item.kind
+        else {
+            return Err(EmitError::new(format!(
+                "{}: internal — repeat loop '{}' dispatches a terminal item through an \
+                 iteration rule",
+                diag_name(),
+                lp.name
+            )));
+        };
+        let step = format!("{name}$step1");
+        self.record_prov(&step, origin_of(lp));
+        let tag = self.tag.clone();
+        let mut take = AltSpec::new();
+        take.set("p", item_name.as_str());
+        take.set("n", json!({ LOOP_COUNTER: 0 }));
+        take.set("g", tag.as_str());
+        let mut back = AltSpec::new();
+        back.set("r", step.as_str());
+        back.set("n", json!({ LOOP_COUNTER: 1 }));
+        self.refs.capture(&mut back, name, NodeKind::Helper);
+        back.set("g", tag.as_str());
+        // Inside an `; @array` the item is an element, unless it is a
+        // helper that fills the same array itself.
+        if array_elem {
+            let elem = if self.array_helpers.contains(item_name) {
+                None
+            } else {
+                Some(item_name.as_str())
+            };
+            push_element(&mut back, elem, &self.value_rules);
+        }
+        self.rule_spec.insert(
+            name.to_string(),
+            Some(RuleSpec {
+                open: vec![take],
+                close: Some(vec![back]),
+            }),
+        );
+        let mut again = AltSpec::new();
+        again.set("r", lp.name.as_str());
+        again.set("g", tag.as_str());
+        self.rule_spec.insert(
+            step,
+            Some(RuleSpec {
+                open: vec![again],
+                close: None,
             }),
         );
         Ok(())

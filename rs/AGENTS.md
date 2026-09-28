@@ -94,8 +94,12 @@ it pushed, as TypeScript and Go do.
 
 A second register, `ENGINE_REJECTS_WHAT_TYPESCRIPT_ACCEPTS`, holds the
 cases the TypeScript engine accepts and this engine rejects from the
-same document. The one entry today is `ir-nullable-suffix`
-(`A = [ "x" ] A [ "y" ] / "z"`), asserted both ways as well.
+same document, asserted both ways as well. It is empty today. Its one
+entry, `ir-nullable-suffix` (`A = [ "x" ] A [ "y" ] / "z"`), started
+agreeing once every repetition compiled to a same-depth replace loop:
+the tail loop the left-recursion rewrite synthesises had been a chain
+of pushes, which this engine rejected and the TypeScript engine
+accepted without building a value.
 
 Fixtures named `ir-*` are built from hand-written IR rather than from a
 front-end, so there is no grammar text to go back to: the fixture is its
