@@ -3979,6 +3979,14 @@ class RefRegistry {
 // close-phase (separator) tokens' src to the parent, and clears the
 // own node so the parent's capture no-ops on its stale first-iteration
 // child pointer.
+// Append `from`'s elements to `to`, one push each, over the count `from`
+// had when the call began (what `push(...from)` did, without the call
+// stack). The engine's `@capture$` and `@fold$` append the same way.
+function appendKids(to: any[], from: any[]): void {
+  const n = from.length
+  for (let i = 0; i < n; i++) to.push(from[i])
+}
+
 function mkFoldClosure(cN: number): (r: Rule) => void {
   return (r: Rule) => {
     const p = r.parent && (r.parent.node as any)
@@ -3989,8 +3997,10 @@ function mkFoldClosure(cN: number): (r: Rule) => void {
       if (own.rule) p.kids.push(own)
       // One push per kid, never a spread: a loop's node holds every
       // item it matched, and a spread of a hundred thousand and more
-      // arguments overflows the call stack.
-      else if (Array.isArray(own.kids)) for (const k of own.kids) p.kids.push(k)
+      // arguments overflows the call stack. The count is taken first,
+      // as the spread took it, so two nodes sharing one `kids` array
+      // cannot grow it under the loop that reads it.
+      else if (Array.isArray(own.kids)) appendKids(p.kids, own.kids)
     }
     for (let i = 0; i < cN; i++) p.src += r.c[i].src
     r.node = undefined
@@ -4119,7 +4129,7 @@ function captureChildFields(
     n.src += c.src
     if (c.rule) n.kids.push(c)
     // One push per kid, never a spread (see mkFoldClosure).
-    else if (Array.isArray(c.kids)) for (const k of c.kids) n.kids.push(k)
+    else if (Array.isArray(c.kids)) appendKids(n.kids, c.kids)
   })
 }
 
