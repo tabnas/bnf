@@ -547,10 +547,22 @@ fn eliminate_direct_left_rec(
 
 /// Rewrite tail self-references into same-depth repeats:
 /// `X = prefix [ sep X ]` compiles to a rule that repeats itself (`r: X`)
-/// from its close phase. Applies only when the production has exactly
-/// one alternative, its last element is an option wrapping `sep… X` with
-/// the self-reference LAST, every prefix and separator element is a
-/// terminal, and the production is not the start production.
+/// from its close phase.
+///
+/// This is the special case of the rule every repetition follows (see
+/// `Production::repeat_loop`): a star, a plus and an unbounded rep are
+/// sequence, and compile to a loop that replaces itself. What is special
+/// here is only where the loop comes from. The author wrote a repetition
+/// as right recursion through an option, so the loop is the author's own
+/// rule rather than a generated helper, and each iteration folds a node
+/// of that rule into the parent: a list of `X` siblings, which a star
+/// over the same text would not give. The general path does not subsume
+/// it for that reason, and it stays.
+///
+/// Applies only when the production has exactly one alternative, its
+/// last element is an option wrapping `sep… X` with the self-reference
+/// LAST, every prefix and separator element is a terminal, and the
+/// production is not the start production.
 pub(crate) fn rewrite_tail_repeats(mut grammar: Grammar, start: &str) -> Grammar {
     for prod in &mut grammar.productions {
         if prod.probe_dispatch.is_some() || prod.probe_helper.is_some() {

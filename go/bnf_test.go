@@ -393,6 +393,35 @@ func hiddenLeftRec(alts ...Sequence) *Grammar {
 	return &Grammar{Productions: []*Production{{Name: "A", Alts: alts}}}
 }
 
+// debtOf is the suffix-debt part of an alt's counters, and debtGuarded
+// whether the alt is conditioned on a debt counter. Every repeat loop
+// keeps a counter of its own (`rep`, whether it has been entered yet: its
+// entry is conditioned on it, and its iteration counts it), so "has a
+// condition" or "counts" no longer means "is about debt". Mirrors the
+// `debt` and `guard` helpers of ts/test/bnf.test.js.
+func debtOf(a *tabnas.GrammarAltSpec) map[string]int {
+	out := map[string]int{}
+	for k, v := range a.N {
+		if strings.HasPrefix(k, "debt_") {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func debtGuarded(a *tabnas.GrammarAltSpec) bool {
+	cd, ok := a.C.(map[string]any)
+	if !ok {
+		return false
+	}
+	for k := range cd {
+		if strings.HasPrefix(k, "n.debt_") {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSuffixDebtGuardsTheContestedLoop(t *testing.T) {
 	spec := emitOrFail(t, hiddenLeftRec(
 		Sequence{optOf(sensTerm("x")), ref("A"), sensTerm("y")},
@@ -402,11 +431,11 @@ func TestSuffixDebtGuardsTheContestedLoop(t *testing.T) {
 	counter := ""
 	pushes := 0
 	for _, a := range altsOf(spec) {
-		if len(a.N) == 0 {
+		if len(debtOf(a)) == 0 {
 			continue
 		}
 		pushes++
-		for name, delta := range a.N {
+		for name, delta := range debtOf(a) {
 			counter = name
 			if delta != 1 {
 				t.Errorf("expected the push to add one debt, got %d", delta)
@@ -423,29 +452,45 @@ func TestSuffixDebtGuardsTheContestedLoop(t *testing.T) {
 	// …and the tail loop's continue alternative refuses to run while any
 	// debt is outstanding.
 	guards := 0
-	for _, a := range altsOf(spec) {
-		cd, ok := a.C.(map[string]any)
-		if !ok {
+	loopName := ""
+	for name, rs := range spec.Rule {
+		if rs == nil {
 			continue
 		}
-		guards++
-		if got := cd["n."+counter]; got != 0 {
-			t.Errorf("expected the guard to test %s == 0, got %#v", counter, cd)
+		for _, a := range append(altListOf(rs.Open), altListOf(rs.Close)...) {
+			if !debtGuarded(a) {
+				continue
+			}
+			guards++
+			loopName = name
+			cd := a.C.(map[string]any)
+			if got := cd["n."+counter]; got != 0 || len(cd) != 1 {
+				t.Errorf("expected the guard to test %s == 0, got %#v", counter, cd)
+			}
+			// The guarded alt takes an iteration, and takes it in the
+			// loop's own frame. The tail here is the terminal `"y"`, so the
+			// iteration is the guarded alt itself: it matches the `y` and
+			// replaces the loop with itself. (A tail that is a rule hands
+			// over to `$alt0` instead.) The back-edge is `r`, never `p`.
+			if a.P != "" {
+				t.Errorf("the guarded alt must not push, got p=%q", a.P)
+			}
+			if a.R != name {
+				t.Errorf("the loop back-edge is a replace: r=%q, want %q", a.R, name)
+			}
 		}
 	}
 	if guards != 1 {
 		t.Fatalf("expected exactly one guarded alternative, got %d", guards)
 	}
+	if !strings.Contains(loopName, "_star_") {
+		t.Errorf("the guard belongs to the loop, got %q", loopName)
+	}
 
 	// The loop's exits stay unguarded, so it yields rather than fails.
-	for name, rs := range spec.Rule {
-		if rs == nil || !strings.Contains(name, "_star_") || strings.Contains(name, "$") {
-			continue
-		}
-		for i, a := range altListOf(rs.Open) {
-			if i > 0 && a.C != nil {
-				t.Errorf("%s: exit alternative %d must stay unconditional", name, i)
-			}
+	for i, a := range altListOf(spec.Rule[loopName].Open) {
+		if a.R == "" && a.C != nil {
+			t.Errorf("%s: exit alternative %d must stay unconditional", loopName, i)
 		}
 	}
 }
@@ -460,7 +505,7 @@ func TestSuffixDebtResetsAcrossAReanchoringAlternative(t *testing.T) {
 
 	deltas := []int{}
 	for _, a := range altsOf(spec) {
-		for _, d := range a.N {
+		for _, d := range debtOf(a) {
 			deltas = append(deltas, d)
 		}
 	}
@@ -490,7 +535,7 @@ func TestSuffixDebtLeavesUncontestedGrammarsAlone(t *testing.T) {
 	}
 	for name, g := range cases {
 		for _, a := range altsOf(emitOrFail(t, g)) {
-			if len(a.N) > 0 || a.C != nil {
+			if len(debtOf(a)) > 0 || debtGuarded(a) {
 				t.Errorf("%s: must compile exactly as before, got n=%v c=%v",
 					name, a.N, a.C)
 			}
@@ -512,8 +557,8 @@ func TestSuffixDebtAllocatesACounterPerContestedRule(t *testing.T) {
 
 	counters := map[string]bool{}
 	for _, a := range altsOf(spec) {
-		if cd, ok := a.C.(map[string]any); ok {
-			for path := range cd {
+		if debtGuarded(a) {
+			for path := range a.C.(map[string]any) {
 				counters[path] = true
 			}
 		}
@@ -580,17 +625,20 @@ func TestSuffixDebtGuardsOnlyTheContestedBranches(t *testing.T) {
 			continue
 		}
 		for _, a := range altListOf(rs.Open) {
+			// A continue alternative names a token and re-enters the loop by
+			// replacement; the entry names none, and an exit re-enters
+			// nothing.
 			s, ok := a.S.(string)
-			if !ok || a.P == "" {
+			if !ok || a.R == "" {
 				continue
 			}
 			head := s
 			if i := strings.IndexByte(s, ' '); i >= 0 {
 				head = s[:i]
 			}
-			if a.C != nil {
+			if debtGuarded(a) {
 				guarded[head] = true
-			} else {
+			} else if a.C == nil {
 				open[head] = true
 			}
 		}
@@ -600,6 +648,106 @@ func TestSuffixDebtGuardsOnlyTheContestedBranches(t *testing.T) {
 	}
 	if want := []string{tokenOf("w")}; !sameStrings(sortedKeys(open), want) {
 		t.Errorf("unguarded heads = %v, want %v", sortedKeys(open), want)
+	}
+}
+
+// debtOf, debtGuarded and every test above read only the `debt_…`
+// counters, and every one of them relies on that being a true split: were
+// the loop counter a `debt_` name, or a debt ever kept under `rep`, they
+// would pass by reading the wrong one. This grammar has every kind at once
+// — a debt counted on a push, a debt reset at a re-anchoring alternative, a
+// guarded and an unguarded branch of a tail loop whose item is a rule, and
+// that loop's entry, take and step back — and each alt that conditions or
+// counts is exactly one of them. Mirrors "keeps the loop counter and the
+// debt counters apart" in ts/test/bnf.test.js.
+func TestSuffixDebtKeepsTheLoopCounterApart(t *testing.T) {
+	spec := emitOrFail(t, hiddenLeftRec(
+		Sequence{ref("A"), sensTerm("y")},
+		Sequence{ref("A"), sensTerm("w")},
+		Sequence{sensTerm("x"), ref("A"), sensTerm("y")},
+		Sequence{sensTerm("("), ref("A"), sensTerm(")")},
+		Sequence{sensTerm("z")},
+	))
+	type named struct {
+		rule string
+		alt  *tabnas.GrammarAltSpec
+	}
+	all := []named{}
+	for _, name := range keysOf(spec.Rule) {
+		for _, a := range append(altListOf(spec.Rule[name].Open), altListOf(spec.Rule[name].Close)...) {
+			all = append(all, named{name, a})
+		}
+	}
+	loop := ""
+	for _, a := range all {
+		if debtGuarded(a.alt) {
+			loop = a.rule
+			break
+		}
+	}
+	if loop == "" {
+		t.Fatal("no guarded alternative")
+	}
+	take := loop + "$alt0"
+	condKeys := func(a *tabnas.GrammarAltSpec) []string {
+		cd, _ := a.C.(map[string]any)
+		return keysOf(cd)
+	}
+	is := func(got map[string]int, key string, v int) bool {
+		return len(got) == 1 && got[key] == v
+	}
+	kinds := map[string]int{}
+	for _, na := range all {
+		a := na.alt
+		if a.C == nil && len(a.N) == 0 {
+			continue
+		}
+		kind := ""
+		switch {
+		case na.rule == loop && a.S == nil:
+			cd, _ := a.C.(map[string]any)
+			if len(cd) != 1 || cd["n.rep"] != 0 || !is(a.N, "rep", 1) || a.R != loop {
+				t.Errorf("entry: c=%v n=%v r=%q", a.C, a.N, a.R)
+			}
+			kind = "entry"
+		case na.rule == take && a.P != "":
+			if len(condKeys(a)) != 0 || !is(a.N, "rep", 0) {
+				t.Errorf("take: c=%v n=%v", a.C, a.N)
+			}
+			kind = "take"
+		case na.rule == take:
+			if len(condKeys(a)) != 0 || !is(a.N, "rep", 1) || a.R != take+"$step1" {
+				t.Errorf("back: c=%v n=%v r=%q", a.C, a.N, a.R)
+			}
+			kind = "back"
+		case debtGuarded(a):
+			if na.rule != loop || len(a.N) != 0 || a.R != take {
+				t.Errorf("guard: rule=%q n=%v r=%q", na.rule, a.N, a.R)
+			}
+			for _, k := range condKeys(a) {
+				if !strings.HasPrefix(k, "n.debt_") {
+					t.Errorf("guard tests %q", k)
+				}
+			}
+			kind = "guard"
+		default:
+			if len(debtOf(a)) == 0 || len(condKeys(a)) != 0 || len(debtOf(a)) != len(a.N) {
+				t.Errorf("%s: neither the loop's nor a debt's: c=%v n=%v", na.rule, a.C, a.N)
+			}
+			kind = "reset"
+			for _, v := range a.N {
+				if v == 1 {
+					kind = "debt"
+				}
+			}
+		}
+		kinds[kind]++
+	}
+	if got := keysOf(kinds); !sameStrings(got, []string{"back", "debt", "entry", "guard", "reset", "take"}) {
+		t.Errorf("kinds %v", got)
+	}
+	if kinds["entry"] != 1 {
+		t.Errorf("%d loop entries, want 1", kinds["entry"])
 	}
 }
 
@@ -616,7 +764,7 @@ func TestSuffixDebtSeesASelfReferenceInsideAGroup(t *testing.T) {
 
 	guards := 0
 	for _, a := range altsOf(spec) {
-		if a.C != nil {
+		if debtGuarded(a) {
 			guards++
 		}
 	}
@@ -640,7 +788,7 @@ func TestSuffixDebtCounterNameMatchesTypeScript(t *testing.T) {
 		}}}})
 		got := ""
 		for _, a := range altsOf(spec) {
-			for counter := range a.N {
+			for counter := range debtOf(a) {
 				got = counter
 			}
 		}
@@ -648,6 +796,16 @@ func TestSuffixDebtCounterNameMatchesTypeScript(t *testing.T) {
 			t.Errorf("rule %q: counter = %q, want %q", name, got, want)
 		}
 	}
+}
+
+// keysOf is a map's keys, sorted.
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func sameStrings(a, b []string) bool {

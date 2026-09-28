@@ -100,16 +100,17 @@ func szParses(t *testing.T, spec *tabnas.GrammarSpec, src string) bool {
 }
 
 func TestSizeRepeatedEntryDispatchesOnHeads(t *testing.T) {
-	// The star helper: one entry per keyword head, one FOLLOW peek for
-	// the `}` that ends the loop, and the bare fallback.
+	// The star helper: the loop's entry, one continue alternative per
+	// keyword head, one FOLLOW peek for the `}` that ends the loop, and the
+	// bare fallback.
 	for _, n := range []int{2, 8, 26} {
 		spec, err := EmitGrammarSpec(szStarred(n), &ConvertOptions{Tag: "rp", Start: "doc", WordKeywords: true})
 		if err != nil {
 			t.Fatal(err)
 		}
 		helper := szRule(t, spec, `star_entry$`)
-		if got := szOpens(t, spec, helper); got != n+2 {
-			t.Errorf("N=%d: %s has %d open alternates, want %d", n, helper, got, n+2)
+		if got := szOpens(t, spec, helper); got != n+3 {
+			t.Errorf("N=%d: %s has %d open alternates, want %d", n, helper, got, n+3)
 		}
 	}
 }
@@ -167,15 +168,15 @@ func TestSizeTokenClassIsOneLookaheadToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The class is a set; the helper peeks it once. The class rule
-	// itself keeps its 26 alternates, one per member: it is the rule
-	// that builds the node.
+	// The class is a set; the helper peeks it once (beside its entry, the
+	// FOLLOW peek and the fallback). The class rule itself keeps its 26
+	// alternates, one per member: it is the rule that builds the node.
 	if len(spec.Options.TokenSet) != 1 || len(spec.Options.TokenSet["kw"]) != 26 {
 		t.Fatalf("token sets: %v", spec.Options.TokenSet)
 	}
 	helper := szRule(t, spec, `star_entry$`)
-	if got := szOpens(t, spec, helper); got != 3 {
-		t.Errorf("%s has %d open alternates, want 3", helper, got)
+	if got := szOpens(t, spec, helper); got != 4 {
+		t.Errorf("%s has %d open alternates, want 4", helper, got)
 	}
 	if got := szOpens(t, spec, "kw"); got != 26 {
 		t.Errorf("kw has %d open alternates, want 26", got)
@@ -272,10 +273,19 @@ func TestSizeRepetitionContestedByFollowLooksAcrossTheBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper := szRule(t, spec, `star.*group$`)
-	opens := reflect.ValueOf(spec.Rule[helper].Open)
-	first := reflect.Indirect(opens.Index(0))
-	if s := fmt.Sprint(first.FieldByName("S")); !strings.HasPrefix(s, "#A #X") {
-		t.Errorf("first continue entry peeks %q", s)
+	// The loop's first alternative is its entry, which peeks nothing.
+	var first *tabnas.GrammarAltSpec
+	for _, o := range altListOf(spec.Rule[helper].Open) {
+		if o.S != nil {
+			first = o
+			break
+		}
+	}
+	if first == nil {
+		t.Fatalf("%s peeks nothing", helper)
+	}
+	if s := fmt.Sprint(first.S); !strings.HasPrefix(s, "#A #X") || first.B.(int) < 2 {
+		t.Errorf("first continue entry peeks %q (b=%v)", s, first.B)
 	}
 	for _, src := range []string{"ab", "axxab", "axxaxxab"} {
 		if !szParses(t, spec, src) {

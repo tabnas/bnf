@@ -266,7 +266,10 @@ describe('overlapping-class partition: the escapes it reads', () => {
     // the surrogate block the negated class covers; read as unknown, every
     // set holding it contested every head, the content loop deepened from
     // 92 alternates to 103, and without negotiated lexing `<a>hi</a>` was
-    // refused at its first character.
+    // refused at its first character. (92 is 90 now that a loop is the
+    // same-depth loop: each loop gains its entry and loses its close, and
+    // a loop over a rule loses its step's close too, so the two loops over
+    // a rule here are one alternate shorter each.)
     const star = (inner) => ({ kind: 'star', inner })
     const plus = (inner) => ({ kind: 'plus', inner })
     const group = (...alts) => ({ kind: 'group', alts })
@@ -283,7 +286,7 @@ describe('overlapping-class partition: the escapes it reads', () => {
     ], { tag: 'cp', start: 'document' })
     const alternates = Object.values(spec.rule)
       .reduce((n, r) => n + (r.open ?? []).length + (r.close ?? []).length, 0)
-    assert.equal(alternates, 92)
+    assert.equal(alternates, 90)
     assert.equal(Object.keys(spec.options.tokenSet).length, 6)
     assert.equal(Object.keys(spec.options.match.token).length, 16)
     // The negated class reads code points, so its surrogate atom does too:

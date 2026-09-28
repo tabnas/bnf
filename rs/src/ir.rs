@@ -404,6 +404,20 @@ pub struct Production {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub repeat_helper: bool,
+    /// Set by `desugar` on the helper every unbounded repetition becomes:
+    /// the star `*A`, and the tail of a plus `1*A` or of a rep `m*A`. Its
+    /// `alts` stay `[[A, self], []]`, which is the language the loop
+    /// describes and what FIRST, FOLLOW, the dispatch prefixes and the
+    /// suffix-debt analysis all read. The EMITTER does not compile the
+    /// self-reference as a push: it emits a same-depth loop, every
+    /// iteration of which runs in the frame the loop was pushed into, and
+    /// re-enters the loop by replacement (`r:`). See `emit_repeat_loop`.
+    #[serde(
+        default,
+        rename = "repeatLoop",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub repeat_loop: bool,
     #[serde(default, rename = "debtGuard", skip_serializing_if = "Option::is_none")]
     pub debt_guard: Option<String>,
     #[serde(default, rename = "debtOwed", skip_serializing_if = "Option::is_none")]

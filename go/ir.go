@@ -176,8 +176,9 @@ type Production struct {
 	// self-ref last). The opt is removed from Alts (leaving just the
 	// prefix) and the separator elements are stashed here; the emitter
 	// compiles the production to a same-depth close-phase repeat
-	// (`r: X`) instead of the opt→group→push helper chain. Mirrors the
-	// TS `tailRepeat` flag.
+	// (`r: X`) instead of the opt→group→push helper chain. The special
+	// case of RepeatLoop, for a repetition the author wrote as recursion.
+	// Mirrors the TS `tailRepeat` flag.
 	TailRepeat *TailRepeatSpec
 	// DebtGuard is set by desugar on the star helper generated for a
 	// left-recursion tail loop whose greediness contests a suffix of the
@@ -203,6 +204,18 @@ type Production struct {
 	// peek, without which a repetition followed by a character class
 	// cannot terminate. See computeFollowSets.
 	RepeatHelper bool
+
+	// RepeatLoop is set by desugar on the helper every unbounded
+	// repetition becomes: the star `*A`, and the tail of a plus `1*A` or
+	// of a rep `m*A`. Its Alts stay `[[A, self], []]`, which is the
+	// language the loop describes and what FIRST, FOLLOW, the dispatch
+	// prefixes and the suffix-debt analysis all read. The EMITTER does not
+	// compile the self-reference as a push: it emits a same-depth loop,
+	// every iteration of which runs in the frame the loop was pushed into,
+	// and re-enters the loop by replacement (`r:`). See emitRepeatLoop,
+	// and AGENTS.md "Repetition is replacement, never a push chain".
+	// Mirrors the TS `repeatLoop` production flag.
+	RepeatLoop bool
 
 	// Origin is the author-written production this one descends from. Set
 	// by every pass that SYNTHESISES a production (desugar's sugar

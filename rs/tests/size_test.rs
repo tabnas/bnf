@@ -88,12 +88,13 @@ fn opts() -> ConvertOptions {
 
 #[test]
 fn a_repeated_entry_dispatches_on_heads_not_paths() {
-    // The star helper: one entry per keyword head, one FOLLOW peek for
-    // the `}` that ends the loop, and the bare fallback.
+    // The star helper: the loop's entry, one continue alternative per
+    // keyword head, one FOLLOW peek for the `}` that ends the loop, and
+    // the bare fallback.
     for n in [2usize, 8, 26] {
         let spec = emit_grammar_spec(&starred(n), &opts()).expect("emit");
         let helper = rule_matching(&spec, |name| name.ends_with("star_entry"));
-        assert_eq!(opens(&spec, &helper), n + 2, "N={n}: {helper}");
+        assert_eq!(opens(&spec, &helper), n + 3, "N={n}: {helper}");
     }
 }
 
@@ -107,15 +108,15 @@ fn an_uncontested_choice_dispatches_on_one_token_per_head() {
 #[test]
 fn a_token_class_is_one_lookahead_token() {
     let spec = emit_grammar_spec(&starred(26), &opts().token_classes(true)).expect("emit");
-    // The class is a set; the helper peeks it once. The class rule
-    // itself keeps its 26 alternates, one per member: it is the rule
-    // that builds the node.
+    // The class is a set; the helper peeks it once (beside its entry, the
+    // FOLLOW peek and the fallback). The class rule itself keeps its 26
+    // alternates, one per member: it is the rule that builds the node.
     let sets = spec.options.get("tokenSet").expect("token sets");
     let kw_set = sets.get("kw").expect("kw set");
     assert_eq!(kw_set.as_array().map(|a| a.len()), Some(26));
     assert_eq!(sets.as_object().map(|o| o.len()), Some(1));
     let helper = rule_matching(&spec, |name| name.ends_with("star_entry"));
-    assert_eq!(opens(&spec, &helper), 3, "{helper}");
+    assert_eq!(opens(&spec, &helper), 4, "{helper}");
     assert_eq!(opens(&spec, "kw"), 26);
     let x = emit_grammar_spec(&choice(26), &opts().token_classes(true)).expect("emit");
     assert_eq!(opens(&x, "x"), 2);
@@ -228,8 +229,13 @@ fn a_repetition_contested_by_what_follows_it_looks_across_the_boundary() {
     let helper = rule_matching(&spec, |name| {
         name.contains("star") && name.ends_with("group")
     });
-    let first = spec.rule[&helper].as_ref().expect("helper").open[0]
-        .s()
+    // The loop's first alternative is its entry, which peeks nothing.
+    let first = spec.rule[&helper]
+        .as_ref()
+        .expect("helper")
+        .open
+        .iter()
+        .find_map(|o| o.s())
         .unwrap_or("")
         .to_string();
     assert!(first.starts_with("#A #X"), "{first}");

@@ -188,7 +188,6 @@ func TestDocActionSlots(t *testing.T) {
 	}
 }
 
-
 // guide.md: an unmatched action ref is an error, and names the mark.
 func TestDocUnmatchedActionRef(t *testing.T) {
 	spec, _ := bnf.EmitGrammarSpec(&bnf.Grammar{Productions: []*bnf.Production{

@@ -447,6 +447,28 @@ fn hidden_left_rec(alts: Vec<Vec<Element>>) -> Grammar {
     Grammar::new(vec![prod("A", alts)])
 }
 
+/// An alt guarded by a suffix-debt counter. Every repeat loop keeps a
+/// counter of its own (`rep`, whether it has been entered yet: its entry
+/// is conditioned on it, and its iteration counts it), so "has a
+/// condition" or "counts" no longer means "is about debt".
+fn is_debt_guard(a: &AltSpec) -> bool {
+    a.get("c")
+        .and_then(Value::as_object)
+        .is_some_and(|c| c.keys().any(|k| k.starts_with("n.debt_")))
+}
+
+/// The suffix-debt counters an alt moves, and by how much.
+fn debt_of(a: &AltSpec) -> Map<String, Value> {
+    n_of(a)
+        .map(|n| {
+            n.iter()
+                .filter(|(k, _)| k.starts_with("debt_"))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn star_helpers(spec: &GrammarSpec) -> Vec<(&String, &RuleSpec)> {
     spec.rule
         .iter()
@@ -469,12 +491,12 @@ fn suffix_debt_guards_the_contested_loop() {
     let mut counter = String::new();
     let mut pushes = 0;
     for a in alts_of(&spec) {
-        let Some(n) = n_of(&a) else { continue };
+        let n = debt_of(&a);
         if n.is_empty() {
             continue;
         }
         pushes += 1;
-        for (name, delta) in n {
+        for (name, delta) in &n {
             counter = name.clone();
             assert_eq!(delta, &json!(1), "expected the push to add one debt");
         }
@@ -485,23 +507,38 @@ fn suffix_debt_guards_the_contested_loop() {
     // ...and the tail loop's continue alternative refuses to run while
     // any debt is outstanding.
     let mut guards = 0;
-    for a in alts_of(&spec) {
-        let Some(c) = a.get("c").and_then(Value::as_object) else {
-            continue;
-        };
-        guards += 1;
-        assert_eq!(
-            c.get(&format!("n.{counter}")),
-            Some(&json!(0)),
-            "expected the guard to test {counter} == 0, got {c:?}"
-        );
+    for (name, rs) in star_helpers(&spec) {
+        for a in rs.open.iter().filter(|a| is_debt_guard(a)) {
+            guards += 1;
+            let c = a.get("c").and_then(Value::as_object).expect("a condition");
+            assert_eq!(
+                c.get(&format!("n.{counter}")),
+                Some(&json!(0)),
+                "expected the guard to test {counter} == 0, got {c:?}"
+            );
+            // The guarded alt takes an iteration, and takes it in the
+            // loop's own frame: the tail here is the terminal `"y"`, so it
+            // matches the `y` and replaces the loop with itself. The
+            // back-edge is `r`, never `p`.
+            assert_eq!(a.p(), None, "{name}: the guarded alt must not push");
+            assert_eq!(
+                a.r(),
+                Some(name.as_str()),
+                "the loop back-edge is a replace"
+            );
+        }
     }
-    assert_eq!(guards, 1, "expected exactly one guarded alternative");
+    let everywhere = alts_of(&spec).iter().filter(|a| is_debt_guard(a)).count();
+    assert_eq!(
+        guards, 1,
+        "expected exactly one guarded alternative, in the loop"
+    );
+    assert_eq!(everywhere, 1, "expected exactly one guarded alternative");
 
     // The loop's exits stay unguarded, so it yields rather than fails.
     for (name, rs) in star_helpers(&spec) {
         for (i, a) in rs.open.iter().enumerate() {
-            if i > 0 {
+            if a.r().is_none() {
                 assert!(
                     a.get("c").is_none(),
                     "{name}: exit alternative {i} must stay unconditional"
@@ -525,7 +562,7 @@ fn suffix_debt_resets_across_a_reanchoring_alternative() {
     );
     let mut deltas: Vec<i64> = alts_of(&spec)
         .iter()
-        .filter_map(n_of)
+        .map(debt_of)
         .flat_map(|n| n.values().filter_map(Value::as_i64).collect::<Vec<_>>())
         .collect();
     deltas.sort();
@@ -568,7 +605,7 @@ fn suffix_debt_leaves_uncontested_grammars_alone() {
     for (name, g) in cases {
         for a in alts_of(&emit(g, demo())) {
             assert!(
-                n_of(&a).is_none_or(Map::is_empty) && a.get("c").is_none(),
+                debt_of(&a).is_empty() && !is_debt_guard(&a),
                 "{name}: must compile exactly as before, got n={:?} c={:?}",
                 a.get("n"),
                 a.get("c")
@@ -599,7 +636,7 @@ fn suffix_debt_allocates_a_counter_per_contested_rule() {
         demo(),
     );
     let mut counters = std::collections::HashSet::new();
-    for a in alts_of(&spec) {
+    for a in alts_of(&spec).iter().filter(|a| is_debt_guard(a)) {
         if let Some(c) = a.get("c").and_then(Value::as_object) {
             for path in c.keys() {
                 counters.insert(path.clone());
@@ -666,12 +703,14 @@ fn suffix_debt_guards_only_the_contested_branches() {
     let mut guarded = std::collections::BTreeSet::new();
     let mut open = std::collections::BTreeSet::new();
     for (_, rs) in star_helpers(&spec) {
+        // A continue alternative names a head and hands over to the
+        // iteration by replacement.
         for a in &rs.open {
-            let (Some(s), Some(_)) = (a.s(), a.p()) else {
+            let (Some(s), Some(_)) = (a.s(), a.r()) else {
                 continue;
             };
             let head = s.split(' ').next().unwrap().to_string();
-            if a.get("c").is_some() {
+            if is_debt_guard(a) {
                 guarded.insert(head);
             } else {
                 open.insert(head);
@@ -680,6 +719,110 @@ fn suffix_debt_guards_only_the_contested_branches() {
     }
     assert_eq!(guarded.into_iter().collect::<Vec<_>>(), vec![token_of("y")]);
     assert_eq!(open.into_iter().collect::<Vec<_>>(), vec![token_of("w")]);
+}
+
+#[test]
+fn suffix_debt_keeps_the_loop_counter_and_the_debt_counters_apart() {
+    // `is_debt_guard` and `debt_of` above read only the `debt_…`
+    // counters, and every test here relies on that being a true split:
+    // were the loop counter a `debt_` name, or a debt ever kept under
+    // `rep`, they would pass by reading the wrong one. This grammar has
+    // every kind at once (a debt counted on a push, a debt reset at a
+    // re-anchoring alternative, a guarded and an unguarded branch of a
+    // tail loop whose item is a rule, and that loop's entry, take and
+    // step back), and each alt that conditions or counts is exactly one
+    // of them.
+    let spec = emit(
+        hidden_left_rec(vec![
+            vec![reference("A"), sens_term("y")],
+            vec![reference("A"), sens_term("w")],
+            vec![sens_term("x"), reference("A"), sens_term("y")],
+            vec![sens_term("("), reference("A"), sens_term(")")],
+            vec![sens_term("z")],
+        ]),
+        demo(),
+    );
+    let named: Vec<(&String, &AltSpec)> = spec
+        .rule
+        .iter()
+        .filter_map(|(name, rs)| rs.as_ref().map(|rs| (name, rs)))
+        .flat_map(|(name, rs)| {
+            rs.open
+                .iter()
+                .chain(rs.close.iter().flatten())
+                .map(move |a| (name, a))
+        })
+        .collect();
+    let lp = named
+        .iter()
+        .find(|(_, a)| is_debt_guard(a))
+        .map(|(name, _)| (*name).clone())
+        .expect("a guarded loop");
+    let take = format!("{lp}$alt0");
+    let keys = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(Value::as_object)
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let mut kinds: Vec<&str> = Vec::new();
+    for (rule, a) in named {
+        if a.get("c").is_none() && a.get("n").is_none() {
+            continue;
+        }
+        let c = keys(a.get("c"));
+        let n = keys(a.get("n"));
+        let kind = if *rule == lp && a.s().is_none() {
+            assert_eq!(
+                (a.get("c"), a.get("n"), a.r()),
+                (
+                    Some(&json!({"n.rep": 0})),
+                    Some(&json!({"rep": 1})),
+                    Some(lp.as_str())
+                ),
+                "the entry"
+            );
+            "entry"
+        } else if *rule == take && a.p().is_some() {
+            assert_eq!(
+                (c, a.get("n")),
+                (vec![], Some(&json!({"rep": 0}))),
+                "the take"
+            );
+            "take"
+        } else if *rule == take {
+            let step = format!("{take}$step1");
+            assert_eq!(
+                (c, a.get("n"), a.r()),
+                (vec![], Some(&json!({"rep": 1})), Some(step.as_str())),
+                "the step back"
+            );
+            "back"
+        } else if is_debt_guard(a) {
+            assert_eq!(
+                (rule.as_str(), a.get("n"), a.r()),
+                (lp.as_str(), None, Some(take.as_str())),
+                "a guard"
+            );
+            assert!(c.iter().all(|k| k.starts_with("n.debt_")), "{c:?}");
+            "guard"
+        } else {
+            let debt = debt_of(a);
+            assert!(!debt.is_empty() && c.is_empty(), "{:?}", a.to_value());
+            assert!(n.iter().all(|k| k.starts_with("debt_")), "{n:?}");
+            if debt.values().next() == Some(&json!(1)) {
+                "debt"
+            } else {
+                "reset"
+            }
+        };
+        kinds.push(kind);
+    }
+    let distinct: std::collections::BTreeSet<&str> = kinds.iter().copied().collect();
+    assert_eq!(
+        distinct.into_iter().collect::<Vec<_>>(),
+        vec!["back", "debt", "entry", "guard", "reset", "take"]
+    );
+    assert_eq!(kinds.iter().filter(|k| **k == "entry").count(), 1);
 }
 
 #[test]
@@ -696,10 +839,7 @@ fn suffix_debt_sees_a_self_reference_inside_a_group() {
         ]),
         demo(),
     );
-    let guards = alts_of(&spec)
-        .iter()
-        .filter(|a| a.get("c").is_some())
-        .count();
+    let guards = alts_of(&spec).iter().filter(|a| is_debt_guard(a)).count();
     assert_eq!(guards, 1, "expected the grouped seed to allocate a guard");
 }
 
@@ -724,7 +864,7 @@ fn suffix_debt_counter_name_matches_typescript() {
         );
         let got = alts_of(&spec)
             .iter()
-            .filter_map(n_of)
+            .map(debt_of)
             .flat_map(|n| n.keys().cloned().collect::<Vec<_>>())
             .next()
             .unwrap_or_default();
