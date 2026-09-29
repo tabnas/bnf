@@ -199,7 +199,7 @@ cd rs && cargo test --all-targets && cargo test --doc
 ```
 
 The Rust crate resolves the engine as a sibling checkout
-(`tabnas = { path = "../../parser/rs" }` in `rs/Cargo.toml`); the crate
+(`tabnas = { package = "tabnas-parser", path = "../../parser/rs" }` in `rs/Cargo.toml`); the crate
 is unpublished, so there is no registry version to fall back on, which is
 why `ci/rust/run.sh` runs cargo **without** `--locked` and checks the
 lockfile by diffing it with the engine's version exempted. `make test-rs`
