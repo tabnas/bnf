@@ -80,6 +80,18 @@ describe('repetition safety', () => {
     )
   })
 
+  it('refuses an assertion whose capture is referenced afterward', () => {
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern: '(?=(a)(b?))\\2', flags: 'u',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
   it('validates the implicit loop produced by a tail-repeat rewrite', () => {
     const boundary = () => ({ kind: 'regex', pattern: '\\b', flags: '' })
     assert.throws(

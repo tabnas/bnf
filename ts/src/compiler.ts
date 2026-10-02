@@ -3237,7 +3237,17 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
     }
     skeleton += ch
   }
-  return changed && regexDerivesEmpty(skeleton, flags)
+  if (!changed) return false
+  try {
+    return new RegExp('^(?:' + skeleton + ')$', flags).test('')
+  } catch {
+    // The original expression compiled above. Replacing a lookaround can
+    // still invalidate this analysis-only skeleton when a later
+    // backreference names a capture inside the removed assertion. An
+    // unanalysable skeleton must be treated in the safe direction: the
+    // matcher may be zero-width, so it cannot sit in an unbounded loop.
+    return true
+  }
 }
 
 
