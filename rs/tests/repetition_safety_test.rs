@@ -61,6 +61,24 @@ fn allows_a_boundary_regex_that_must_also_consume_input() {
 }
 
 #[test]
+fn refuses_an_extended_word_boundary_without_consuming_input() {
+    for boundary in [r"\b{start}", r"\b{end}", r"\b{start-half}", r"\b{end-half}"] {
+        let err = emit(&Grammar::new(vec![prod(
+            "top",
+            vec![vec![Element::star(Element::regex(boundary, ""))]],
+        )]))
+        .expect_err("extended zero-width boundary loop compiled");
+        assert!(err.message.contains("unbounded repetition"), "{err}");
+    }
+
+    emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::star(Element::regex(r"\b{start}[a-z]+", ""))]],
+    )]))
+    .expect("consuming extended boundary regex");
+}
+
+#[test]
 fn refuses_a_quantified_group_containing_only_an_assertion() {
     let err = emit(&Grammar::new(vec![prod(
         "top",

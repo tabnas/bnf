@@ -3179,6 +3179,129 @@ function regexAssertionEnd(pattern: string, open: number): number | null {
 }
 
 
+type AssertionCapture = {
+  index: number
+  name?: string
+  body: string
+}
+
+
+// Turn a captured subexpression into a non-capturing one that can stand in
+// for a later backreference without changing the numbering of every group
+// after it. A capture body containing its own backreference is deliberately
+// left unproved; the caller substitutes an empty body and therefore answers
+// in the safe, possibly-zero-width direction.
+function regexNonCapturingBody(body: string): string | null {
+  let out = ''
+  let inClass = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if ('\\' === ch) {
+      const next = body[i + 1]
+      if (!inClass && (/[1-9]/.test(next ?? '') ||
+          ('k' === next && '<' === body[i + 2]))) return null
+      out += ch
+      if (i + 1 < body.length) out += body[++i]
+      continue
+    }
+    if (inClass) {
+      out += ch
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; out += ch; continue }
+    if ('(' !== ch) { out += ch; continue }
+    if ('?' !== body[i + 1]) {
+      out += '(?:'
+      continue
+    }
+    if ('<' === body[i + 2] &&
+        '=' !== body[i + 3] && '!' !== body[i + 3]) {
+      const close = body.indexOf('>', i + 3)
+      if (-1 === close) return null
+      out += '(?:'
+      i = close
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+
+// Captures inside a positive assertion can be read by a later backreference.
+// Removing the assertion and leaving an empty placeholder gets consumption
+// wrong in both directions. Record the capture body when participation is
+// provable (a direct, mandatory member of a non-alternating assertion); for
+// every more complex shape, use an empty body and remain conservative.
+function regexAssertionCaptures(
+  pattern: string,
+  flags: string,
+  open: number,
+  end: number,
+  firstIndex: number,
+): AssertionCapture[] | null {
+  const lookbehind = '<' === pattern[open + 2]
+  const positive = '=' === pattern[open + (lookbehind ? 3 : 2)]
+  const contentStart = open + (lookbehind ? 4 : 3)
+  const contentEnd = end - 1
+  let topAlternation = false
+  let depth = 0
+  let inClass = false
+  for (let i = contentStart; i < contentEnd; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) { if (']' === ch) inClass = false; continue }
+    if ('[' === ch) { inClass = true; continue }
+    if ('(' === ch) { depth++; continue }
+    if (')' === ch) { depth--; continue }
+    if ('|' === ch && 0 === depth) topAlternation = true
+  }
+
+  const captures: AssertionCapture[] = []
+  depth = 0
+  inClass = false
+  let index = firstIndex
+  for (let i = contentStart; i < contentEnd; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) { if (']' === ch) inClass = false; continue }
+    if ('[' === ch) { inClass = true; continue }
+    if (')' === ch) { depth--; continue }
+    if ('(' !== ch) continue
+
+    let bodyStart: number | null = null
+    let name: string | undefined
+    if ('?' !== pattern[i + 1]) {
+      bodyStart = i + 1
+    } else if ('<' === pattern[i + 2] &&
+        '=' !== pattern[i + 3] && '!' !== pattern[i + 3]) {
+      const nameEnd = pattern.indexOf('>', i + 3)
+      if (-1 === nameEnd || contentEnd <= nameEnd) return null
+      name = pattern.slice(i + 3, nameEnd)
+      bodyStart = nameEnd + 1
+    }
+
+    if (null != bodyStart) {
+      index++
+      const groupEnd = regexAssertionEnd(pattern, i)
+      if (null == groupEnd || end < groupEnd) return null
+      const quantifier = pattern.slice(groupEnd, contentEnd)
+      const optional = '?' === quantifier[0] || '*' === quantifier[0] ||
+        /^\{0+(?:[,}])/.test(quantifier)
+      const required = positive && 0 === depth && !topAlternation && !optional
+      const rawBody = pattern.slice(bodyStart, groupEnd - 1)
+      const body = required && !regexMayMatchWithoutConsuming(rawBody, flags)
+        ? regexNonCapturingBody(rawBody)
+        : ''
+      captures.push({ index, name, body: body ?? '' })
+    }
+    depth++
+  }
+  return captures
+}
+
+
 // A regex can succeed without consuming even when it does not match the
 // wholly empty input: `\\b` before a word character and `(?=word)` are the
 // common examples. Replace zero-width assertions with an empty group and ask
@@ -3199,6 +3322,9 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
   let skeleton = ''
   let inClass = false
   let changed = false
+  let captureCount = 0
+  const assertionCaptures = new Map<number, string>()
+  const assertionNamedCaptures = new Map<string, string>()
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]
     if ('\\' === ch) {
@@ -3207,6 +3333,27 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
         changed = true
         skeleton += '()'
         i++
+      } else if (!inClass && /[1-9]/.test(next ?? '')) {
+        const digits = pattern.slice(i + 1).match(/^[0-9]+/)?.[0] ?? next
+        const body = assertionCaptures.get(Number(digits))
+        if (undefined !== body) {
+          skeleton += '(?:' + body + ')'
+          i += digits.length
+        } else {
+          skeleton += ch + next
+          i++
+        }
+      } else if (!inClass && 'k' === next && '<' === pattern[i + 2]) {
+        const nameEnd = pattern.indexOf('>', i + 3)
+        const name = -1 === nameEnd ? '' : pattern.slice(i + 3, nameEnd)
+        const body = assertionNamedCaptures.get(name)
+        if (undefined !== body) {
+          skeleton += '(?:' + body + ')'
+          i = nameEnd
+        } else {
+          skeleton += ch
+          if (i + 1 < pattern.length) skeleton += pattern[++i]
+        }
       } else {
         skeleton += ch
         if (i + 1 < pattern.length) skeleton += pattern[++i]
@@ -3230,10 +3377,27 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
           ('=' === pattern[i + 3] || '!' === pattern[i + 3])))) {
       const end = regexAssertionEnd(pattern, i)
       if (null == end) return false
+      const captures = regexAssertionCaptures(
+        pattern, flags, i, end, captureCount)
+      if (null == captures) return true
       changed = true
-      skeleton += '()'
+      // Keep one capture placeholder per removed capture so numeric groups
+      // outside the assertion retain their original numbering.
+      skeleton += captures.length === 0 ? '()' : '()'.repeat(captures.length)
+      for (const capture of captures) {
+        assertionCaptures.set(capture.index, capture.body)
+        if (null != capture.name) {
+          assertionNamedCaptures.set(capture.name, capture.body)
+        }
+      }
+      captureCount += captures.length
       i = end - 1
       continue
+    }
+    if ('(' === ch && ('?' !== pattern[i + 1] ||
+        ('<' === pattern[i + 2] &&
+         '=' !== pattern[i + 3] && '!' !== pattern[i + 3]))) {
+      captureCount++
     }
     skeleton += ch
   }

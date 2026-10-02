@@ -426,6 +426,24 @@ fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
                 changed = true;
                 skeleton.extend_from_slice(b"()");
                 i += 2;
+                // regex-syntax extends `\b` with four named boundary
+                // assertions. Consume the whole assertion; leaving the
+                // brace suffix behind makes the analysis skeleton invalid
+                // and can hide a real zero-width matcher. Ordinary
+                // quantifiers such as `\b{5}` deliberately remain.
+                if next == b'b' {
+                    for suffix in [
+                        b"{start}".as_slice(),
+                        b"{end}".as_slice(),
+                        b"{start-half}".as_slice(),
+                        b"{end-half}".as_slice(),
+                    ] {
+                        if bytes[i..].starts_with(suffix) {
+                            i += suffix.len();
+                            break;
+                        }
+                    }
+                }
                 continue;
             }
             skeleton.extend_from_slice(&bytes[i..=i + 1]);

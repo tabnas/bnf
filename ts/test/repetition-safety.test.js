@@ -81,15 +81,38 @@ describe('repetition safety', () => {
   })
 
   it('refuses an assertion whose capture is referenced afterward', () => {
-    assert.throws(
-      () => emit([{
+    for (const pattern of [
+      '(?=(a)(b?))\\2',
+      '(?=(a)?b)\\1',
+      '(?=((?=a)))\\1',
+    ]) {
+      assert.throws(
+        () => emit([{
+          name: 'top',
+          alts: [[{ kind: 'star', inner: {
+            kind: 'regex', pattern, flags: 'u',
+          } }]],
+        }]),
+        /unbounded repetition.*without consuming input/,
+        pattern,
+      )
+    }
+  })
+
+  it('allows an assertion backreference that must consume its capture', () => {
+    for (const pattern of [
+      '(?=(a))\\1',
+      '(?=(?<letter>a))\\k<letter>',
+      '(?=((a)))\\1',
+    ]) {
+      const spec = emit([{
         name: 'top',
         alts: [[{ kind: 'star', inner: {
-          kind: 'regex', pattern: '(?=(a)(b?))\\2', flags: 'u',
+          kind: 'regex', pattern, flags: 'u',
         } }]],
-      }]),
-      /unbounded repetition.*without consuming input/,
-    )
+      }])
+      assert.ok(spec.rule.top, pattern)
+    }
   })
 
   it('validates the implicit loop produced by a tail-repeat rewrite', () => {
