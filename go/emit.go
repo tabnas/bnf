@@ -465,6 +465,22 @@ func validateRepetitions(grammar *Grammar) *EmitError {
 				}
 			}
 		}
+		if prod.ProbeHelper != nil {
+			// Probe-helper vocabulary lives outside Alts. Every successful
+			// matcher re-enters the helper, so a nullable matcher would loop
+			// forever at one source position.
+			for _, el := range prod.ProbeHelper.VocabElements {
+				if elementMayMatchWithoutConsuming(el, nullable) {
+					witness := nonConsumingWitness(el)
+					if witness == nil {
+						witness = el
+					}
+					return refuse(witness, prod,
+						"has a probe helper matcher that can succeed without consuming input. "+
+							"An unbounded repetition must consume input on every iteration.")
+				}
+			}
+		}
 		if prod.TailRepeat != nil {
 			cycle := append(append(Sequence{}, prod.TailRepeat.Sep...), prod.Alts[0]...)
 			nonConsuming := len(cycle) > 0

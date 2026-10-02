@@ -113,7 +113,7 @@ pub(crate) fn seq_token_span(
 ) -> Option<usize> {
     let mut total = 0usize;
     for el in seq {
-        total += element_token_span(el, grammar, visited)?;
+        total = total.checked_add(element_token_span(el, grammar, visited)?)?;
         if total > LOOKAHEAD_K {
             return None;
         }
@@ -135,7 +135,7 @@ fn element_token_span(
         Kind::Star { .. } | Kind::Plus { .. } => None,
         Kind::Rep { max, inner, .. } => {
             let max = (*max)?;
-            Some(max * element_token_span(inner, grammar, visited)?)
+            max.checked_mul(element_token_span(inner, grammar, visited)?)
         }
         Kind::Group { alts } => {
             let mut most = 0;

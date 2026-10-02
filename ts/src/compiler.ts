@@ -3186,6 +3186,61 @@ type AssertionCapture = {
 }
 
 
+// True only when the assertion at `open..end` participates in every match
+// of the expression around it. A capture in an optional assertion, an
+// optional enclosing group, or one arm of an enclosing alternation may be
+// absent; JavaScript then lets a later backreference to it match empty. Such
+// a capture cannot be substituted with its consuming body in the nullability
+// skeleton.
+function regexAssertionIsRequired(
+  pattern: string,
+  open: number,
+  end: number,
+): boolean {
+  const isOptionalAfter = (groupEnd: number): boolean => {
+    const suffix = pattern.slice(groupEnd)
+    return '?' === suffix[0] || '*' === suffix[0] ||
+      /^\{0+(?:[,}])/.test(suffix)
+  }
+  if (isOptionalAfter(end)) return false
+
+  const hasTopAlternation = (start: number, stop: number): boolean => {
+    let depth = 0
+    let inClass = false
+    for (let i = start; i < stop; i++) {
+      const ch = pattern[i]
+      if ('\\' === ch) { i++; continue }
+      if (inClass) { if (']' === ch) inClass = false; continue }
+      if ('[' === ch) { inClass = true; continue }
+      if ('(' === ch) { depth++; continue }
+      if (')' === ch) { depth--; continue }
+      if ('|' === ch && 0 === depth) return true
+    }
+    return false
+  }
+
+  // At top level, an alternation can bypass the assertion altogether.
+  if (hasTopAlternation(0, pattern.length)) return false
+
+  // Find every enclosing group. Its own optional quantifier or a direct
+  // alternation inside it can likewise bypass the assertion. Do not skip a
+  // found group: another `(` before `open` may be nested inside it.
+  let inClass = false
+  for (let i = 0; i < open; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) { if (']' === ch) inClass = false; continue }
+    if ('[' === ch) { inClass = true; continue }
+    if ('(' !== ch) continue
+    const groupEnd = regexAssertionEnd(pattern, i)
+    if (null == groupEnd || groupEnd <= open) continue
+    if (isOptionalAfter(groupEnd) ||
+        hasTopAlternation(i + 1, groupEnd - 1)) return false
+  }
+  return true
+}
+
+
 // Turn a captured subexpression into a non-capturing one that can stand in
 // for a later backreference without changing the numbering of every group
 // after it. A capture body containing its own backreference is deliberately
@@ -3243,6 +3298,7 @@ function regexAssertionCaptures(
 ): AssertionCapture[] | null {
   const lookbehind = '<' === pattern[open + 2]
   const positive = '=' === pattern[open + (lookbehind ? 3 : 2)]
+  const assertionRequired = regexAssertionIsRequired(pattern, open, end)
   const contentStart = open + (lookbehind ? 4 : 3)
   const contentEnd = end - 1
   let topAlternation = false
@@ -3289,7 +3345,8 @@ function regexAssertionCaptures(
       const quantifier = pattern.slice(groupEnd, contentEnd)
       const optional = '?' === quantifier[0] || '*' === quantifier[0] ||
         /^\{0+(?:[,}])/.test(quantifier)
-      const required = positive && 0 === depth && !topAlternation && !optional
+      const required = positive && assertionRequired && 0 === depth &&
+        !topAlternation && !optional
       const rawBody = pattern.slice(bodyStart, groupEnd - 1)
       const body = required && !regexMayMatchWithoutConsuming(rawBody, flags)
         ? regexNonCapturingBody(rawBody)
@@ -3648,6 +3705,19 @@ function validateRepetitions(grammar: Grammar): void {
 
   for (const prod of grammar.productions) {
     for (const alt of prod.alts) for (const el of alt) walk(el, prod)
+    if (null != prod.probeHelper) {
+      // A probe helper re-enters itself after each vocabulary matcher.
+      // Its matchers live outside `alts`, so the ordinary sugar walk above
+      // cannot see them. Every successful probe iteration must consume.
+      for (const el of prod.probeHelper.vocabElements) {
+        if (elementMayMatchWithoutConsuming(el, nullable)) {
+          refuse(nonConsumingWitness(el) ?? el, prod,
+            `has a probe helper matcher that can succeed without consuming ` +
+            `input. An unbounded repetition must consume input on every ` +
+            `iteration.`)
+        }
+      }
+    }
     if (null != prod.tailRepeat) {
       // One close-phase iteration consumes the separator and then re-enters
       // the rule, whose open phase consumes the prefix. Both must not be

@@ -99,6 +99,24 @@ func TestRepetitionSafetyValidatesTailRepeatProgress(t *testing.T) {
 	}
 }
 
+func TestRepetitionSafetyValidatesProbeHelperProgress(t *testing.T) {
+	nullable := func() *Element { return &Element{Kind: KindRegex, Pattern: `[a-z]*`} }
+	grammar, opts := safetyEmit(&Production{
+		Name: "top",
+		Alts: []Sequence{{
+			{Kind: KindOpt, Inner: &Element{Kind: KindGroup, Alts: []Sequence{{
+				nullable(), safetyLit("!"),
+			}}}},
+			nullable(),
+		}},
+	})
+	_, err := EmitGrammarSpec(grammar, opts)
+	if err == nil || !strings.Contains(err.Error(), "probe helper matcher") ||
+		!strings.Contains(err.Error(), "without consuming input") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRepetitionSafetyAttributesCopiedLoopToSource(t *testing.T) {
 	sp := &SrcSpan{S: 20, E: 21, R: 2, C: 1}
 	grammar, opts := safetyEmit(

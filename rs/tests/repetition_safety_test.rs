@@ -106,6 +106,24 @@ fn validates_the_implicit_loop_produced_by_a_tail_repeat_rewrite() {
 }
 
 #[test]
+fn validates_the_implicit_loop_produced_by_a_probe_helper() {
+    let nullable = || Element::regex("[a-z]*", "");
+    let err = emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![
+            Element::opt(group(vec![vec![nullable(), sens_term("!")]])),
+            nullable(),
+        ]],
+    )]))
+    .expect_err("non-consuming probe helper compiled");
+    assert!(
+        err.message.contains("probe helper matcher")
+            && err.message.contains("without consuming input"),
+        "{err}"
+    );
+}
+
+#[test]
 fn attributes_a_copied_left_recursion_loop_to_its_source_rule() {
     let sp = SrcSpan::at(20, 21, 2, 1);
     let mut source = prod(
@@ -204,6 +222,24 @@ fn counts_nested_numeric_expansions_against_the_same_budget() {
         )]],
     )]))
     .expect_err("nested expansion compiled");
+    assert!(err.message.contains("repetition expansion limit"), "{err}");
+}
+
+#[test]
+fn refuses_a_huge_factored_repetition_without_overflowing() {
+    let huge = Element::rep(
+        0,
+        Some(usize::MAX),
+        group(vec![vec![sens_term("a"), sens_term("b")]]),
+    );
+    let err = emit(&Grammar::new(vec![prod(
+        "top",
+        vec![
+            vec![huge.clone(), sens_term("c")],
+            vec![huge, sens_term("d")],
+        ],
+    )]))
+    .expect_err("huge factored repetition compiled");
     assert!(err.message.contains("repetition expansion limit"), "{err}");
 }
 

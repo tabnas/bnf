@@ -85,6 +85,7 @@ describe('repetition safety', () => {
       '(?=(a)(b?))\\2',
       '(?=(a)?b)\\1',
       '(?=((?=a)))\\1',
+      '\\b(?:(?=(a)))?\\1',
     ]) {
       assert.throws(
         () => emit([{
@@ -128,6 +129,24 @@ describe('repetition safety', () => {
         ]] },
       ]),
       /rule 'X'.*unbounded tail repetition.*without consuming input/,
+    )
+  })
+
+  it('validates the implicit loop produced by a probe helper', () => {
+    const nullable = () => ({
+      kind: 'regex', pattern: '[a-z]*', flags: '',
+    })
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[
+          { kind: 'opt', inner: {
+            kind: 'group', alts: [[nullable(), lit('!')]],
+          } },
+          nullable(),
+        ]],
+      }]),
+      /probe helper matcher.*without consuming input/,
     )
   })
 

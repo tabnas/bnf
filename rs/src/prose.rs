@@ -714,6 +714,22 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
         for el in prod.alts.iter().flatten() {
             walk(el, prod, &nullable, &mut expansion)?;
         }
+        if let Some(helper) = &prod.probe_helper {
+            // Probe-helper vocabulary lives outside `alts`. Every successful
+            // matcher re-enters the helper, so a nullable matcher would loop
+            // forever at one source position.
+            for el in &helper.vocab_elements {
+                if element_may_match_without_consuming(el, &nullable) {
+                    return Err(refuse(
+                        non_consuming_witness(el, &nullable).unwrap_or(el),
+                        prod,
+                        "has a probe helper matcher that can succeed without consuming input. \
+                         An unbounded repetition must consume input on every iteration."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         if let Some(tail) = &prod.tail_repeat {
             let cycle = tail.sep.iter().chain(prod.alts[0].iter());
             if cycle.clone().next().is_some()
