@@ -116,14 +116,17 @@ describe('repetition safety', () => {
     }
   })
 
-  it('allows a required assertion whose greedy optional must consume', () => {
-    const spec = emit([{
-      name: 'top',
-      alts: [[{ kind: 'star', inner: {
-        kind: 'regex', pattern: '(?=a)a?', flags: '',
-      } }]],
-    }])
-    assert.ok(spec.rule.top)
+  it('allows a required assertion whose terminal greedy quantifier consumes', () => {
+    for (const pattern of ['(?=a)a?', '(?=a)a*', '(?=a)a{0,3}',
+      '(?=a)(?:a){0,}']) {
+      const spec = emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern, flags: '',
+        } }]],
+      }])
+      assert.ok(spec.rule.top, pattern)
+    }
 
     // At the end of a word this really can return an empty match; the
     // assertion-specific proof above must not generalise to boundaries.

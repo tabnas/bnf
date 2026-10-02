@@ -3364,12 +3364,13 @@ function regexIsSingleAtom(body: string): boolean {
 }
 
 
-// A required positive lookahead followed by the same GREEDY optional atom at
-// the end cannot return a zero-width match: the assertion proves the atom is
-// present and match priority takes it. Keep this deliberately exact. With a
-// later constraint (`(?=a)a?(?=a)`) JavaScript can backtrack the optional to
-// zero, so the general conservative skeleton must still reject it.
-function regexAssertionForcesOptionalConsumption(
+// A required positive lookahead followed by the same GREEDY atom with a
+// zero-minimum, positive-capacity quantifier at the end cannot return a
+// zero-width match: the assertion proves the atom is present and match
+// priority takes it. Keep this deliberately exact. With a later constraint
+// (`(?=a)a?(?=a)`) JavaScript can backtrack the quantifier to zero, so the
+// general conservative skeleton must still reject it.
+function regexAssertionForcesGreedyConsumption(
   pattern: string,
   flags: string,
   context: RegexContext,
@@ -3380,8 +3381,14 @@ function regexAssertionForcesOptionalConsumption(
   const body = pattern.slice(3, assertion.end - 1)
   if (!regexCaptureBodyMustConsume(body, flags)) return false
   const suffix = pattern.slice(assertion.end)
-  return (regexIsSingleAtom(body) && suffix === body + '?') ||
-    suffix === '(?:' + body + ')?'
+  if (!regexIsSingleAtom(body)) return false
+  for (const atom of [body, '(?:' + body + ')']) {
+    if (!suffix.startsWith(atom)) continue
+    const quantifier = suffix.slice(atom.length)
+    if ('?' === quantifier || '*' === quantifier ||
+        /^\{0,(?:[1-9]\d*|)\}$/.test(quantifier)) return true
+  }
+  return false
 }
 
 
@@ -3568,7 +3575,7 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
     const skeletonMayBeEmpty = new RegExp(
       '^(?:' + skeleton + ')$', flags).test('')
     return skeletonMayBeEmpty &&
-      !regexAssertionForcesOptionalConsumption(pattern, flags, context)
+      !regexAssertionForcesGreedyConsumption(pattern, flags, context)
   } catch {
     // The original expression compiled above. Replacing a lookaround can
     // still invalidate this analysis-only skeleton when a later

@@ -10,7 +10,7 @@ use indexmap::{IndexMap, IndexSet};
 use crate::annotate::exempt_alias;
 use crate::ir::{
     diag_name, refs_in, Element, EmitError, Grammar, Kind, Production, Sequence, SrcSpan,
-    TailRepeatSpec, MAX_REPEAT_EXPANSION,
+    TailRepeatSpec,
 };
 use crate::prose::{element_may_match_without_consuming, non_consuming_rules};
 
@@ -51,6 +51,10 @@ impl EliminatedGrammar {
     }
 
     pub(crate) fn validate_repetitions(&self) -> Result<(), EmitError> {
+        // Source-aware checks that must run before private provenance is
+        // discarded live here. Expansion cost is deliberately left to the
+        // ordinary post-factoring validator: factoring may remove duplicate
+        // repetitions, and only the surviving IR should spend that budget.
         validate_rewrite_repetitions(&self.grammar, &self.sources)
     }
 }
@@ -197,13 +201,12 @@ fn validate_rewrite_repetitions(
         el: &Element,
         source: &RewriteSource,
         nullable: &IndexSet<String>,
-        expansion: &mut usize,
     ) -> Result<(), EmitError> {
         if let Kind::Group { alts } = &el.kind {
             if let RewriteSourceChildren::Group(source_alts) = &source.children {
                 for (alt, source_alt) in alts.iter().zip(source_alts) {
                     for (child, child_source) in alt.iter().zip(source_alt) {
-                        walk(child, child_source, nullable, expansion)?;
+                        walk(child, child_source, nullable)?;
                     }
                 }
             }
@@ -234,40 +237,7 @@ fn validate_rewrite_repetitions(
             ));
         }
 
-        if let Kind::Rep { min, max, .. } = &el.kind {
-            let remaining = MAX_REPEAT_EXPANSION - *expansion;
-            let mut cost = 1usize;
-            let mut too_large = cost > remaining || *min > remaining.saturating_sub(cost);
-            if !too_large {
-                cost += *min;
-                match max {
-                    None => {
-                        too_large = cost >= remaining;
-                        cost += 1;
-                    }
-                    Some(max) => {
-                        let optional = max.saturating_sub(*min);
-                        too_large = optional > remaining.saturating_sub(cost) / 2;
-                        if !too_large {
-                            cost += 2 * optional;
-                        }
-                    }
-                }
-            }
-            if too_large {
-                let upper = max.map_or_else(String::new, |max| max.to_string());
-                return Err(refuse(
-                    source,
-                    format!(
-                        "exceeds the repetition expansion limit of {MAX_REPEAT_EXPANSION} \
-                         while expanding '{min}*{upper}'. Split the repetition into named \
-                         rules or lower its bounds."
-                    ),
-                ));
-            }
-            *expansion += cost;
-        }
-        walk(inner, inner_source, nullable, expansion)
+        walk(inner, inner_source, nullable)
     }
 
     for prod in &grammar.productions {
@@ -282,12 +252,11 @@ fn validate_rewrite_repetitions(
     }
 
     let nullable = non_consuming_rules(&grammar.productions);
-    let mut expansion = 0usize;
     for prod in &grammar.productions {
         let prod_sources = &sources[&prod.name];
         for (alt, source_alt) in prod.alts.iter().zip(prod_sources) {
             for (el, source) in alt.iter().zip(source_alt) {
-                walk(el, source, &nullable, &mut expansion)?;
+                walk(el, source, &nullable)?;
             }
         }
     }

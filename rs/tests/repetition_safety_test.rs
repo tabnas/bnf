@@ -220,6 +220,16 @@ fn standalone_elimination_does_not_run_emission_safety_validation() {
 }
 
 #[test]
+fn expansion_budget_counts_the_post_factoring_grammar() {
+    let repeated = Element::rep(0, Some(2050), sens_term("a"));
+    let grammar = Grammar::new(vec![prod(
+        "top",
+        vec![vec![repeated.clone()], vec![repeated]],
+    )]);
+    emit(&grammar).expect("factoring should collapse duplicate repetition cost");
+}
+
+#[test]
 fn rejects_an_inverted_repetition_range() {
     let err = emit(&Grammar::new(vec![prod(
         "top",
