@@ -695,6 +695,10 @@ pub(crate) fn set_diag_name(tag: &str) {
 /// levels later; `DIVERGENCE.md` records the difference.
 pub const MAX_ELEMENT_DEPTH: usize = 128;
 
+/// The most numeric-repetition work desugaring will allocate. One unit is
+/// one mandatory copy or one generated helper.
+pub const MAX_REPEAT_EXPANSION: usize = 8192;
+
 /// Refuse a grammar whose element nesting would overflow the stack of a
 /// pass that walks it. Measured with an explicit stack: finding the depth
 /// must not be able to overflow either.

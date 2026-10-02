@@ -586,14 +586,6 @@ fn suffix_debt_leaves_uncontested_grammars_alone() {
                 vec![sens_term("z")],
             ]),
         ),
-        // A nullable suffix commits the enclosing frame to nothing.
-        (
-            "nullable suffix",
-            hidden_left_rec(vec![
-                vec![opt(sens_term("x")), reference("A"), opt(sens_term("y"))],
-                vec![sens_term("z")],
-            ]),
-        ),
         (
             "plain direct left recursion",
             hidden_left_rec(vec![
@@ -612,6 +604,25 @@ fn suffix_debt_leaves_uncontested_grammars_alone() {
             );
         }
     }
+}
+
+#[test]
+fn suffix_debt_refuses_a_nullable_loop() {
+    // `A = ["x"] A ["y"] / "z"` can take its recursive branch while
+    // both optionals consume nothing. Its rewritten repetition cannot
+    // make progress.
+    let err = emit_grammar_spec(
+        &hidden_left_rec(vec![
+            vec![opt(sens_term("x")), reference("A"), opt(sens_term("y"))],
+            vec![sens_term("z")],
+        ]),
+        &demo(),
+    )
+    .expect_err("nullable loop compiled");
+    assert!(
+        err.message.contains("unbounded repetition") && err.message.contains("empty string"),
+        "{err}"
+    );
 }
 
 #[test]

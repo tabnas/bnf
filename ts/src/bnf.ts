@@ -35,6 +35,7 @@ export {
   termKey,
   isEffectivelyCaseSensitive,
   BUILTIN_TOKENS,
+  MAX_REPEAT_EXPANSION,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,

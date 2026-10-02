@@ -9,8 +9,9 @@
 use indexmap::{IndexMap, IndexSet};
 
 use crate::ir::{
-    builtin_token, diag_name, is_prose_name, term_key, Element, EmitError, Grammar, Kind, NodeKind,
-    Production, Sequence, BUILTIN_TOKENS, REMOVE_ALL, REMOVE_PROSE,
+    builtin_token, diag_name, is_prose_name, origin_of, term_key, Element, EmitError, Grammar,
+    Kind, NodeKind, Production, Sequence, BUILTIN_TOKENS, MAX_REPEAT_EXPANSION, REMOVE_ALL,
+    REMOVE_PROSE,
 };
 
 /// Resolve RFC 5234 `prose-val` terminals (`<free text>`).
@@ -355,13 +356,14 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
 }
 
 /// Whether a regex terminal can match nothing, decided by asking the
-/// regex. An invalid pattern answers true, the permissive direction.
+/// regex. An invalid pattern answers false so the compiler's specific
+/// invalid-regex diagnostic takes precedence over derived nullability.
 fn regex_derives_empty(pattern: &str, flags: &str) -> bool {
     let mut builder = regex::RegexBuilder::new(&format!("^(?:{pattern})$"));
     builder.case_insensitive(flags.contains('i'));
     match builder.build() {
         Ok(re) => re.is_match(""),
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -407,4 +409,95 @@ pub(crate) fn nullable_rules(prods: &[Production]) -> IndexSet<String> {
         }
     }
     nullable
+}
+
+/// Bound numeric repetition expansion and refuse unbounded loops whose item
+/// can derive epsilon. Run after structural rewrites, which may duplicate an
+/// authored repetition, and before desugaring allocates any helper.
+pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
+    let nullable = nullable_rules(&grammar.productions);
+    let mut expansion = 0usize;
+
+    fn refuse(prod: &Production, message: String) -> EmitError {
+        let rule = origin_of(prod);
+        EmitError::at(
+            format!("{}: rule '{}' {message}", diag_name(), rule),
+            rule,
+            prod.sp,
+        )
+    }
+
+    fn walk(
+        el: &Element,
+        prod: &Production,
+        nullable: &IndexSet<String>,
+        expansion: &mut usize,
+    ) -> Result<(), EmitError> {
+        if let Kind::Group { alts } = &el.kind {
+            for child in alts.iter().flatten() {
+                walk(child, prod, nullable, expansion)?;
+            }
+            return Ok(());
+        }
+
+        let inner = match &el.kind {
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => inner.as_ref(),
+            _ => return Ok(()),
+        };
+        let unbounded = matches!(&el.kind, Kind::Star { .. } | Kind::Plus { .. })
+            || matches!(&el.kind, Kind::Rep { max: None, .. });
+        if unbounded && element_derives_empty(inner, nullable) {
+            return Err(refuse(
+                prod,
+                "has an unbounded repetition whose item can match the empty string. \
+                 An unbounded repetition must consume input on every iteration."
+                    .to_string(),
+            ));
+        }
+
+        if let Kind::Rep { min, max, .. } = &el.kind {
+            let remaining = MAX_REPEAT_EXPANSION - *expansion;
+            let mut cost = 1usize;
+            let mut too_large = cost > remaining || *min > remaining.saturating_sub(cost);
+            if !too_large {
+                cost += *min;
+                match max {
+                    None => {
+                        too_large = cost >= remaining;
+                        cost += 1;
+                    }
+                    Some(max) => {
+                        let optional = max.saturating_sub(*min);
+                        too_large = optional > remaining.saturating_sub(cost) / 2;
+                        if !too_large {
+                            cost += 2 * optional;
+                        }
+                    }
+                }
+            }
+            if too_large {
+                let upper = max.map_or_else(String::new, |max| max.to_string());
+                return Err(refuse(
+                    prod,
+                    format!(
+                        "exceeds the repetition expansion limit of {MAX_REPEAT_EXPANSION} \
+                         while expanding '{min}*{upper}'. Split the repetition into named \
+                         rules or lower its bounds."
+                    ),
+                ));
+            }
+            *expansion += cost;
+        }
+        walk(inner, prod, nullable, expansion)
+    }
+
+    for prod in &grammar.productions {
+        for el in prod.alts.iter().flatten() {
+            walk(el, prod, &nullable, &mut expansion)?;
+        }
+    }
+    Ok(())
 }

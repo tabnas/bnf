@@ -524,11 +524,6 @@ func TestSuffixDebtLeavesUncontestedGrammarsAlone(t *testing.T) {
 			Sequence{ref("A"), sensTerm("w")},
 			Sequence{sensTerm("("), ref("A"), sensTerm(")")},
 			Sequence{sensTerm("z")}),
-		// A nullable suffix commits the enclosing frame to nothing, so the
-		// loop stays greedy.
-		"nullable suffix": hiddenLeftRec(
-			Sequence{optOf(sensTerm("x")), ref("A"), optOf(sensTerm("y"))},
-			Sequence{sensTerm("z")}),
 		"plain direct left recursion": hiddenLeftRec(
 			Sequence{ref("A"), sensTerm("y")},
 			Sequence{sensTerm("z")}),
@@ -540,6 +535,19 @@ func TestSuffixDebtLeavesUncontestedGrammarsAlone(t *testing.T) {
 					name, a.N, a.C)
 			}
 		}
+	}
+}
+
+func TestSuffixDebtRefusesANullableLoop(t *testing.T) {
+	// `A = ["x"] A ["y"] / "z"` can take its recursive branch while
+	// both optionals consume nothing. Its rewritten repetition cannot
+	// make progress.
+	_, err := EmitGrammarSpec(hiddenLeftRec(
+		Sequence{optOf(sensTerm("x")), ref("A"), optOf(sensTerm("y"))},
+		Sequence{sensTerm("z")}), &ConvertOptions{Tag: "demo"})
+	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") ||
+		!strings.Contains(err.Error(), "empty string") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

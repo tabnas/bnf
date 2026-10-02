@@ -3090,15 +3090,14 @@ function cloneGrammar(grammar: Grammar): Grammar {
 //
 // Decided by asking the regex rather than reading the pattern: `[a-z]*`,
 // `a|` and `(?:)` all match the empty string, and pattern-inspection
-// will not keep up with that. An invalid pattern answers true — the
-// permissive direction, because a wrong `false` here rejects input the
-// grammar does admit, while a wrong `true` only restores the old
-// accept-everything behaviour for that one grammar.
+// will not keep up with that. An invalid pattern answers false so this
+// analysis does not replace the compiler's specific invalid-regex
+// diagnostic with a derived nullability error.
 function regexDerivesEmpty(pattern: string, flags: string): boolean {
   try {
     return new RegExp('^(?:' + pattern + ')$', flags).test('')
   } catch {
-    return true
+    return false
   }
 }
 
@@ -3174,6 +3173,70 @@ function nullableRules(prods: Production[]): Set<string> {
     }
   }
   return nullable
+}
+
+
+// The most work numeric repetition may add before desugaring refuses the
+// grammar. One unit is one mandatory copy or one generated helper; a finite
+// optional copy costs its group and optional helpers. This admits the two
+// 998-bound repetitions in RFC 5322 while refusing `1*5000` before it can
+// allocate roughly ten thousand rules (tabnas/bnf#86).
+const MAX_REPEAT_EXPANSION = 8192
+
+
+// Repetition is the only sugar whose authored numeric bound can turn a small
+// IR into an arbitrarily large compiler product. Validate it after the
+// structural rewrites (which may duplicate an authored repetition) but before
+// desugar allocates any helper. The same walk also refuses an unbounded loop
+// whose item derives epsilon: such a loop can re-enter at the same input
+// position forever (tabnas/bnf#87).
+function validateRepetitions(grammar: Grammar): void {
+  const nullable = nullableRules(grammar.productions)
+  let expansion = 0
+
+  const refuse = (prod: Production, message: string): never => {
+    const rule = originOf(prod)
+    throw new EmitError(
+      `${diagName()}: rule '${rule}' ${message}`,
+      { rule, sp: prod.sp })
+  }
+
+  const walk = (el: Element, prod: Production): void => {
+    if (el.kind === 'group') {
+      for (const alt of el.alts) for (const child of alt) walk(child, prod)
+      return
+    }
+    if (el.kind !== 'opt' && el.kind !== 'star' &&
+        el.kind !== 'plus' && el.kind !== 'rep') return
+
+    const unbounded = el.kind === 'star' || el.kind === 'plus' ||
+      (el.kind === 'rep' && el.max === Infinity)
+    if (unbounded && elementDerivesEmpty(el.inner, nullable)) {
+      refuse(prod,
+        `has an unbounded repetition whose item can match the empty string. ` +
+        `An unbounded repetition must consume input on every iteration.`)
+    }
+
+    if (el.kind === 'rep') {
+      const mandatory = Math.max(0, el.min)
+      const cost = el.max === Infinity
+        ? 2 + mandatory
+        : 1 + mandatory + 2 * Math.max(0, el.max - el.min)
+      if (!Number.isFinite(cost) || cost > MAX_REPEAT_EXPANSION - expansion) {
+        const upper = el.max === Infinity ? '' : String(el.max)
+        refuse(prod,
+          `exceeds the repetition expansion limit of ` +
+          `${MAX_REPEAT_EXPANSION} while expanding '${el.min}*${upper}'. ` +
+          `Split the repetition into named rules or lower its bounds.`)
+      }
+      expansion += cost
+    }
+    walk(el.inner, prod)
+  }
+
+  for (const prod of grammar.productions) {
+    for (const alt of prod.alts) for (const el of alt) walk(el, prod)
+  }
 }
 
 
@@ -3321,6 +3384,7 @@ function emitGrammarSpec(
   // before tail-repeat detection and desugaring.
   grammar = leftFactor(grammar)
   grammar = rewriteTailRepeats(grammar, start)
+  validateRepetitions(grammar)
   grammar = desugar(grammar)
 
   // Both are named AFTER desugar, because both are keyed by the rule
@@ -7021,6 +7085,7 @@ export {
   termKey,
   isEffectivelyCaseSensitive,
   BUILTIN_TOKENS,
+  MAX_REPEAT_EXPANSION,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,

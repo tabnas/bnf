@@ -78,10 +78,9 @@ const loopCounter = "rep"
 //
 // Decided by asking the regex rather than reading the pattern: `[a-z]*`,
 // `a|` and `(?:)` all match the empty string, and pattern-inspection will
-// not keep up with that. A pattern this port cannot compile answers true
-// — the permissive direction, because a wrong false here rejects input
-// the grammar does admit, while a wrong true only restores the old
-// accept-everything behaviour for that one grammar.
+// not keep up with that. A pattern this port cannot compile answers false
+// so this analysis does not replace the compiler's specific invalid-regex
+// diagnostic with a derived nullability error.
 func regexDerivesEmpty(pattern, flags string) bool {
 	src := "^(?:" + pattern + ")$"
 	if strings.Contains(flags, "i") {
@@ -89,7 +88,7 @@ func regexDerivesEmpty(pattern, flags string) bool {
 	}
 	re, err := regexp.Compile(src)
 	if err != nil {
-		return true
+		return false
 	}
 	return re.MatchString("")
 }
@@ -173,6 +172,101 @@ func nullableRules(prods []*Production) map[string]bool {
 		}
 	}
 	return nullable
+}
+
+// validateRepetitions runs after structural rewrites, which may duplicate an
+// authored repetition, and before desugar allocates any helper. It bounds the
+// expansion a numeric repetition can request and rejects an unbounded loop
+// whose item derives epsilon, since that loop can re-enter without advancing.
+func validateRepetitions(grammar *Grammar) *EmitError {
+	nullable := nullableRules(grammar.Productions)
+	expansion := 0
+
+	refuse := func(prod *Production, message string) *EmitError {
+		rule := originOf(prod)
+		return &EmitError{
+			Rule: rule, Sp: prod.Sp,
+			Message: fmt.Sprintf("%s: rule '%s' %s", diagName(), rule, message),
+		}
+	}
+
+	var walk func(*Element, *Production) *EmitError
+	walk = func(el *Element, prod *Production) *EmitError {
+		if el == nil {
+			return nil
+		}
+		if el.Kind == KindGroup {
+			for _, alt := range el.Alts {
+				for _, child := range alt {
+					if err := walk(child, prod); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if el.Kind != KindOpt && el.Kind != KindStar &&
+			el.Kind != KindPlus && el.Kind != KindRep {
+			return nil
+		}
+
+		unbounded := el.Kind == KindStar || el.Kind == KindPlus ||
+			(el.Kind == KindRep && el.Max == MaxInfinity)
+		if unbounded && elementDerivesEmpty(el.Inner, nullable) {
+			return refuse(prod,
+				"has an unbounded repetition whose item can match the empty string. "+
+					"An unbounded repetition must consume input on every iteration.")
+		}
+
+		if el.Kind == KindRep {
+			mandatory := el.Min
+			if mandatory < 0 {
+				mandatory = 0
+			}
+			remaining := MaxRepeatExpansion - expansion
+			cost := 1
+			tooLarge := mandatory > remaining-cost
+			if !tooLarge {
+				cost += mandatory
+				if el.Max == MaxInfinity {
+					tooLarge = cost >= remaining
+					cost++
+				} else {
+					optional := el.Max - el.Min
+					if optional < 0 {
+						optional = 0
+					}
+					tooLarge = optional > (remaining-cost)/2
+					if !tooLarge {
+						cost += 2 * optional
+					}
+				}
+			}
+			if tooLarge {
+				upper := fmt.Sprintf("%d", el.Max)
+				if el.Max == MaxInfinity {
+					upper = ""
+				}
+				return refuse(prod, fmt.Sprintf(
+					"exceeds the repetition expansion limit of %d while expanding '%d*%s'. "+
+						"Split the repetition into named rules or lower its bounds.",
+					MaxRepeatExpansion, el.Min, upper))
+			}
+			expansion += cost
+		}
+		return walk(el.Inner, prod)
+	}
+
+	for _, prod := range grammar.Productions {
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if err := walk(el, prod); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.GrammarSpec, err error) {
@@ -328,6 +422,9 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// before tail-repeat detection and desugaring.
 	grammar = leftFactor(grammar)
 	grammar = rewriteTailRepeats(grammar, start)
+	if err := validateRepetitions(grammar); err != nil {
+		return nil, err
+	}
 	grammar = desugar(grammar)
 
 	// Both are named AFTER desugar, because both are keyed by the rule

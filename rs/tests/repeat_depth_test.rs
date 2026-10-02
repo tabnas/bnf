@@ -538,18 +538,15 @@ fn takes_a_repetition_member_as_its_text_at_one_depth() {
 }
 
 #[test]
-fn ends_a_star_of_something_that_can_match_nothing() {
-    let _one = exclusive();
-    // `*[x]` is `*x`: an iteration whose item matched nothing makes no
-    // progress, so the loop does not take one. The push chain took it
-    // forever, and failed when the engine's step budget ran out.
-    let g = vec![prod("doc", vec![vec![star(opt(lit("x"))), lit(";")]])];
-    let p = Probe::new(g, false, false);
-    assert_eq!(p.parse(";").out["src"], json!(";"));
-    assert_eq!(p.parse("xxx;").out["src"], json!("xxx;"));
-    assert_eq!(
-        p.parse(&(times(N, "x", "") + ";")).deepest,
-        p.parse("x;").deepest
+fn refuses_a_star_of_something_that_can_match_nothing() {
+    // `*[x]` has an iteration that can match without progress. Refuse it
+    // before the engine has to detect the non-advancing loop.
+    let grammar = Grammar::new(vec![prod("doc", vec![vec![star(opt(lit("x"))), lit(";")]])]);
+    let err = emit_grammar_spec(&grammar, &ConvertOptions::tag("depth"))
+        .expect_err("nullable star compiled");
+    assert!(
+        err.message.contains("unbounded repetition") && err.message.contains("empty string"),
+        "{err}"
     );
 }
 

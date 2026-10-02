@@ -318,15 +318,11 @@ describe('repetition depth', () => {
     }
   })
 
-  it('ends a star of something that can match nothing', () => {
-    // `*[x]` is `*x`: an iteration whose item matched nothing makes no
-    // progress, so the loop does not take one. The push chain took it
-    // forever, and failed when the engine's step budget ran out.
+  it('refuses a star of something that can match nothing', () => {
+    // `*[x]` has an iteration that can match without progress. Refuse it
+    // before the engine has to detect the non-advancing loop.
     const g = [prod('doc', [star({ kind: 'opt', inner: lit('x') }), lit(';')])]
-    const p = parser(g)
-    assert.equal(p.parse(';').out.src, ';')
-    assert.equal(p.parse('xxx;').out.src, 'xxx;')
-    assert.equal(p.parse(times(N, 'x') + ';').deepest, p.parse('x;').deepest)
+    assert.throws(() => parser(g), /unbounded repetition.*empty string/)
   })
 
   for (const [mode, opts] of [['closures', {}], ['builtins', { builtins: true }]]) {

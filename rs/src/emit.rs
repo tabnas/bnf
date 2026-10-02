@@ -38,6 +38,7 @@ use crate::leftrec::rewrite_tail_repeats;
 use crate::probe::rewrite_probe_dispatches;
 use crate::prose::{
     lift_literal_tokens, normalize_builtin_tokens, nullable_rules, resolve_prose_terminals,
+    validate_repetitions,
 };
 use crate::ranges::{
     char_ranges_overlap, class_analysis, class_pattern, code_unit_reach, fold_case_ranges,
@@ -734,6 +735,7 @@ pub fn emit_grammar_spec(
     // tail-repeat detection and desugaring.
     let grammar = left_factor(&grammar)?;
     let grammar = rewrite_tail_repeats(grammar, &start);
+    validate_repetitions(&grammar)?;
     let mut grammar = desugar(&grammar);
 
     // Both are named AFTER desugar, because both are keyed by the rule

@@ -142,6 +142,10 @@ type Element struct {
 // MaxInfinity stands in for the TS `Infinity` upper bound on repetition.
 const MaxInfinity = 1 << 30
 
+// MaxRepeatExpansion is the most numeric-repetition work desugaring will
+// allocate. One unit is a mandatory copy or a generated helper.
+const MaxRepeatExpansion = 8192
+
 type Sequence []*Element
 
 // ProbeDispatchSpec configures a synthesised dispatcher production for
