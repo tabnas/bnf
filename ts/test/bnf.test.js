@@ -195,6 +195,12 @@ describe('bnf', () => {
       ],
     }
     const out = eliminateLeftRecursion(grammar)
+    for (const prod of out.productions) {
+      for (const alt of prod.alts) for (const el of alt) {
+        assert.deepStrictEqual(Object.getOwnPropertySymbols(el), [],
+          'the public pass must not expose rewrite provenance')
+      }
+    }
     const expr = out.productions.find((p) => p.name === 'expr')
     const stillLeftRec = expr.alts.some(
       (alt) => alt[0] && alt[0].kind === 'ref' && alt[0].name === 'expr')

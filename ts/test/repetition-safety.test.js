@@ -116,6 +116,43 @@ describe('repetition safety', () => {
     }
   })
 
+  it('allows a required assertion whose greedy optional must consume', () => {
+    const spec = emit([{
+      name: 'top',
+      alts: [[{ kind: 'star', inner: {
+        kind: 'regex', pattern: '(?=a)a?', flags: '',
+      } }]],
+    }])
+    assert.ok(spec.rule.top)
+
+    // At the end of a word this really can return an empty match; the
+    // assertion-specific proof above must not generalise to boundaries.
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern: '\\b[a-z]?', flags: '',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
+  it('fails closed on deeply nested assertion captures in bounded work', () => {
+    let body = 'a'
+    for (let i = 0; i < 700; i++) body = `(?=(${body}))a`
+    const pattern = `(?=(${body}))\\1`
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern, flags: 'u',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
   it('analyzes many sequential assertions without rescanning the pattern', () => {
     const pattern = '(?=a)'.repeat(10000)
     assert.throws(

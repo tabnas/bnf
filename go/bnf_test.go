@@ -301,6 +301,26 @@ func TestEliminatesLeftRecursion(t *testing.T) {
 		{Name: "num", Alts: []Sequence{{tok("#NR")}}},
 	}})
 	for _, p := range out.Productions {
+		var checkPublic func(*Element)
+		checkPublic = func(el *Element) {
+			if el == nil {
+				return
+			}
+			if el.sourceRule != "" || el.sourceSp != nil {
+				t.Errorf("public elimination leaked rewrite provenance on %#v", el)
+			}
+			checkPublic(el.Inner)
+			for _, groupAlt := range el.Alts {
+				for _, child := range groupAlt {
+					checkPublic(child)
+				}
+			}
+		}
+		for _, alt := range p.Alts {
+			for _, el := range alt {
+				checkPublic(el)
+			}
+		}
 		if p.Name != "expr" {
 			continue
 		}

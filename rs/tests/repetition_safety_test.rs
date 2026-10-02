@@ -4,7 +4,8 @@ mod common;
 
 use common::{group, prod, reference, sens_term};
 use tabnas_bnf::{
-    emit_grammar_spec, ConvertOptions, Element, Grammar, Kind, SrcSpan, MAX_REPEAT_EXPANSION,
+    eliminate_left_recursion, emit_grammar_spec, ConvertOptions, Element, Grammar, Kind, SrcSpan,
+    MAX_REPEAT_EXPANSION,
 };
 
 fn emit(grammar: &Grammar) -> Result<tabnas_bnf::GrammarSpec, tabnas_bnf::EmitError> {
@@ -180,6 +181,42 @@ fn attributes_a_nullable_grouped_tail_to_the_alternative_that_made_it_nullable()
     .expect_err("nullable grouped tail compiled");
     assert_eq!(err.rule.as_deref(), Some("C"));
     assert_eq!(err.sp, Some(csp));
+}
+
+#[test]
+fn attributes_an_authored_repetition_copied_by_paull_substitution() {
+    let bsp = SrcSpan::at(60, 61, 6, 1);
+    let mut b = prod(
+        "B",
+        vec![vec![
+            Element::star(Element::opt(sens_term("x"))),
+            sens_term("b"),
+        ]],
+    );
+    b.sp = Some(bsp);
+    let err = emit(&Grammar::new(vec![
+        prod("top", vec![vec![reference("B"), sens_term("!")]]),
+        b,
+    ]))
+    .expect_err("copied nullable repetition compiled");
+    assert_eq!(err.rule.as_deref(), Some("B"));
+    assert_eq!(err.sp, Some(bsp));
+}
+
+#[test]
+fn standalone_elimination_does_not_run_emission_safety_validation() {
+    let grammar = Grammar::new(vec![prod(
+        "A",
+        vec![
+            vec![reference("A"), Element::opt(sens_term("x"))],
+            vec![sens_term("z")],
+        ],
+    )]);
+    let out = eliminate_left_recursion(&grammar).expect("transformation-only pass");
+    assert!(matches!(
+        out.productions[0].alts[0][1].kind,
+        Kind::Star { .. }
+    ));
 }
 
 #[test]

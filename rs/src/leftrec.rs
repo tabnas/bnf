@@ -10,7 +10,7 @@ use indexmap::{IndexMap, IndexSet};
 use crate::annotate::exempt_alias;
 use crate::ir::{
     diag_name, refs_in, Element, EmitError, Grammar, Kind, Production, Sequence, SrcSpan,
-    TailRepeatSpec,
+    TailRepeatSpec, MAX_REPEAT_EXPANSION,
 };
 use crate::prose::{element_may_match_without_consuming, non_consuming_rules};
 
@@ -34,8 +34,26 @@ enum RewriteSourceChildren {
 }
 
 type RewriteSources = IndexMap<String, Vec<Vec<RewriteSource>>>;
-type RewriteLoop = (Sequence, Vec<RewriteSource>);
-type DirectRewrite = (Production, Vec<Vec<RewriteSource>>, Vec<RewriteLoop>);
+type DirectRewrite = (Production, Vec<Vec<RewriteSource>>);
+
+/// The private result used by full emission. The public standalone pass
+/// returns only `grammar`, preserving its historical transformation-only
+/// contract; emission first validates repetitions while this source tree is
+/// still available.
+pub(crate) struct EliminatedGrammar {
+    grammar: Grammar,
+    sources: RewriteSources,
+}
+
+impl EliminatedGrammar {
+    pub(crate) fn into_grammar(self) -> Grammar {
+        self.grammar
+    }
+
+    pub(crate) fn validate_repetitions(&self) -> Result<(), EmitError> {
+        validate_rewrite_repetitions(&self.grammar, &self.sources)
+    }
+}
 
 fn authored_source(el: &Element, prod: &Production) -> RewriteSource {
     let children = match &el.kind {
@@ -125,6 +143,155 @@ fn non_consuming_source<'a>(
         ) => non_consuming_source(inner, inner_source, nullable).or(Some(source)),
         _ => Some(source),
     }
+}
+
+fn validate_rewrite_repetitions(
+    grammar: &Grammar,
+    sources: &RewriteSources,
+) -> Result<(), EmitError> {
+    fn refuse(source: &RewriteSource, message: String) -> EmitError {
+        EmitError::at(
+            format!("{}: rule '{}' {message}", diag_name(), source.rule),
+            &source.rule,
+            source.sp,
+        )
+    }
+
+    fn validate_bounds(el: &Element, source: &RewriteSource) -> Result<(), EmitError> {
+        if let Kind::Group { alts } = &el.kind {
+            if let RewriteSourceChildren::Group(source_alts) = &source.children {
+                for (alt, source_alt) in alts.iter().zip(source_alts) {
+                    for (child, child_source) in alt.iter().zip(source_alt) {
+                        validate_bounds(child, child_source)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if let Kind::Rep { min, max, .. } = &el.kind {
+            if max.is_some_and(|max| max < *min) {
+                return Err(refuse(
+                    source,
+                    format!(
+                        "has invalid repetition bounds '{}*{}'. Bounds must be non-negative \
+                         integers and the upper bound must not be lower than the lower bound.",
+                        min,
+                        max.expect("checked as present")
+                    ),
+                ));
+            }
+        }
+        match (&el.kind, &source.children) {
+            (
+                Kind::Opt { inner }
+                | Kind::Star { inner, .. }
+                | Kind::Plus { inner }
+                | Kind::Rep { inner, .. },
+                RewriteSourceChildren::Inner(inner_source),
+            ) => validate_bounds(inner, inner_source),
+            _ => Ok(()),
+        }
+    }
+
+    fn walk(
+        el: &Element,
+        source: &RewriteSource,
+        nullable: &IndexSet<String>,
+        expansion: &mut usize,
+    ) -> Result<(), EmitError> {
+        if let Kind::Group { alts } = &el.kind {
+            if let RewriteSourceChildren::Group(source_alts) = &source.children {
+                for (alt, source_alt) in alts.iter().zip(source_alts) {
+                    for (child, child_source) in alt.iter().zip(source_alt) {
+                        walk(child, child_source, nullable, expansion)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        let inner = match &el.kind {
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => inner.as_ref(),
+            _ => return Ok(()),
+        };
+        let inner_source = match &source.children {
+            RewriteSourceChildren::Inner(inner_source) => inner_source.as_ref(),
+            _ => source,
+        };
+        let unbounded = matches!(&el.kind, Kind::Star { .. } | Kind::Plus { .. })
+            || matches!(&el.kind, Kind::Rep { max: None, .. });
+        if unbounded && element_may_match_without_consuming(inner, nullable) {
+            let witness =
+                non_consuming_source(inner, inner_source, nullable).unwrap_or(inner_source);
+            return Err(refuse(
+                witness,
+                "has an unbounded repetition whose item can succeed without consuming input. \
+                 An unbounded repetition must consume input on every iteration."
+                    .to_string(),
+            ));
+        }
+
+        if let Kind::Rep { min, max, .. } = &el.kind {
+            let remaining = MAX_REPEAT_EXPANSION - *expansion;
+            let mut cost = 1usize;
+            let mut too_large = cost > remaining || *min > remaining.saturating_sub(cost);
+            if !too_large {
+                cost += *min;
+                match max {
+                    None => {
+                        too_large = cost >= remaining;
+                        cost += 1;
+                    }
+                    Some(max) => {
+                        let optional = max.saturating_sub(*min);
+                        too_large = optional > remaining.saturating_sub(cost) / 2;
+                        if !too_large {
+                            cost += 2 * optional;
+                        }
+                    }
+                }
+            }
+            if too_large {
+                let upper = max.map_or_else(String::new, |max| max.to_string());
+                return Err(refuse(
+                    source,
+                    format!(
+                        "exceeds the repetition expansion limit of {MAX_REPEAT_EXPANSION} \
+                         while expanding '{min}*{upper}'. Split the repetition into named \
+                         rules or lower its bounds."
+                    ),
+                ));
+            }
+            *expansion += cost;
+        }
+        walk(inner, inner_source, nullable, expansion)
+    }
+
+    for prod in &grammar.productions {
+        let prod_sources = sources
+            .get(&prod.name)
+            .expect("every rewrite production has source metadata");
+        for (alt, source_alt) in prod.alts.iter().zip(prod_sources) {
+            for (el, source) in alt.iter().zip(source_alt) {
+                validate_bounds(el, source)?;
+            }
+        }
+    }
+
+    let nullable = non_consuming_rules(&grammar.productions);
+    let mut expansion = 0usize;
+    for prod in &grammar.productions {
+        let prod_sources = &sources[&prod.name];
+        for (alt, source_alt) in prod.alts.iter().zip(prod_sources) {
+            for (el, source) in alt.iter().zip(source_alt) {
+                walk(el, source, &nullable, &mut expansion)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
@@ -236,7 +403,7 @@ fn expand_nullable_left_prefixes(
 /// Returns a new grammar carrying only productions, in the caller's
 /// declared order. The input is not modified.
 pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError> {
-    eliminate_left_recursion_keeping(grammar, &IndexSet::new())
+    eliminate_left_recursion_keeping(grammar, &IndexSet::new()).map(EliminatedGrammar::into_grammar)
 }
 
 /// [`eliminate_left_recursion`] with a set of productions that are never
@@ -247,11 +414,10 @@ pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError>
 pub(crate) fn eliminate_left_recursion_keeping(
     grammar: &Grammar,
     keep: &IndexSet<String>,
-) -> Result<Grammar, EmitError> {
+) -> Result<EliminatedGrammar, EmitError> {
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
-    let mut rewrite_loops: Vec<RewriteLoop> = Vec::new();
 
     let copies: Vec<Production> = grammar
         .productions
@@ -335,11 +501,10 @@ pub(crate) fn eliminate_left_recursion_keeping(
             }
         }
         let name = prods[i].name.clone();
-        let (next, next_sources, loops) =
+        let (next, next_sources) =
             eliminate_direct_left_rec(&prods[i], &sources[&name], &mut debt_names)?;
         prods[i] = next;
         sources.insert(name, next_sources);
-        rewrite_loops.extend(loops);
     }
 
     // Restore the caller's declared order, so the start rule still ends
@@ -354,39 +519,12 @@ pub(crate) fn eliminate_left_recursion_keeping(
     }
     ordered.extend(by_name.into_values());
 
-    // Validate synthesized loops once, after Paull's algorithm reaches its
-    // final grammar. One nullability fixed point serves every rewritten rule;
-    // the private sidecar still identifies the copied source element.
-    let nullable = non_consuming_rules(&ordered);
-    for (tail, tail_sources) in rewrite_loops {
-        if tail
-            .iter()
-            .all(|el| element_may_match_without_consuming(el, &nullable))
-        {
-            let (witness, source) = tail
-                .iter()
-                .zip(&tail_sources)
-                .find_map(|(el, source)| {
-                    non_consuming_source(el, source, &nullable).map(|found| (el, found))
-                })
-                .expect("a non-consuming tail has a witness");
-            return Err(EmitError::at(
-                format!(
-                    "{}: rule '{}' has an unbounded repetition whose item can succeed without \
-                     consuming input. An unbounded repetition must consume input on every \
-                     iteration.",
-                    diag_name(),
-                    source.rule
-                ),
-                &source.rule,
-                source.sp.or(witness.sp),
-            ));
-        }
-    }
-
-    Ok(Grammar {
-        productions: ordered,
-        ..Default::default()
+    Ok(EliminatedGrammar {
+        grammar: Grammar {
+            productions: ordered,
+            ..Default::default()
+        },
+        sources,
     })
 }
 
@@ -721,7 +859,7 @@ fn eliminate_direct_left_rec(
         .collect();
     if non_trivial.is_empty() {
         let (seed_alts, seed_sources): (Vec<_>, Vec<_>) = seeds.into_iter().unzip();
-        return Ok((prod.rebuilt(seed_alts), seed_sources, Vec::new()));
+        return Ok((prod.rebuilt(seed_alts), seed_sources));
     }
     if seeds.is_empty() {
         return Err(EmitError::at(
@@ -738,12 +876,6 @@ fn eliminate_direct_left_rec(
     let (seeds, seed_sources): (Vec<Sequence>, Vec<Vec<RewriteSource>>) = seeds.into_iter().unzip();
     let (non_trivial, tail_sources): (Vec<Sequence>, Vec<Vec<RewriteSource>>) =
         non_trivial.into_iter().unzip();
-    let loops = non_trivial
-        .iter()
-        .cloned()
-        .zip(tail_sources.iter().cloned())
-        .collect();
-
     let seed_element = if seeds.len() == 1 && seeds[0].len() == 1 {
         seeds[0][0].clone()
     } else {
@@ -794,7 +926,6 @@ fn eliminate_direct_left_rec(
     Ok((
         prod.rebuilt(vec![vec![seed_element, star]]),
         vec![vec![seed_source, tail_source]],
-        loops,
     ))
 }
 

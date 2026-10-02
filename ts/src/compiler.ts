@@ -1071,7 +1071,7 @@ function expandNullableLeftPrefixes(prods: Production[]): Production[] {
 }
 
 
-function eliminateLeftRecursion(
+function eliminateLeftRecursionKeeping(
   grammar: Grammar,
   // The token classes (`ConvertOptions.tokenClasses`). A leading
   // reference to one is substituted, exactly where any other leading
@@ -1181,6 +1181,31 @@ function eliminateLeftRecursion(
   for (const p of byName.values()) ordered.push(p)
 
   return { productions: ordered }
+}
+
+
+// The standalone pass is public for inspection and tests. Rewrite provenance
+// belongs only to the full emission pipeline: remove the private symbols from
+// its already-private clone before exposing the transformed grammar, so deep
+// equality and object spread still observe only the documented IR.
+function eliminateLeftRecursion(
+  grammar: Grammar,
+  keep: Set<string> = new Set(),
+): Grammar {
+  const out = eliminateLeftRecursionKeeping(grammar, keep)
+  const strip = (el: Element): void => {
+    delete el[ELEMENT_SOURCE]
+    if ('group' === el.kind) {
+      for (const alt of el.alts) for (const child of alt) strip(child)
+    } else if ('opt' === el.kind || 'star' === el.kind ||
+               'plus' === el.kind || 'rep' === el.kind) {
+      strip(el.inner)
+    }
+  }
+  for (const prod of out.productions) {
+    for (const alt of prod.alts) for (const el of alt) strip(el)
+  }
+  return out
 }
 
 
@@ -3290,6 +3315,76 @@ function regexNonCapturingBody(body: string): string | null {
 }
 
 
+// A capture body can be substituted for a later backreference only when its
+// consumption is locally provable. Assertions, anchors and word boundaries
+// can succeed at one source position without matching the wholly empty input;
+// leave those bodies unproved instead of recursively reparsing a nested body
+// at every capture depth. Bodies without zero-width syntax are decided by the
+// native empty-match check in one pass over each disjoint direct capture.
+function regexCaptureBodyMustConsume(body: string, flags: string): boolean {
+  let inClass = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if ('\\' === ch) {
+      const next = body[++i]
+      if (!inClass && ('b' === next || 'B' === next)) return false
+      continue
+    }
+    if (inClass) {
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; continue }
+    if ('^' === ch || '$' === ch) return false
+    if ('(' === ch && '?' === body[i + 1] &&
+        ('=' === body[i + 2] || '!' === body[i + 2] ||
+         ('<' === body[i + 2] &&
+          ('=' === body[i + 3] || '!' === body[i + 3])))) return false
+  }
+  return !regexDerivesEmpty(body, flags)
+}
+
+
+function regexIsSingleAtom(body: string): boolean {
+  if (1 === [...body].length && !/[\\^$()[\]{}*+?|]/.test(body)) return true
+  if ('.' === body) return true
+  if ('[' === body[0]) {
+    let escaped = false
+    for (let i = 1; i < body.length; i++) {
+      if (escaped) { escaped = false; continue }
+      if ('\\' === body[i]) { escaped = true; continue }
+      if (']' === body[i]) return i === body.length - 1
+    }
+    return false
+  }
+  if ('(' === body[0]) {
+    return regexContext(body)?.groups.get(0)?.end === body.length
+  }
+  return /^\\(?:[dDsSwWfnrtv.]|c[A-Za-z]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|u\{[0-9A-Fa-f]+\}|[pP]\{[^}]+\})$/.test(body)
+}
+
+
+// A required positive lookahead followed by the same GREEDY optional atom at
+// the end cannot return a zero-width match: the assertion proves the atom is
+// present and match priority takes it. Keep this deliberately exact. With a
+// later constraint (`(?=a)a?(?=a)`) JavaScript can backtrack the optional to
+// zero, so the general conservative skeleton must still reject it.
+function regexAssertionForcesOptionalConsumption(
+  pattern: string,
+  flags: string,
+  context: RegexContext,
+): boolean {
+  if (!pattern.startsWith('(?=')) return false
+  const assertion = context.groups.get(0)
+  if (null == assertion || !assertion.required || assertion.optional) return false
+  const body = pattern.slice(3, assertion.end - 1)
+  if (!regexCaptureBodyMustConsume(body, flags)) return false
+  const suffix = pattern.slice(assertion.end)
+  return (regexIsSingleAtom(body) && suffix === body + '?') ||
+    suffix === '(?:' + body + ')?'
+}
+
+
 // Captures inside a positive assertion can be read by a later backreference.
 // Removing the assertion and leaving an empty placeholder gets consumption
 // wrong in both directions. Record the capture body when participation is
@@ -3356,7 +3451,7 @@ function regexAssertionCaptures(
       const required = positive && assertionRequired && 0 === depth &&
         !topAlternation && !optional
       const rawBody = pattern.slice(bodyStart, groupEnd - 1)
-      const body = required && !regexMayMatchWithoutConsuming(rawBody, flags)
+      const body = required && regexCaptureBodyMustConsume(rawBody, flags)
         ? regexNonCapturingBody(rawBody)
         : ''
       captures.push({ index, name, body: body ?? '' })
@@ -3470,7 +3565,10 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
   }
   if (!changed) return false
   try {
-    return new RegExp('^(?:' + skeleton + ')$', flags).test('')
+    const skeletonMayBeEmpty = new RegExp(
+      '^(?:' + skeleton + ')$', flags).test('')
+    return skeletonMayBeEmpty &&
+      !regexAssertionForcesOptionalConsumption(pattern, flags, context)
   } catch {
     // The original expression compiled above. Replacing a lookaround can
     // still invalidate this analysis-only skeleton when a later
@@ -3887,7 +3985,7 @@ function emitGrammarSpec(
   // ambiguous `[X D] Y` optional-prefix patterns and rewrite them
   // into probe-dispatch helpers; finally flatten any EBNF sugar
   // (`?`, `*`, `+`, grouping) into plain ABNF.
-  grammar = eliminateLeftRecursion(grammar, classNames)
+  grammar = eliminateLeftRecursionKeeping(grammar, classNames)
   grammar = rewriteProbeDispatches(grammar)
   // Left factoring runs after the probe rewriter (so `[X D] Y`
   // patterns are recognised in their original alternatives) and

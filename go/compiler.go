@@ -198,7 +198,28 @@ func expandNullableLeftPrefixes(prods []*Production) []*Production {
 }
 
 func eliminateLeftRecursion(grammar *Grammar) *Grammar {
-	return eliminateLeftRecursionKeeping(grammar, nil)
+	out := eliminateLeftRecursionKeeping(grammar, nil)
+	var strip func(*Element)
+	strip = func(el *Element) {
+		if el == nil {
+			return
+		}
+		el.sourceRule, el.sourceSp = "", nil
+		strip(el.Inner)
+		for _, alt := range el.Alts {
+			for _, child := range alt {
+				strip(child)
+			}
+		}
+	}
+	for _, prod := range out.Productions {
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				strip(el)
+			}
+		}
+	}
+	return out
 }
 
 func cloneElementForRewrite(el *Element, prod *Production) *Element {

@@ -729,7 +729,9 @@ pub fn emit_grammar_spec(
         IndexSet::new()
     };
 
-    let grammar = eliminate_left_recursion_keeping(&grammar, &class_names)?;
+    let eliminated = eliminate_left_recursion_keeping(&grammar, &class_names)?;
+    eliminated.validate_repetitions()?;
+    let grammar = eliminated.into_grammar();
     let grammar = rewrite_probe_dispatches(&grammar)?;
     // Left factoring runs after the probe rewriter and before
     // tail-repeat detection and desugaring.
