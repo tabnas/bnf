@@ -389,34 +389,18 @@ func TestRepeatDepthIsOneItems(t *testing.T) {
 //
 // Time over a repetition is the depth of the loop plus the cost of growing
 // the text of the node it accumulates into. The first is this package's
-// and is constant. The second belongs to whatever grows `src`: in closure
-// mode that is this package's own tree builders (refRegistry.node, capture
-// and fold), which append in place (srcAcc), so closure mode is held to
-// linear time here. In builtins mode it is the engine's `@node$`,
-// `@capture$` and `@fold$`, and the Go engine grows `src` by concatenation,
-// which copies all of it on every append. That is quadratic in the engine,
-// not in the loop: measured on `*item`, a hundred thousand items cost 35
-// times what ten thousand do in builtins mode and 9 times in closure mode,
-// at a constant depth of 3 in both. So builtins mode asserts the loop's
-// part, depth, and takes its time bound from the engine: the tabnas/parser
-// pull request "go: builtin capture appends src in amortized constant
-// time" makes the Go builtins append as srcAcc does, and the parser
-// release that carries it brings builtins mode under the same bound as
-// closures.
-// TypeScript (ropes) and Rust (`push_str`) are linear in both modes
-// already, and their suites assert it.
+// and is constant. In closure mode this package's own tree builders
+// (refRegistry.node, capture and fold) append in place through srcAcc. In
+// builtins mode the engine's `@node$`, `@capture$` and `@fold$` do the same
+// since parser v0.12.8. Both modes are therefore held to the same linear
+// bound, as TypeScript and Rust are.
 func TestRepeatDepthTimeIsLinear(t *testing.T) {
 	for _, c := range rdCases() {
 		t.Run(c.name+" (closures)", func(t *testing.T) {
 			rdAssertLinear(t, newRdParser(t, c.grammar(), rdOpts{}), c.make, c.name+" (closures)")
 		})
 		t.Run(c.name+" (builtins)", func(t *testing.T) {
-			p := newRdParser(t, c.grammar(), rdOpts{builtins: true})
-			_, one := p.parse(t, c.make(c.one))
-			_, many := p.parse(t, c.make(rdN))
-			if many != one {
-				t.Errorf("%d items reached depth %d; one iteration needs %d", rdN, many, one)
-			}
+			rdAssertLinear(t, newRdParser(t, c.grammar(), rdOpts{builtins: true}), c.make, c.name+" (builtins)")
 		})
 	}
 }
