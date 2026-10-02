@@ -490,7 +490,7 @@ func TestRepeatDepthRefusesAStarOfSomethingThatCanMatchNothing(t *testing.T) {
 		rdProd("doc", Sequence{rdStar(rdOpt(rdLit("x"))), rdLit(";")}),
 	}}, &ConvertOptions{Tag: "depth"})
 	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") ||
-		!strings.Contains(err.Error(), "empty string") {
+		!strings.Contains(err.Error(), "without consuming input") {
 		t.Fatalf("error = %v", err)
 	}
 }

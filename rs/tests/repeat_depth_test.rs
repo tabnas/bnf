@@ -545,7 +545,8 @@ fn refuses_a_star_of_something_that_can_match_nothing() {
     let err = emit_grammar_spec(&grammar, &ConvertOptions::tag("depth"))
         .expect_err("nullable star compiled");
     assert!(
-        err.message.contains("unbounded repetition") && err.message.contains("empty string"),
+        err.message.contains("unbounded repetition")
+            && err.message.contains("without consuming input"),
         "{err}"
     );
 }

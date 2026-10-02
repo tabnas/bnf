@@ -101,6 +101,12 @@ type SrcSpan = {
   c?: number
 }
 
+// Rewrite-only provenance for an element. A symbol keeps this bookkeeping
+// out of the public IR and out of JSON while Paull substitution carries the
+// authored rule along with the element object it copies.
+const ELEMENT_SOURCE = Symbol('elementSource')
+type ElementSource = { rule: string; sp?: SrcSpan }
+
 type Element = (
   | {
       kind: 'term';
@@ -165,6 +171,7 @@ type Element = (
   // seeds, say) carry none, which is correct: the author wrote no such
   // group.
   sp?: SrcSpan
+  [ELEMENT_SOURCE]?: ElementSource
 }
 
 type Sequence = Element[]
@@ -885,6 +892,45 @@ function originOf(prod: Production): string {
   return prod.origin ?? prod.name
 }
 
+
+function elementSource(el: Element, prod: Production): ElementSource {
+  return el[ELEMENT_SOURCE] ?? {
+    rule: originOf(prod),
+    sp: el.sp ?? prod.sp,
+  }
+}
+
+
+function carryElementSource(target: Element, source: Element): Element {
+  if (source[ELEMENT_SOURCE]) target[ELEMENT_SOURCE] = source[ELEMENT_SOURCE]
+  return target
+}
+
+
+// Clone the authored tree at the left-recursion boundary and attach its
+// source rule. This keeps copied repetitions auditable without mutating the
+// caller's IR; symbol properties are ignored by JSON serialization.
+function cloneElementForRewrite(el: Element, prod: Production): Element {
+  let copy: Element
+  if ('group' === el.kind) {
+    copy = {
+      ...el,
+      alts: el.alts.map((alt) =>
+        alt.map((child) => cloneElementForRewrite(child, prod))),
+    }
+  } else if ('opt' === el.kind || 'star' === el.kind ||
+             'plus' === el.kind || 'rep' === el.kind) {
+    copy = { ...el, inner: cloneElementForRewrite(el.inner, prod) }
+  } else {
+    copy = { ...el }
+  }
+  copy[ELEMENT_SOURCE] = el[ELEMENT_SOURCE] ?? {
+    rule: originOf(prod),
+    sp: el.sp ?? prod.sp,
+  }
+  return copy
+}
+
 // Configuration attached to a synthesised dispatcher production. The
 // dispatcher is the replacement for an ambiguous `[X D] Y` subsequence
 // in a user rule: on phase 0 it pushes `probeRule` (a failure-proof
@@ -963,7 +1009,8 @@ function nullableSugarPresent(el: Element): Sequence | null {
     if (el.max === 0) return null
     if (el.max === Infinity) return [el.inner, el]
     if (el.max === 1) return [el.inner]
-    return [el.inner, { kind: 'rep', min: 0, max: el.max - 1, inner: el.inner }]
+    return [el.inner, carryElementSource(
+      { kind: 'rep', min: 0, max: el.max - 1, inner: el.inner }, el)]
   }
   return null
 }
@@ -1049,7 +1096,8 @@ function eliminateLeftRecursion(
     expandNullableLeftPrefixes(
       grammar.productions.map((p) => ({
         name: p.name,
-        alts: p.alts.map((a) => a.slice()),
+        alts: p.alts.map((a) =>
+          a.map((el) => cloneElementForRewrite(el, p))),
         nodeKind: p.nodeKind,
         origin: p.origin,
         sp: p.sp,
@@ -1391,12 +1439,15 @@ function eliminateDirectLeftRec(
   const seedElement: Element =
     seeds.length === 1 && seeds[0].length === 1
       ? seeds[0][0]
-      : { kind: 'group', alts: seeds }
+      : carryElementSource(
+        { kind: 'group', alts: seeds }, seeds[0][0])
 
   const tailInner: Element =
     nonTrivialRecursive.length === 1 && nonTrivialRecursive[0].length === 1
       ? nonTrivialRecursive[0][0]
-      : { kind: 'group', alts: nonTrivialRecursive }
+      : carryElementSource(
+        { kind: 'group', alts: nonTrivialRecursive },
+        nonTrivialRecursive[0][0])
 
   // The rewrite is correct as a CFG, but it introduces a repetition
   // whose greediness can compete with a suffix of the very alternative
@@ -1413,7 +1464,12 @@ function eliminateDirectLeftRec(
   // counter, or drops the flag when the suffix and the loop cannot
   // collide (`A = A "w" / "(" A ")" / "z"` — `")"` never contests
   // `"w"`). Issue #6.
-  const star: Element = { kind: 'star', inner: tailInner }
+  const star = {
+    kind: 'star' as const,
+    inner: tailInner,
+    debtGuard: undefined as string | undefined,
+  }
+  carryElementSource(star, tailInner)
   if (seedsReferenceSelf(seeds, prod.name)) {
     star.debtGuard = freshDebtCounter(prod.name, debtNames)
   }
@@ -3102,6 +3158,81 @@ function regexDerivesEmpty(pattern: string, flags: string): boolean {
 }
 
 
+// Return the index after a lookaround group that starts at `open`, or null
+// when the parentheses are malformed. Character classes and escapes do not
+// affect the group depth.
+function regexAssertionEnd(pattern: string, open: number): number | null {
+  let depth = 0
+  let inClass = false
+  for (let i = open; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) {
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; continue }
+    if ('(' === ch) { depth++; continue }
+    if (')' === ch && 0 === --depth) return i + 1
+  }
+  return null
+}
+
+
+// A regex can succeed without consuming even when it does not match the
+// wholly empty input: `\\b` before a word character and `(?=word)` are the
+// common examples. Remove zero-width assertions and ask whether the
+// remaining consuming skeleton is nullable. This is deliberately
+// conservative for contradictory assertions; refusing an impossible loop is
+// safer than admitting a loop that can re-enter at one source position.
+function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean {
+  try {
+    // Preserve the specific invalid-regex diagnostic emitted later.
+    new RegExp(pattern, flags)
+  } catch {
+    return false
+  }
+  if (regexDerivesEmpty(pattern, flags)) return true
+
+  let skeleton = ''
+  let inClass = false
+  let changed = false
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) {
+      const next = pattern[i + 1]
+      if (!inClass && ('b' === next || 'B' === next)) {
+        changed = true
+        i++
+      } else {
+        skeleton += ch
+        if (i + 1 < pattern.length) skeleton += pattern[++i]
+      }
+      continue
+    }
+    if (inClass) {
+      skeleton += ch
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; skeleton += ch; continue }
+    if ('^' === ch || '$' === ch) { changed = true; continue }
+    if ('(' === ch && '?' === pattern[i + 1] &&
+        ('=' === pattern[i + 2] || '!' === pattern[i + 2] ||
+         ('<' === pattern[i + 2] &&
+          ('=' === pattern[i + 3] || '!' === pattern[i + 3])))) {
+      const end = regexAssertionEnd(pattern, i)
+      if (null == end) return false
+      changed = true
+      i = end - 1
+      continue
+    }
+    skeleton += ch
+  }
+  return changed && regexDerivesEmpty(skeleton, flags)
+}
+
+
 function elementDerivesEmpty(el: Element, nullable: Set<string>): boolean {
   switch (el.kind) {
     case 'opt':
@@ -3143,6 +3274,53 @@ function elementDerivesEmpty(el: Element, nullable: Set<string>): boolean {
       // `prose` is gone by the time this runs (`resolveProseTerminals`).
       return false
   }
+}
+
+
+function elementMayMatchWithoutConsuming(
+  el: Element,
+  nullable: Set<string>,
+): boolean {
+  switch (el.kind) {
+    case 'opt':
+    case 'star':
+      return true
+    case 'plus':
+      return elementMayMatchWithoutConsuming(el.inner, nullable)
+    case 'rep':
+      return 0 === el.min || elementMayMatchWithoutConsuming(el.inner, nullable)
+    case 'group':
+      return el.alts.some((alt) =>
+        alt.every((child) => elementMayMatchWithoutConsuming(child, nullable)))
+    case 'ref':
+      return nullable.has(el.name)
+    case 'term':
+      return '' === el.literal
+    case 'regex':
+      return regexMayMatchWithoutConsuming(el.pattern, el.flags)
+    case 'token':
+      return '#ZZ' === el.name || '#AA' === el.name
+    default:
+      return false
+  }
+}
+
+
+function nonConsumingRules(prods: Production[]): Set<string> {
+  const nullable = new Set<string>()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const p of prods) {
+      if (nullable.has(p.name)) continue
+      if (p.alts.some((alt) =>
+        alt.every((el) => elementMayMatchWithoutConsuming(el, nullable)))) {
+        nullable.add(p.name)
+        changed = true
+      }
+    }
+  }
+  return nullable
 }
 
 
@@ -3191,15 +3369,45 @@ const MAX_REPEAT_EXPANSION = 8192
 // whose item derives epsilon: such a loop can re-enter at the same input
 // position forever (tabnas/bnf#87).
 function validateRepetitions(grammar: Grammar): void {
-  const nullable = nullableRules(grammar.productions)
   let expansion = 0
 
-  const refuse = (prod: Production, message: string): never => {
-    const rule = originOf(prod)
+  const refuse = (el: Element, prod: Production, message: string): never => {
+    const source = elementSource(el, prod)
     throw new EmitError(
-      `${diagName()}: rule '${rule}' ${message}`,
-      { rule, sp: prod.sp })
+      `${diagName()}: rule '${source.rule}' ${message}`,
+      { rule: source.rule, sp: source.sp })
   }
+
+  // Validate the public numeric IR before nullability reads its bounds.
+  const validateBounds = (el: Element, prod: Production): void => {
+    if ('group' === el.kind) {
+      for (const alt of el.alts) for (const child of alt) {
+        validateBounds(child, prod)
+      }
+      return
+    }
+    if ('rep' === el.kind) {
+      const validMin = Number.isInteger(el.min) && 0 <= el.min
+      const validMax = el.max === Infinity ||
+        (Number.isInteger(el.max) && 0 <= el.max)
+      if (!validMin || !validMax ||
+          (el.max !== Infinity && el.max < el.min)) {
+        refuse(el, prod,
+          `has invalid repetition bounds '${el.min}*${el.max}'. ` +
+          `Bounds must be non-negative integers and the upper bound ` +
+          `must not be lower than the lower bound.`)
+      }
+    }
+    if ('opt' === el.kind || 'star' === el.kind ||
+        'plus' === el.kind || 'rep' === el.kind) {
+      validateBounds(el.inner, prod)
+    }
+  }
+  for (const prod of grammar.productions) {
+    for (const alt of prod.alts) for (const el of alt) validateBounds(el, prod)
+  }
+
+  const nullable = nonConsumingRules(grammar.productions)
 
   const walk = (el: Element, prod: Production): void => {
     if (el.kind === 'group') {
@@ -3211,9 +3419,10 @@ function validateRepetitions(grammar: Grammar): void {
 
     const unbounded = el.kind === 'star' || el.kind === 'plus' ||
       (el.kind === 'rep' && el.max === Infinity)
-    if (unbounded && elementDerivesEmpty(el.inner, nullable)) {
-      refuse(prod,
-        `has an unbounded repetition whose item can match the empty string. ` +
+    if (unbounded && elementMayMatchWithoutConsuming(el.inner, nullable)) {
+      refuse(el, prod,
+        `has an unbounded repetition whose item can succeed without ` +
+        `consuming input. ` +
         `An unbounded repetition must consume input on every iteration.`)
     }
 
@@ -3224,7 +3433,7 @@ function validateRepetitions(grammar: Grammar): void {
         : 1 + mandatory + 2 * Math.max(0, el.max - el.min)
       if (!Number.isFinite(cost) || cost > MAX_REPEAT_EXPANSION - expansion) {
         const upper = el.max === Infinity ? '' : String(el.max)
-        refuse(prod,
+        refuse(el, prod,
           `exceeds the repetition expansion limit of ` +
           `${MAX_REPEAT_EXPANSION} while expanding '${el.min}*${upper}'. ` +
           `Split the repetition into named rules or lower its bounds.`)

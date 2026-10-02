@@ -53,7 +53,7 @@
   "tag": "demo"
  },
  "pure": null,
- "pureError": "demo: rule 'doc' has an unbounded repetition whose item can match the empty string. An unbounded repetition must consume input on every iteration.",
+ "pureError": "demo: rule 'A' has an unbounded repetition whose item can succeed without consuming input. An unbounded repetition must consume input on every iteration.",
  "recognition": null,
  "recognitionError": null,
  "cases": []

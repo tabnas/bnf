@@ -528,7 +528,7 @@ describe('bnf', () => {
             [{ kind: 'opt', inner: x }, ref('A'), { kind: 'opt', inner: y }],
             [z]),
           { tag: 'demo' }),
-        /unbounded repetition.*empty string/)
+        /unbounded repetition.*without consuming input/)
     })
 
     it('leaves plain direct left recursion alone', () => {

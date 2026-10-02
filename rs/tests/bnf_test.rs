@@ -620,7 +620,8 @@ fn suffix_debt_refuses_a_nullable_loop() {
     )
     .expect_err("nullable loop compiled");
     assert!(
-        err.message.contains("unbounded repetition") && err.message.contains("empty string"),
+        err.message.contains("unbounded repetition")
+            && err.message.contains("without consuming input"),
         "{err}"
     );
 }

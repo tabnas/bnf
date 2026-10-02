@@ -30,7 +30,7 @@ describe('repetition safety', () => {
         assert.ok(error instanceof EmitError)
         assert.equal(error.rule, 'top')
         assert.deepEqual(error.sp, sp)
-        assert.match(error.message, /rule 'top'.*item can match the empty string/)
+        assert.match(error.message, /rule 'top'.*without consuming input/)
         return true
       },
     )
@@ -42,8 +42,62 @@ describe('repetition safety', () => {
         { name: 'top', alts: [[{ kind: 'plus', inner: ref('empty') }]] },
         { name: 'empty', alts: [[]] },
       ]),
-      /unbounded repetition.*empty string/,
+      /unbounded repetition.*without consuming input/,
     )
+  })
+
+  it('refuses a regex that can match zero width only in context', () => {
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern: '\\b', flags: '',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
+  it('allows a boundary regex that must also consume input', () => {
+    const spec = emit([{
+      name: 'top',
+      alts: [[{ kind: 'star', inner: {
+        kind: 'regex', pattern: '\\b[a-z]+', flags: '',
+      } }]],
+    }])
+    assert.ok(spec.rule.top)
+  })
+
+  it('attributes a copied left-recursion loop to its source rule', () => {
+    const sp = { s: 20, e: 21, r: 2, c: 1 }
+    assert.throws(
+      () => emit([
+        { name: 'top', alts: [[ref('A')]] },
+        {
+          name: 'A', sp,
+          alts: [
+            [{ kind: 'opt', inner: lit('x') }, ref('A'),
+              { kind: 'opt', inner: lit('y') }],
+            [lit('z')],
+          ],
+        },
+      ]),
+      (error) => {
+        assert.equal(error.rule, 'A')
+        assert.deepEqual(error.sp, sp)
+        assert.match(error.message, /rule 'A'.*unbounded repetition/)
+        return true
+      },
+    )
+  })
+
+  it('rejects negative, fractional, and inverted repetition bounds', () => {
+    for (const [min, max] of [[-2, -2], [0.5, 2], [3, 2]]) {
+      assert.throws(
+        () => emit([{ name: 'top', alts: [[rep(min, max, lit('a'))]] }]),
+        /invalid repetition bounds/,
+      )
+    }
   })
 
   it('refuses a numeric expansion before allocating its helpers', () => {

@@ -26,8 +26,7 @@ fn refuses_an_unbounded_repetition_whose_item_is_nullable() {
     assert_eq!(err.rule.as_deref(), Some("top"));
     assert_eq!(err.sp, Some(sp));
     assert!(
-        err.message.contains("rule 'top'")
-            && err.message.contains("item can match the empty string"),
+        err.message.contains("rule 'top'") && err.message.contains("without consuming input"),
         "{err}"
     );
 }
@@ -40,6 +39,59 @@ fn finds_nullability_through_a_rule_reference() {
     ]))
     .expect_err("nullable plus compiled");
     assert!(err.message.contains("unbounded repetition"), "{err}");
+}
+
+#[test]
+fn refuses_a_regex_that_can_match_zero_width_only_in_context() {
+    let err = emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::star(Element::regex(r"\b", ""))]],
+    )]))
+    .expect_err("zero-width boundary loop compiled");
+    assert!(err.message.contains("unbounded repetition"), "{err}");
+}
+
+#[test]
+fn allows_a_boundary_regex_that_must_also_consume_input() {
+    emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::star(Element::regex(r"\b[a-z]+", ""))]],
+    )]))
+    .expect("consuming boundary regex");
+}
+
+#[test]
+fn attributes_a_copied_left_recursion_loop_to_its_source_rule() {
+    let sp = SrcSpan::at(20, 21, 2, 1);
+    let mut source = prod(
+        "A",
+        vec![
+            vec![
+                Element::opt(sens_term("x")),
+                reference("A"),
+                Element::opt(sens_term("y")),
+            ],
+            vec![sens_term("z")],
+        ],
+    );
+    source.sp = Some(sp);
+    let err = emit(&Grammar::new(vec![
+        prod("top", vec![vec![reference("A")]]),
+        source,
+    ]))
+    .expect_err("nullable copied loop compiled");
+    assert_eq!(err.rule.as_deref(), Some("A"));
+    assert_eq!(err.sp, Some(sp));
+}
+
+#[test]
+fn rejects_an_inverted_repetition_range() {
+    let err = emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::rep(3, Some(2), sens_term("a"))]],
+    )]))
+    .expect_err("inverted repetition range compiled");
+    assert!(err.message.contains("invalid repetition bounds"), "{err}");
 }
 
 #[test]

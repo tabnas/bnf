@@ -93,6 +93,58 @@ func regexDerivesEmpty(pattern, flags string) bool {
 	return re.MatchString("")
 }
 
+// regexMayMatchWithoutConsuming catches context-dependent zero-width
+// matches such as `\b` before a word character. Strip the zero-width
+// assertions understood by RE2 and ask whether the consuming skeleton is
+// nullable. Invalid patterns remain for the emitter's specific diagnostic.
+func regexMayMatchWithoutConsuming(pattern, flags string) bool {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return false
+	}
+	if regexDerivesEmpty(pattern, flags) {
+		return true
+	}
+	var skeleton strings.Builder
+	inClass := false
+	changed := false
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		if ch == '\\' {
+			if i+1 < len(pattern) {
+				next := pattern[i+1]
+				if !inClass && (next == 'b' || next == 'B' ||
+					next == 'A' || next == 'z') {
+					changed = true
+					i++
+					continue
+				}
+				skeleton.WriteByte(ch)
+				skeleton.WriteByte(next)
+				i++
+				continue
+			}
+		}
+		if inClass {
+			skeleton.WriteByte(ch)
+			if ch == ']' {
+				inClass = false
+			}
+			continue
+		}
+		if ch == '[' {
+			inClass = true
+			skeleton.WriteByte(ch)
+			continue
+		}
+		if ch == '^' || ch == '$' {
+			changed = true
+			continue
+		}
+		skeleton.WriteByte(ch)
+	}
+	return changed && regexDerivesEmpty(skeleton.String(), flags)
+}
+
 func elementDerivesEmpty(el *Element, nullable map[string]bool) bool {
 	switch el.Kind {
 	case KindOpt, KindStar:
@@ -138,6 +190,66 @@ func elementDerivesEmpty(el *Element, nullable map[string]bool) bool {
 	return false
 }
 
+func elementMayMatchWithoutConsuming(el *Element, nullable map[string]bool) bool {
+	switch el.Kind {
+	case KindOpt, KindStar:
+		return true
+	case KindPlus:
+		return elementMayMatchWithoutConsuming(el.Inner, nullable)
+	case KindRep:
+		return el.Min == 0 || elementMayMatchWithoutConsuming(el.Inner, nullable)
+	case KindGroup:
+		for _, alt := range el.Alts {
+			all := true
+			for _, child := range alt {
+				if !elementMayMatchWithoutConsuming(child, nullable) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
+			}
+		}
+	case KindRef:
+		return nullable[el.Name]
+	case KindTerm:
+		return el.Literal == ""
+	case KindRegex:
+		return regexMayMatchWithoutConsuming(el.Pattern, el.Flags)
+	case KindToken:
+		return el.Name == "#ZZ" || el.Name == "#AA"
+	}
+	return false
+}
+
+func nonConsumingRules(prods []*Production) map[string]bool {
+	nullable := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range prods {
+			if nullable[p.Name] {
+				continue
+			}
+			for _, alt := range p.Alts {
+				all := true
+				for _, el := range alt {
+					if !elementMayMatchWithoutConsuming(el, nullable) {
+						all = false
+						break
+					}
+				}
+				if all {
+					nullable[p.Name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return nullable
+}
+
 func sequenceDerivesEmpty(alt Sequence, nullable map[string]bool) bool {
 	for _, el := range alt {
 		if !elementDerivesEmpty(el, nullable) {
@@ -179,16 +291,61 @@ func nullableRules(prods []*Production) map[string]bool {
 // expansion a numeric repetition can request and rejects an unbounded loop
 // whose item derives epsilon, since that loop can re-enter without advancing.
 func validateRepetitions(grammar *Grammar) *EmitError {
-	nullable := nullableRules(grammar.Productions)
 	expansion := 0
 
-	refuse := func(prod *Production, message string) *EmitError {
-		rule := originOf(prod)
+	refuse := func(el *Element, prod *Production, message string) *EmitError {
+		rule, sp := el.sourceRule, el.sourceSp
+		if rule == "" {
+			rule, sp = originOf(prod), el.Sp
+			if sp == nil {
+				sp = prod.Sp
+			}
+		}
 		return &EmitError{
-			Rule: rule, Sp: prod.Sp,
+			Rule: rule, Sp: sp,
 			Message: fmt.Sprintf("%s: rule '%s' %s", diagName(), rule, message),
 		}
 	}
+
+	var validateBounds func(*Element, *Production) *EmitError
+	validateBounds = func(el *Element, prod *Production) *EmitError {
+		if el == nil {
+			return nil
+		}
+		if el.Kind == KindGroup {
+			for _, alt := range el.Alts {
+				for _, child := range alt {
+					if err := validateBounds(child, prod); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if el.Kind == KindRep && (el.Min < 0 || el.Max < 0 ||
+			(el.Max != MaxInfinity && el.Max < el.Min)) {
+			return refuse(el, prod, fmt.Sprintf(
+				"has invalid repetition bounds '%d*%d'. Bounds must be non-negative "+
+					"integers and the upper bound must not be lower than the lower bound.",
+				el.Min, el.Max))
+		}
+		if el.Kind == KindOpt || el.Kind == KindStar ||
+			el.Kind == KindPlus || el.Kind == KindRep {
+			return validateBounds(el.Inner, prod)
+		}
+		return nil
+	}
+	for _, prod := range grammar.Productions {
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if err := validateBounds(el, prod); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	nullable := nonConsumingRules(grammar.Productions)
 
 	var walk func(*Element, *Production) *EmitError
 	walk = func(el *Element, prod *Production) *EmitError {
@@ -212,9 +369,9 @@ func validateRepetitions(grammar *Grammar) *EmitError {
 
 		unbounded := el.Kind == KindStar || el.Kind == KindPlus ||
 			(el.Kind == KindRep && el.Max == MaxInfinity)
-		if unbounded && elementDerivesEmpty(el.Inner, nullable) {
-			return refuse(prod,
-				"has an unbounded repetition whose item can match the empty string. "+
+		if unbounded && elementMayMatchWithoutConsuming(el.Inner, nullable) {
+			return refuse(el, prod,
+				"has an unbounded repetition whose item can succeed without consuming input. "+
 					"An unbounded repetition must consume input on every iteration.")
 		}
 
@@ -247,7 +404,7 @@ func validateRepetitions(grammar *Grammar) *EmitError {
 				if el.Max == MaxInfinity {
 					upper = ""
 				}
-				return refuse(prod, fmt.Sprintf(
+				return refuse(el, prod, fmt.Sprintf(
 					"exceeds the repetition expansion limit of %d while expanding '%d*%s'. "+
 						"Split the repetition into named rules or lower its bounds.",
 					MaxRepeatExpansion, el.Min, upper))

@@ -29,7 +29,7 @@ fn nullable_sugar_present(el: &Element) -> Option<Sequence> {
             Some(1) => Some(vec![(**inner).clone()]),
             Some(max) => Some(vec![
                 (**inner).clone(),
-                Element::rep(0, Some(max - 1), (**inner).clone()),
+                Element::rep(0, Some(max - 1), (**inner).clone()).carry_source_from(el),
             ]),
         },
         _ => None,
@@ -122,10 +122,61 @@ pub(crate) fn eliminate_left_recursion_keeping(
 
     // Order productions so that rules referenced at a leading position
     // are processed before the rules that reference them.
+    fn clone_element_for_rewrite(el: &Element, prod: &Production) -> Element {
+        let kind = match &el.kind {
+            Kind::Opt { inner } => Kind::Opt {
+                inner: Box::new(clone_element_for_rewrite(inner, prod)),
+            },
+            Kind::Star { inner, debt_guard } => Kind::Star {
+                inner: Box::new(clone_element_for_rewrite(inner, prod)),
+                debt_guard: debt_guard.clone(),
+            },
+            Kind::Plus { inner } => Kind::Plus {
+                inner: Box::new(clone_element_for_rewrite(inner, prod)),
+            },
+            Kind::Rep { min, max, inner } => Kind::Rep {
+                min: *min,
+                max: *max,
+                inner: Box::new(clone_element_for_rewrite(inner, prod)),
+            },
+            Kind::Group { alts } => Kind::Group {
+                alts: alts
+                    .iter()
+                    .map(|alt| {
+                        alt.iter()
+                            .map(|child| clone_element_for_rewrite(child, prod))
+                            .collect()
+                    })
+                    .collect(),
+            },
+            kind => kind.clone(),
+        };
+        Element {
+            kind,
+            sp: el.sp,
+            source_rule: el
+                .source_rule
+                .clone()
+                .or_else(|| Some(crate::ir::origin_of(prod).to_string())),
+            source_sp: el.source_sp.or(el.sp).or(prod.sp),
+        }
+    }
+
     let copies: Vec<Production> = grammar
         .productions
         .iter()
-        .map(|p| p.rebuilt(p.alts.clone()))
+        .map(|p| {
+            p.rebuilt(
+                p.alts
+                    .iter()
+                    .map(|alt| {
+                        alt.iter()
+                            .map(|el| clone_element_for_rewrite(el, p))
+                            .collect()
+                    })
+                    .collect(),
+            )
+        })
         .collect();
     let mut prods = topo_order_for_paull(expand_nullable_left_prefixes(copies));
 
@@ -515,12 +566,12 @@ fn eliminate_direct_left_rec(
     let seed_element = if seeds.len() == 1 && seeds[0].len() == 1 {
         seeds[0][0].clone()
     } else {
-        Element::group(seeds.clone())
+        Element::group(seeds.clone()).carry_source_from(&seeds[0][0])
     };
     let tail_inner = if non_trivial.len() == 1 && non_trivial[0].len() == 1 {
         non_trivial[0][0].clone()
     } else {
-        Element::group(non_trivial)
+        Element::group(non_trivial.clone()).carry_source_from(&non_trivial[0][0])
     };
 
     // The rewrite is correct as a CFG, but it introduces a repetition
@@ -536,10 +587,12 @@ fn eliminate_direct_left_rec(
     };
     let star = Element {
         kind: Kind::Star {
-            inner: Box::new(tail_inner),
+            inner: Box::new(tail_inner.clone()),
             debt_guard,
         },
         sp: None,
+        source_rule: tail_inner.source_rule.clone(),
+        source_sp: tail_inner.source_sp,
     };
 
     Ok(prod.rebuilt(vec![vec![seed_element, star]]))

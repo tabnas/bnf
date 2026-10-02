@@ -228,6 +228,8 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
             token_name: Some(name.to_string()),
         },
         sp: None,
+        source_rule: None,
+        source_sp: None,
     };
 
     fn walk(el: &Element, lifted: &IndexMap<String, (String, Option<bool>)>) -> Element {
@@ -240,6 +242,8 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                         token_name: Some(name.clone()),
                     },
                     sp: None,
+                    source_rule: el.source_rule.clone(),
+                    source_sp: el.source_sp,
                 },
                 None => el.clone(),
             },
@@ -248,6 +252,8 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                     inner: Box::new(walk(inner, lifted)),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Star { inner, debt_guard } => Element {
                 kind: Kind::Star {
@@ -255,12 +261,16 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                     debt_guard: debt_guard.clone(),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Plus { inner } => Element {
                 kind: Kind::Plus {
                     inner: Box::new(walk(inner, lifted)),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Rep { min, max, inner } => Element {
                 kind: Kind::Rep {
@@ -269,6 +279,8 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                     inner: Box::new(walk(inner, lifted)),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Group { alts } => Element::group(
                 alts.iter()
@@ -315,6 +327,8 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
                     inner: Box::new(walk(inner, defined)),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Star { inner, debt_guard } => Element {
                 kind: Kind::Star {
@@ -322,12 +336,16 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
                     debt_guard: debt_guard.clone(),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Plus { inner } => Element {
                 kind: Kind::Plus {
                     inner: Box::new(walk(inner, defined)),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Rep { min, max, inner } => Element {
                 kind: Kind::Rep {
@@ -336,6 +354,8 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
                     inner: Box::new(walk(inner, defined)),
                 },
                 sp: el.sp,
+                source_rule: el.source_rule.clone(),
+                source_sp: el.source_sp,
             },
             Kind::Group { alts } => Element::group(
                 alts.iter()
@@ -367,6 +387,72 @@ fn regex_derives_empty(pattern: &str, flags: &str) -> bool {
     }
 }
 
+/// Whether a regex can succeed without consuming in some following
+/// context. `\b` before a word character is the important case: it does
+/// not match the wholly empty input, but it still lets a repetition
+/// re-enter at one source position.
+fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
+    let mut seen = String::new();
+    for flag in flags.chars() {
+        if !"dgimsuvy".contains(flag) || seen.contains(flag) {
+            return false;
+        }
+        seen.push(flag);
+    }
+    if seen.contains('u') && seen.contains('v') {
+        return false;
+    }
+    let mut valid = regex::RegexBuilder::new(pattern);
+    valid.case_insensitive(flags.contains('i'));
+    if valid.build().is_err() {
+        return false;
+    }
+    if regex_derives_empty(pattern, flags) {
+        return true;
+    }
+
+    let bytes = pattern.as_bytes();
+    let mut skeleton = Vec::with_capacity(bytes.len());
+    let mut in_class = false;
+    let mut changed = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\\' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            if !in_class && matches!(next, b'b' | b'B' | b'A' | b'z' | b'<' | b'>') {
+                changed = true;
+                i += 2;
+                continue;
+            }
+            skeleton.extend_from_slice(&bytes[i..=i + 1]);
+            i += 2;
+            continue;
+        }
+        if in_class {
+            skeleton.push(ch);
+            if ch == b']' {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == b'[' {
+            in_class = true;
+            skeleton.push(ch);
+        } else if ch == b'^' || ch == b'$' {
+            changed = true;
+        } else {
+            skeleton.push(ch);
+        }
+        i += 1;
+    }
+    changed
+        && String::from_utf8(skeleton)
+            .ok()
+            .is_some_and(|skeleton| regex_derives_empty(&skeleton, flags))
+}
+
 pub(crate) fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -> bool {
     match &el.kind {
         Kind::Opt { .. } | Kind::Star { .. } => true,
@@ -383,6 +469,46 @@ pub(crate) fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -
         Kind::Token { name } => name == "#ZZ" || name == "#AA",
         Kind::Prose { .. } => false,
     }
+}
+
+fn element_may_match_without_consuming(el: &Element, nullable: &IndexSet<String>) -> bool {
+    match &el.kind {
+        Kind::Opt { .. } | Kind::Star { .. } => true,
+        Kind::Plus { inner } => element_may_match_without_consuming(inner, nullable),
+        Kind::Rep { min, inner, .. } => {
+            *min == 0 || element_may_match_without_consuming(inner, nullable)
+        }
+        Kind::Group { alts } => alts.iter().any(|alt| {
+            alt.iter()
+                .all(|child| element_may_match_without_consuming(child, nullable))
+        }),
+        Kind::Ref { name, .. } => nullable.contains(name),
+        Kind::Term { literal, .. } => literal.is_empty(),
+        Kind::Regex { pattern, flags } => regex_may_match_without_consuming(pattern, flags),
+        Kind::Token { name } => name == "#ZZ" || name == "#AA",
+        Kind::Prose { .. } => false,
+    }
+}
+
+fn non_consuming_rules(prods: &[Production]) -> IndexSet<String> {
+    let mut nullable = IndexSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for prod in prods {
+            if nullable.contains(&prod.name) {
+                continue;
+            }
+            if prod.alts.iter().any(|alt| {
+                alt.iter()
+                    .all(|el| element_may_match_without_consuming(el, &nullable))
+            }) {
+                nullable.insert(prod.name.clone());
+                changed = true;
+            }
+        }
+    }
+    nullable
 }
 
 fn sequence_derives_empty(alt: &[Element], nullable: &IndexSet<String>) -> bool {
@@ -415,17 +541,55 @@ pub(crate) fn nullable_rules(prods: &[Production]) -> IndexSet<String> {
 /// can derive epsilon. Run after structural rewrites, which may duplicate an
 /// authored repetition, and before desugaring allocates any helper.
 pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
-    let nullable = nullable_rules(&grammar.productions);
     let mut expansion = 0usize;
 
-    fn refuse(prod: &Production, message: String) -> EmitError {
-        let rule = origin_of(prod);
+    fn refuse(el: &Element, prod: &Production, message: String) -> EmitError {
+        let rule = el.source_rule.as_deref().unwrap_or_else(|| origin_of(prod));
+        let sp = el.source_sp.or(el.sp).or(prod.sp);
         EmitError::at(
             format!("{}: rule '{}' {message}", diag_name(), rule),
             rule,
-            prod.sp,
+            sp,
         )
     }
+
+    fn validate_bounds(el: &Element, prod: &Production) -> Result<(), EmitError> {
+        if let Kind::Group { alts } = &el.kind {
+            for child in alts.iter().flatten() {
+                validate_bounds(child, prod)?;
+            }
+            return Ok(());
+        }
+        if let Kind::Rep { min, max, .. } = &el.kind {
+            if max.is_some_and(|max| max < *min) {
+                return Err(refuse(
+                    el,
+                    prod,
+                    format!(
+                        "has invalid repetition bounds '{}*{}'. Bounds must be non-negative \
+                         integers and the upper bound must not be lower than the lower bound.",
+                        min,
+                        max.expect("checked as present")
+                    ),
+                ));
+            }
+        }
+        match &el.kind {
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => validate_bounds(inner, prod),
+            _ => Ok(()),
+        }
+    }
+
+    for prod in &grammar.productions {
+        for el in prod.alts.iter().flatten() {
+            validate_bounds(el, prod)?;
+        }
+    }
+
+    let nullable = non_consuming_rules(&grammar.productions);
 
     fn walk(
         el: &Element,
@@ -449,10 +613,11 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
         };
         let unbounded = matches!(&el.kind, Kind::Star { .. } | Kind::Plus { .. })
             || matches!(&el.kind, Kind::Rep { max: None, .. });
-        if unbounded && element_derives_empty(inner, nullable) {
+        if unbounded && element_may_match_without_consuming(inner, nullable) {
             return Err(refuse(
+                el,
                 prod,
-                "has an unbounded repetition whose item can match the empty string. \
+                "has an unbounded repetition whose item can succeed without consuming input. \
                  An unbounded repetition must consume input on every iteration."
                     .to_string(),
             ));
@@ -481,6 +646,7 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
             if too_large {
                 let upper = max.map_or_else(String::new, |max| max.to_string());
                 return Err(refuse(
+                    el,
                     prod,
                     format!(
                         "exceeds the repetition expansion limit of {MAX_REPEAT_EXPANSION} \

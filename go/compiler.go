@@ -107,8 +107,9 @@ func nullableSugarPresent(el *Element) Sequence {
 		case el.Max == 1:
 			return Sequence{el.Inner}
 		default:
-			return Sequence{el.Inner,
-				&Element{Kind: KindRep, Min: 0, Max: el.Max - 1, Inner: el.Inner}}
+			rest := &Element{Kind: KindRep, Min: 0, Max: el.Max - 1, Inner: el.Inner}
+			rest.sourceRule, rest.sourceSp = el.sourceRule, el.sourceSp
+			return Sequence{el.Inner, rest}
 		}
 	}
 	return nil
@@ -200,6 +201,39 @@ func eliminateLeftRecursion(grammar *Grammar) *Grammar {
 	return eliminateLeftRecursionKeeping(grammar, nil)
 }
 
+func cloneElementForRewrite(el *Element, prod *Production) *Element {
+	if el == nil {
+		return nil
+	}
+	cp := *el
+	if cp.sourceRule == "" {
+		cp.sourceRule = originOf(prod)
+		cp.sourceSp = el.Sp
+		if cp.sourceSp == nil {
+			cp.sourceSp = prod.Sp
+		}
+	}
+	if el.Inner != nil {
+		cp.Inner = cloneElementForRewrite(el.Inner, prod)
+	}
+	if el.Alts != nil {
+		cp.Alts = make([]Sequence, len(el.Alts))
+		for i, alt := range el.Alts {
+			cp.Alts[i] = make(Sequence, len(alt))
+			for j, child := range alt {
+				cp.Alts[i][j] = cloneElementForRewrite(child, prod)
+			}
+		}
+	}
+	if el.Debt != nil {
+		cp.Debt = make(map[string]int, len(el.Debt))
+		for key, value := range el.Debt {
+			cp.Debt[key] = value
+		}
+	}
+	return &cp
+}
+
 // eliminateLeftRecursionKeeping is eliminateLeftRecursion with a set of
 // productions that are never substituted into the alternatives they
 // lead: the token classes of ConvertOptions.TokenClasses. A class holds
@@ -213,12 +247,16 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 		originalOrder[i] = p.Name
 	}
 
-	// Copy productions (shallow-copy alts) before reordering.
+	// Copy productions and annotate elements with their authored source before
+	// reordering. Later substitutions copy these private pointers intact.
 	copies := make([]*Production, len(grammar.Productions))
 	for i, p := range grammar.Productions {
 		alts := make([]Sequence, len(p.Alts))
 		for j, a := range p.Alts {
-			alts[j] = append(Sequence{}, a...)
+			alts[j] = make(Sequence, len(a))
+			for k, el := range a {
+				alts[j][k] = cloneElementForRewrite(el, p)
+			}
 		}
 		copies[i] = &Production{
 			Name: p.Name, Alts: alts, NodeKind: p.NodeKind, Origin: p.Origin,
@@ -601,12 +639,16 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		seedElement = seeds[0][0]
 	} else {
 		seedElement = &Element{Kind: KindGroup, Alts: seeds}
+		seedElement.sourceRule, seedElement.sourceSp =
+			seeds[0][0].sourceRule, seeds[0][0].sourceSp
 	}
 	var tailInner *Element
 	if len(nonTrivial) == 1 && len(nonTrivial[0]) == 1 {
 		tailInner = nonTrivial[0][0]
 	} else {
 		tailInner = &Element{Kind: KindGroup, Alts: nonTrivial}
+		tailInner.sourceRule, tailInner.sourceSp =
+			nonTrivial[0][0].sourceRule, nonTrivial[0][0].sourceSp
 	}
 	// The rewrite is correct as a CFG, but it introduces a repetition whose
 	// greediness can compete with a suffix of the very alternative it was
@@ -623,6 +665,7 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 	// or drops the flag when the suffix and the loop cannot collide
 	// (`A = A "w" / "(" A ")" / "z"` — `")"` never contests `"w"`). Issue #6.
 	star := &Element{Kind: KindStar, Inner: tailInner}
+	star.sourceRule, star.sourceSp = tailInner.sourceRule, tailInner.sourceSp
 	if seedsReferenceSelf(seeds, prod.Name) {
 		star.DebtGuard = freshDebtCounter(prod.Name, debtNames)
 	}

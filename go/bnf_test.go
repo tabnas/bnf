@@ -546,7 +546,7 @@ func TestSuffixDebtRefusesANullableLoop(t *testing.T) {
 		Sequence{optOf(sensTerm("x")), ref("A"), optOf(sensTerm("y"))},
 		Sequence{sensTerm("z")}), &ConvertOptions{Tag: "demo"})
 	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") ||
-		!strings.Contains(err.Error(), "empty string") {
+		!strings.Contains(err.Error(), "without consuming input") {
 		t.Fatalf("error = %v", err)
 	}
 }

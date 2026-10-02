@@ -39,7 +39,7 @@ func TestRepetitionSafetyRefusesNullableUnboundedItem(t *testing.T) {
 		t.Fatalf("error = %#v, want ranged EmitError for top", err)
 	}
 	if !strings.Contains(err.Error(), "rule 'top'") ||
-		!strings.Contains(err.Error(), "item can match the empty string") {
+		!strings.Contains(err.Error(), "without consuming input") {
 		t.Fatalf("error = %q", err)
 	}
 }
@@ -54,6 +54,62 @@ func TestRepetitionSafetyFindsNullableReference(t *testing.T) {
 	_, err := EmitGrammarSpec(grammar, opts)
 	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRepetitionSafetyRefusesContextDependentZeroWidthRegex(t *testing.T) {
+	grammar, opts := safetyEmit(&Production{
+		Name: "top",
+		Alts: []Sequence{{{
+			Kind: KindStar, Inner: &Element{Kind: KindRegex, Pattern: `\b`},
+		}}},
+	})
+	_, err := EmitGrammarSpec(grammar, opts)
+	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRepetitionSafetyAllowsConsumingBoundaryRegex(t *testing.T) {
+	grammar, opts := safetyEmit(&Production{
+		Name: "top",
+		Alts: []Sequence{{{
+			Kind: KindStar, Inner: &Element{Kind: KindRegex, Pattern: `\b[a-z]+`},
+		}}},
+	})
+	if _, err := EmitGrammarSpec(grammar, opts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRepetitionSafetyAttributesCopiedLoopToSource(t *testing.T) {
+	sp := &SrcSpan{S: 20, E: 21, R: 2, C: 1}
+	grammar, opts := safetyEmit(
+		&Production{Name: "top", Alts: []Sequence{{{Kind: KindRef, Name: "A"}}}},
+		&Production{Name: "A", Sp: sp, Alts: []Sequence{
+			{{Kind: KindOpt, Inner: safetyLit("x")},
+				{Kind: KindRef, Name: "A"},
+				{Kind: KindOpt, Inner: safetyLit("y")}},
+			{safetyLit("z")},
+		}},
+	)
+	_, err := EmitGrammarSpec(grammar, opts)
+	ee, ok := err.(*EmitError)
+	if !ok || ee.Rule != "A" || ee.Sp != sp {
+		t.Fatalf("error = %#v, want ranged EmitError for A", err)
+	}
+}
+
+func TestRepetitionSafetyRejectsInvalidBounds(t *testing.T) {
+	for _, bounds := range [][2]int{{-2, -2}, {3, 2}} {
+		grammar, opts := safetyEmit(&Production{
+			Name: "top",
+			Alts: []Sequence{{safetyRep(bounds[0], bounds[1], safetyLit("a"))}},
+		})
+		_, err := EmitGrammarSpec(grammar, opts)
+		if err == nil || !strings.Contains(err.Error(), "invalid repetition bounds") {
+			t.Fatalf("bounds %v: error = %v", bounds, err)
+		}
 	}
 }
 

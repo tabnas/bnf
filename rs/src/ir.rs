@@ -62,12 +62,26 @@ impl SrcSpan {
 /// reference, or EBNF sugar around further elements. The `kind` carries
 /// the variant; `sp` is where the element came from, when the front-end
 /// recorded it. Mirrors the TypeScript `Element` union.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Element {
     #[serde(flatten)]
     pub kind: Kind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sp: Option<SrcSpan>,
+    /// Rewrite-only provenance, omitted from the public wire IR.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub source_rule: Option<String>,
+    /// Source production span paired with `source_rule`.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub source_sp: Option<SrcSpan>,
+}
+
+impl PartialEq for Element {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.sp == other.sp
+    }
 }
 
 /// The element variants. Serialized with the TypeScript field names, so
@@ -141,11 +155,16 @@ where
     D: serde::Deserializer<'de>,
 {
     let value: Option<f64> = Option::deserialize(deserializer)?;
-    Ok(match value {
+    let out = match value {
         None => None,
-        Some(n) if n.is_finite() && n >= 0.0 => Some(n as usize),
-        Some(_) => None,
-    })
+        Some(n) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 => Some(n as usize),
+        Some(n) => {
+            return Err(serde::de::Error::custom(format!(
+                "invalid repetition upper bound {n}: expected a non-negative integer or null"
+            )))
+        }
+    };
+    Ok(out)
 }
 
 /// A sequence of elements: one alternative of a production.
@@ -153,7 +172,18 @@ pub type Sequence = Vec<Element>;
 
 impl Element {
     fn of(kind: Kind) -> Self {
-        Self { kind, sp: None }
+        Self {
+            kind,
+            sp: None,
+            source_rule: None,
+            source_sp: None,
+        }
+    }
+
+    pub(crate) fn carry_source_from(mut self, source: &Element) -> Self {
+        self.source_rule.clone_from(&source.source_rule);
+        self.source_sp = source.source_sp;
+        self
     }
 
     /// A literal with the notation's default case-sensitivity unstated.

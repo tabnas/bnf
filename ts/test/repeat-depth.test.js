@@ -322,7 +322,7 @@ describe('repetition depth', () => {
     // `*[x]` has an iteration that can match without progress. Refuse it
     // before the engine has to detect the non-advancing loop.
     const g = [prod('doc', [star({ kind: 'opt', inner: lit('x') }), lit(';')])]
-    assert.throws(() => parser(g), /unbounded repetition.*empty string/)
+    assert.throws(() => parser(g), /unbounded repetition.*without consuming input/)
   })
 
   for (const [mode, opts] of [['closures', {}], ['builtins', { builtins: true }]]) {
