@@ -907,6 +907,17 @@ function carryElementSource(target: Element, source: Element): Element {
 }
 
 
+function carryElementOrProductionSource(
+  target: Element,
+  source: Element | undefined,
+  prod: Production,
+): Element {
+  if (undefined !== source) return carryElementSource(target, source)
+  target[ELEMENT_SOURCE] = { rule: originOf(prod), sp: prod.sp }
+  return target
+}
+
+
 // Clone the authored tree at the left-recursion boundary and attach its
 // source rule. This keeps copied repetitions auditable without mutating the
 // caller's IR; symbol properties are ignored by JSON serialization.
@@ -1464,8 +1475,10 @@ function eliminateDirectLeftRec(
   const seedElement: Element =
     seeds.length === 1 && seeds[0].length === 1
       ? seeds[0][0]
-      : carryElementSource(
-        { kind: 'group', alts: seeds }, seeds[0][0])
+      : carryElementOrProductionSource(
+        { kind: 'group', alts: seeds },
+        seeds.find((seed) => 0 < seed.length)?.[0],
+        prod)
 
   const tailInner: Element =
     nonTrivialRecursive.length === 1 && nonTrivialRecursive[0].length === 1
@@ -3481,6 +3494,45 @@ type RegexNullabilityFrame = {
 }
 
 
+// A Unicode-set class can contain strings through `\q{...}`. An empty
+// alternative in one of those disjunctions makes the class itself nullable,
+// unlike every ordinary character class. The pattern has already compiled,
+// so this scan only has to distinguish escaped pipes from separators. It is
+// deliberately conservative around set operations: retaining a possible
+// empty member can reject a safe loop, while dropping one can admit a loop
+// that never advances.
+function unicodeSetClassMayMatchEmpty(
+  pattern: string,
+  start: number,
+  end: number,
+): boolean {
+  for (let i = start; i < end; i++) {
+    if ('\\' !== pattern[i]) continue
+    if ('q' !== pattern[i + 1] || '{' !== pattern[i + 2]) {
+      i++
+      continue
+    }
+    let alternativeHasAtom = false
+    for (i += 3; i < end; i++) {
+      const ch = pattern[i]
+      if ('\\' === ch) {
+        alternativeHasAtom = true
+        i++
+      } else if ('|' === ch) {
+        if (!alternativeHasAtom) return true
+        alternativeHasAtom = false
+      } else if ('}' === ch) {
+        if (!alternativeHasAtom) return true
+        break
+      } else {
+        alternativeHasAtom = true
+      }
+    }
+  }
+  return false
+}
+
+
 // Decide whether an analysis skeleton can derive the empty string without
 // running it through JavaScript's backtracking matcher. The skeleton is made
 // only from a regex which compiled above, but replacing assertions can expose
@@ -3596,7 +3648,9 @@ function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | nu
         end++
       }
       if (0 !== depth) return null
-      i = appendAtom(false, end)
+      const nullable = flags.includes('v') &&
+        unicodeSetClassMayMatchEmpty(pattern, i + 1, end - 1)
+      i = appendAtom(nullable, end)
       continue
     }
     if ('\\' === ch) {
@@ -3611,7 +3665,8 @@ function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | nu
         if (-1 === close) return null
         nullable = true
         end = close + 1
-      } else if (('p' === next || 'P' === next || 'u' === next) &&
+      } else if ((flags.includes('u') || flags.includes('v')) &&
+          ('p' === next || 'P' === next || 'u' === next) &&
           '{' === pattern[i + 2]) {
         const close = pattern.indexOf('}', i + 3)
         if (-1 === close) return null

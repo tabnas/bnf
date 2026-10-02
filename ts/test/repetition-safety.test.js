@@ -180,6 +180,60 @@ describe('repetition safety', () => {
     assert.ok(spec.rule.top)
   })
 
+  it('treats legacy brace escapes as quantified identity escapes', () => {
+    for (const pattern of ['\\u{0}', '\\p{0}', '\\P{0}']) {
+      assert.throws(
+        () => emit([{
+          name: 'top',
+          alts: [[{ kind: 'star', inner: {
+            kind: 'regex', pattern, flags: '',
+          } }]],
+        }]),
+        /unbounded repetition.*without consuming input/,
+        pattern,
+      )
+    }
+
+    const spec = emit([{
+      name: 'top',
+      alts: [[{ kind: 'star', inner: {
+        kind: 'regex', pattern: '\\u{0}', flags: 'u',
+      } }]],
+    }])
+    assert.ok(spec.rule.top)
+  })
+
+  it('finds empty strings inside Unicode-set classes', () => {
+    for (const pattern of ['[\\q{}]', '[\\q{|a}]']) {
+      assert.throws(
+        () => emit([{
+          name: 'top',
+          alts: [[{ kind: 'star', inner: {
+            kind: 'regex', pattern, flags: 'v',
+          } }]],
+        }]),
+        /unbounded repetition.*without consuming input/,
+        pattern,
+      )
+    }
+
+    const spec = emit([{
+      name: 'top',
+      alts: [[{ kind: 'star', inner: {
+        kind: 'regex', pattern: '[\\q{a|bc}]', flags: 'v',
+      } }]],
+    }])
+    assert.ok(spec.rule.top)
+  })
+
+  it('rewrites direct left recursion whose seed is empty', () => {
+    const spec = emit([
+      { name: 'top', alts: [[ref('A')]] },
+      { name: 'A', alts: [[ref('A'), lit('a')], []] },
+    ])
+    assert.ok(spec.rule.A)
+  })
+
   it('validates the implicit loop produced by a tail-repeat rewrite', () => {
     const boundary = () => ({ kind: 'regex', pattern: '\\b', flags: '' })
     assert.throws(

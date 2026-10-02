@@ -82,6 +82,16 @@ func TestRepetitionSafetyAllowsConsumingBoundaryRegex(t *testing.T) {
 	}
 }
 
+func TestRepetitionSafetyRewritesDirectLeftRecursionWithEmptySeed(t *testing.T) {
+	_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		{Name: "top", Alts: []Sequence{{ref("A")}}},
+		{Name: "A", Alts: []Sequence{{ref("A"), term("a")}, {}}},
+	}}, &ConvertOptions{Tag: "safe", Start: "top"})
+	if err != nil {
+		t.Fatalf("emit failed: %v", err)
+	}
+}
+
 func TestRepetitionSafetyValidatesTailRepeatProgress(t *testing.T) {
 	boundary := func() *Element { return &Element{Kind: KindRegex, Pattern: `\b`} }
 	grammar, opts := safetyEmit(

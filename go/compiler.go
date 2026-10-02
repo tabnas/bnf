@@ -660,8 +660,16 @@ func eliminateDirectLeftRec(prod *Production, debtNames map[string]bool) *Produc
 		seedElement = seeds[0][0]
 	} else {
 		seedElement = &Element{Kind: KindGroup, Alts: seeds}
-		seedElement.sourceRule, seedElement.sourceSp =
-			seeds[0][0].sourceRule, seeds[0][0].sourceSp
+		for _, seed := range seeds {
+			if len(seed) > 0 {
+				seedElement.sourceRule, seedElement.sourceSp =
+					seed[0].sourceRule, seed[0].sourceSp
+				break
+			}
+		}
+		if seedElement.sourceRule == "" {
+			seedElement.sourceRule, seedElement.sourceSp = originOf(prod), prod.Sp
+		}
 	}
 	var tailInner *Element
 	if len(nonTrivial) == 1 && len(nonTrivial[0]) == 1 {
