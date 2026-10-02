@@ -169,6 +169,17 @@ describe('repetition safety', () => {
     )
   })
 
+  it('does not execute an exponentially branching analysis skeleton', () => {
+    const pattern = '\\b' + '(?:|)'.repeat(40) + 'a'
+    const spec = emit([{
+      name: 'top',
+      alts: [[{ kind: 'star', inner: {
+        kind: 'regex', pattern, flags: '',
+      } }]],
+    }])
+    assert.ok(spec.rule.top)
+  })
+
   it('validates the implicit loop produced by a tail-repeat rewrite', () => {
     const boundary = () => ({ kind: 'regex', pattern: '\\b', flags: '' })
     assert.throws(

@@ -3176,6 +3176,11 @@ function cloneGrammar(grammar: Grammar): Grammar {
 // diagnostic with a derived nullability error.
 function regexDerivesEmpty(pattern: string, flags: string): boolean {
   try {
+    new RegExp(pattern, flags)
+    // A syntactically mandatory consuming atom makes the empty match
+    // impossible. Prove that before asking V8: a failing native match can
+    // otherwise backtrack through exponentially many empty alternatives.
+    if (false === regexSkeletonDerivesEmpty(pattern, flags)) return false
     return new RegExp('^(?:' + pattern + ')$', flags).test('')
   } catch {
     return false
@@ -3341,7 +3346,7 @@ function regexCaptureBodyMustConsume(body: string, flags: string): boolean {
          ('<' === body[i + 2] &&
           ('=' === body[i + 3] || '!' === body[i + 3])))) return false
   }
-  return !regexDerivesEmpty(body, flags)
+  return false === regexSkeletonDerivesEmpty(body, flags)
 }
 
 
@@ -3379,9 +3384,9 @@ function regexAssertionForcesGreedyConsumption(
   const assertion = context.groups.get(0)
   if (null == assertion || !assertion.required || assertion.optional) return false
   const body = pattern.slice(3, assertion.end - 1)
+  if (!regexIsSingleAtom(body)) return false
   if (!regexCaptureBodyMustConsume(body, flags)) return false
   const suffix = pattern.slice(assertion.end)
-  if (!regexIsSingleAtom(body)) return false
   for (const atom of [body, '(?:' + body + ')']) {
     if (!suffix.startsWith(atom)) continue
     const quantifier = suffix.slice(atom.length)
@@ -3469,6 +3474,169 @@ function regexAssertionCaptures(
 }
 
 
+type RegexNullabilityFrame = {
+  alternative: boolean
+  sequence: boolean
+  assertion: boolean
+}
+
+
+// Decide whether an analysis skeleton can derive the empty string without
+// running it through JavaScript's backtracking matcher. The skeleton is made
+// only from a regex which compiled above, but replacing assertions can expose
+// exponentially many empty paths that the original matcher never enters.
+// This parser is linear in the skeleton text. Unknown backreferences and
+// assertions answer in the safe, nullable direction.
+function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | null {
+  let frame: RegexNullabilityFrame = {
+    alternative: false,
+    sequence: true,
+    assertion: false,
+  }
+  const stack: RegexNullabilityFrame[] = []
+
+  const applyQuantifier = (
+    atomNullable: boolean,
+    start: number,
+  ): [boolean, number] => {
+    let i = start
+    const ch = pattern[i]
+    if ('?' === ch || '*' === ch) {
+      atomNullable = true
+      i++
+    } else if ('+' === ch) {
+      i++
+    } else if ('{' === ch) {
+      let j = i + 1
+      const digits = j
+      let minimumIsZero = true
+      while (/[0-9]/.test(pattern[j] ?? '')) {
+        if ('0' !== pattern[j]) minimumIsZero = false
+        j++
+      }
+      if (digits < j) {
+        if (',' === pattern[j]) {
+          j++
+          while (/[0-9]/.test(pattern[j] ?? '')) j++
+        }
+        if ('}' === pattern[j]) {
+          atomNullable = atomNullable || minimumIsZero
+          i = j + 1
+        }
+      }
+    }
+    // A lazy marker changes preference, never nullability.
+    if ('?' === pattern[i]) i++
+    return [atomNullable, i]
+  }
+
+  const appendAtom = (atomNullable: boolean, start: number): number => {
+    const quantified = applyQuantifier(atomNullable, start)
+    frame.sequence = frame.sequence && quantified[0]
+    return quantified[1]
+  }
+
+  let i = 0
+  while (i < pattern.length) {
+    const ch = pattern[i]
+    if ('|' === ch) {
+      frame.alternative = frame.alternative || frame.sequence
+      frame.sequence = true
+      i++
+      continue
+    }
+    if (')' === ch) {
+      if (0 === stack.length) return null
+      const nullable = frame.assertion || frame.alternative || frame.sequence
+      frame = stack.pop()!
+      i = appendAtom(nullable, i + 1)
+      continue
+    }
+    if ('(' === ch) {
+      let body = i + 1
+      let assertion = false
+      if ('?' === pattern[i + 1]) {
+        const kind = pattern[i + 2]
+        if ('=' === kind || '!' === kind) {
+          assertion = true
+          body = i + 3
+        } else if ('<' === kind &&
+            ('=' === pattern[i + 3] || '!' === pattern[i + 3])) {
+          assertion = true
+          body = i + 4
+        } else if ('<' === kind) {
+          const end = pattern.indexOf('>', i + 3)
+          if (-1 === end) return null
+          body = end + 1
+        } else if (':' === kind) {
+          body = i + 3
+        } else {
+          // Scoped JavaScript modifiers, for example `(?i-ms:...)`.
+          let end = i + 2
+          while (/[ims-]/.test(pattern[end] ?? '')) end++
+          if (':' !== pattern[end] || end === i + 2) return null
+          body = end + 1
+        }
+      }
+      stack.push(frame)
+      frame = { alternative: false, sequence: true, assertion }
+      i = body
+      continue
+    }
+    if ('[' === ch) {
+      let depth = 1
+      let end = i + 1
+      while (end < pattern.length && 0 < depth) {
+        if ('\\' === pattern[end]) {
+          end += 2
+          continue
+        }
+        if (flags.includes('v') && '[' === pattern[end]) depth++
+        else if (']' === pattern[end]) depth--
+        end++
+      }
+      if (0 !== depth) return null
+      i = appendAtom(false, end)
+      continue
+    }
+    if ('\\' === ch) {
+      const next = pattern[i + 1]
+      if (null == next) return null
+      let end = i + 2
+      let nullable = 'b' === next || 'B' === next || /[1-9]/.test(next)
+      if (/[1-9]/.test(next)) {
+        while (/[0-9]/.test(pattern[end] ?? '')) end++
+      } else if ('k' === next && '<' === pattern[i + 2]) {
+        const close = pattern.indexOf('>', i + 3)
+        if (-1 === close) return null
+        nullable = true
+        end = close + 1
+      } else if (('p' === next || 'P' === next || 'u' === next) &&
+          '{' === pattern[i + 2]) {
+        const close = pattern.indexOf('}', i + 3)
+        if (-1 === close) return null
+        end = close + 1
+      } else if ('c' === next && end < pattern.length) {
+        end++
+      } else if ('x' === next) {
+        end = Math.min(pattern.length, end + 2)
+      } else if ('u' === next && '{' !== pattern[i + 2]) {
+        end = Math.min(pattern.length, end + 4)
+      }
+      i = appendAtom(nullable, end)
+      continue
+    }
+    if ('^' === ch || '$' === ch) {
+      i = appendAtom(true, i + 1)
+      continue
+    }
+    i = appendAtom(false, i + 1)
+  }
+  if (0 !== stack.length) return null
+  return frame.assertion || frame.alternative || frame.sequence
+}
+
+
 // A regex can succeed without consuming even when it does not match the
 // wholly empty input: `\\b` before a word character and `(?=word)` are the
 // common examples. Replace zero-width assertions with an empty group and ask
@@ -3490,7 +3658,6 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
 
   let skeleton = ''
   let inClass = false
-  let changed = false
   let captureCount = 0
   const assertionCaptures = new Map<number, string>()
   const assertionNamedCaptures = new Map<string, string>()
@@ -3499,7 +3666,6 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
     if ('\\' === ch) {
       const next = pattern[i + 1]
       if (!inClass && ('b' === next || 'B' === next)) {
-        changed = true
         skeleton += '()'
         i++
       } else if (!inClass && /[1-9]/.test(next ?? '')) {
@@ -3536,7 +3702,6 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
     }
     if ('[' === ch) { inClass = true; skeleton += ch; continue }
     if ('^' === ch || '$' === ch) {
-      changed = true
       skeleton += '()'
       continue
     }
@@ -3549,7 +3714,6 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
       const captures = regexAssertionCaptures(
         pattern, flags, context, i, end, captureCount)
       if (null == captures) return true
-      changed = true
       // Keep one capture placeholder per removed capture so numeric groups
       // outside the assertion retain their original numbering.
       skeleton += captures.length === 0 ? '()' : '()'.repeat(captures.length)
@@ -3570,20 +3734,14 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
     }
     skeleton += ch
   }
-  if (!changed) return false
-  try {
-    const skeletonMayBeEmpty = new RegExp(
-      '^(?:' + skeleton + ')$', flags).test('')
-    return skeletonMayBeEmpty &&
-      !regexAssertionForcesGreedyConsumption(pattern, flags, context)
-  } catch {
-    // The original expression compiled above. Replacing a lookaround can
-    // still invalidate this analysis-only skeleton when a later
-    // backreference names a capture inside the removed assertion. An
-    // unanalysable skeleton must be treated in the safe direction: the
-    // matcher may be zero-width, so it cannot sit in an unbounded loop.
-    return true
-  }
+  const skeletonMayBeEmpty = regexSkeletonDerivesEmpty(skeleton, flags)
+  // The original expression compiled above. Replacing a lookaround can
+  // still leave an analysis-only skeleton this bounded parser cannot read.
+  // Fail closed: the matcher may be zero-width, so it cannot sit in an
+  // unbounded loop.
+  return null == skeletonMayBeEmpty ||
+    (skeletonMayBeEmpty &&
+      !regexAssertionForcesGreedyConsumption(pattern, flags, context))
 }
 
 

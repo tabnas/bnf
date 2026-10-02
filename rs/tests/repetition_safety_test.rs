@@ -71,6 +71,25 @@ fn allows_a_boundary_regex_that_must_also_consume_input() {
 }
 
 #[test]
+fn extended_mode_comments_do_not_hide_a_real_boundary() {
+    let err = emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::star(Element::regex("(?x)# [\n\\b", ""))]],
+    )]))
+    .expect_err("boundary after an extended-mode comment compiled");
+    assert!(err.message.contains("unbounded repetition"), "{err}");
+}
+
+#[test]
+fn extended_mode_comments_do_not_make_a_consuming_regex_nullable() {
+    emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::star(Element::regex("(?x)# [\n[a-z]+", ""))]],
+    )]))
+    .expect("consuming regex after an extended-mode comment");
+}
+
+#[test]
 fn refuses_an_extended_word_boundary_without_consuming_input() {
     for boundary in [r"\b{start}", r"\b{end}", r"\b{start-half}", r"\b{end-half}"] {
         let err = emit(&Grammar::new(vec![prod(

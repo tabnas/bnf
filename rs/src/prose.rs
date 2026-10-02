@@ -396,6 +396,8 @@ fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
     let bytes = pattern.as_bytes();
     let mut skeleton = Vec::with_capacity(bytes.len());
     let mut in_class = false;
+    let mut extended = false;
+    let mut extended_stack = Vec::new();
     let mut changed = false;
     let mut i = 0;
     while i < bytes.len() {
@@ -430,6 +432,20 @@ fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
             i += 2;
             continue;
         }
+        if !in_class && extended && ch == b'#' {
+            // In extended mode a comment runs to the next LF. Its contents
+            // are not regex syntax: in particular, an unmatched `[` in the
+            // comment must not hide a real boundary on the following line.
+            while i < bytes.len() {
+                let comment = bytes[i];
+                skeleton.push(comment);
+                i += 1;
+                if comment == b'\n' {
+                    break;
+                }
+            }
+            continue;
+        }
         if in_class {
             skeleton.push(ch);
             if ch == b']' {
@@ -438,7 +454,45 @@ fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
             i += 1;
             continue;
         }
-        if ch == b'[' {
+        if ch == b'(' && i + 2 < bytes.len() && bytes[i + 1] == b'?' {
+            let mut j = i + 2;
+            let mut enabled = true;
+            let mut next_extended = extended;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'-' => enabled = false,
+                    b'x' => next_extended = enabled,
+                    b'i' | b'm' | b's' | b'R' | b'U' | b'u' => {}
+                    _ => break,
+                }
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b':' {
+                // `(?:...)` is the empty flag set; `(?x:...)` and
+                // `(?-x:...)` change extended mode only for this group.
+                extended_stack.push(extended);
+                extended = next_extended;
+                skeleton.extend_from_slice(&bytes[i..=j]);
+                i = j + 1;
+                continue;
+            }
+            if i + 2 < j && j < bytes.len() && bytes[j] == b')' {
+                // A flag-only group changes the rest of the current scope.
+                extended = next_extended;
+                skeleton.extend_from_slice(&bytes[i..=j]);
+                i = j + 1;
+                continue;
+            }
+        }
+        if ch == b'(' {
+            extended_stack.push(extended);
+            skeleton.push(ch);
+        } else if ch == b')' {
+            if let Some(outer) = extended_stack.pop() {
+                extended = outer;
+            }
+            skeleton.push(ch);
+        } else if ch == b'[' {
             in_class = true;
             skeleton.push(ch);
         } else if ch == b'^' || ch == b'$' {
