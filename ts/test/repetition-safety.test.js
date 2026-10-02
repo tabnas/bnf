@@ -68,6 +68,34 @@ describe('repetition safety', () => {
     assert.ok(spec.rule.top)
   })
 
+  it('refuses a quantified group containing only an assertion', () => {
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern: '(?:\\b)+', flags: '',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
+  it('validates the implicit loop produced by a tail-repeat rewrite', () => {
+    const boundary = () => ({ kind: 'regex', pattern: '\\b', flags: '' })
+    assert.throws(
+      () => emit([
+        { name: 'top', alts: [[ref('X')]] },
+        { name: 'X', alts: [[
+          boundary(),
+          { kind: 'opt', inner: {
+            kind: 'group', alts: [[boundary(), ref('X')]],
+          } },
+        ]] },
+      ]),
+      /rule 'X'.*unbounded tail repetition.*without consuming input/,
+    )
+  })
+
   it('attributes a copied left-recursion loop to its source rule', () => {
     const sp = { s: 20, e: 21, r: 2, c: 1 }
     assert.throws(
@@ -86,6 +114,24 @@ describe('repetition safety', () => {
         assert.equal(error.rule, 'A')
         assert.deepEqual(error.sp, sp)
         assert.match(error.message, /rule 'A'.*unbounded repetition/)
+        return true
+      },
+    )
+  })
+
+  it('attributes a nullable grouped tail to the alternative that made it nullable', () => {
+    const csp = { s: 40, e: 41, r: 4, c: 1 }
+    assert.throws(
+      () => emit([
+        { name: 'top', alts: [[ref('A')]] },
+        { name: 'A', alts: [[ref('B')], [ref('C')], [lit('z')]] },
+        { name: 'B', alts: [[ref('A'), lit('x')]] },
+        { name: 'C', sp: csp,
+          alts: [[ref('A'), { kind: 'opt', inner: lit('y') }]] },
+      ]),
+      (error) => {
+        assert.equal(error.rule, 'C')
+        assert.deepEqual(error.sp, csp)
         return true
       },
     )

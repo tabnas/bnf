@@ -94,9 +94,12 @@ func regexDerivesEmpty(pattern, flags string) bool {
 }
 
 // regexMayMatchWithoutConsuming catches context-dependent zero-width
-// matches such as `\b` before a word character. Strip the zero-width
-// assertions understood by RE2 and ask whether the consuming skeleton is
-// nullable. Invalid patterns remain for the emitter's specific diagnostic.
+// matches such as `\b` before a word character. Replace the zero-width
+// assertions understood by RE2 with an empty group and ask whether the
+// consuming skeleton is nullable. Keeping a placeholder matters when an
+// assertion is itself grouped or quantified: deleting it can leave an invalid
+// skeleton and hide a valid non-consuming matcher. Invalid patterns remain
+// for the emitter's specific diagnostic.
 func regexMayMatchWithoutConsuming(pattern, flags string) bool {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return false
@@ -115,6 +118,7 @@ func regexMayMatchWithoutConsuming(pattern, flags string) bool {
 				if !inClass && (next == 'b' || next == 'B' ||
 					next == 'A' || next == 'z') {
 					changed = true
+					skeleton.WriteString("()")
 					i++
 					continue
 				}
@@ -138,6 +142,7 @@ func regexMayMatchWithoutConsuming(pattern, flags string) bool {
 		}
 		if ch == '^' || ch == '$' {
 			changed = true
+			skeleton.WriteString("()")
 			continue
 		}
 		skeleton.WriteByte(ch)
@@ -347,6 +352,40 @@ func validateRepetitions(grammar *Grammar) *EmitError {
 
 	nullable := nonConsumingRules(grammar.Productions)
 
+	var nonConsumingWitness func(*Element) *Element
+	nonConsumingWitness = func(el *Element) *Element {
+		if el == nil || !elementMayMatchWithoutConsuming(el, nullable) {
+			return nil
+		}
+		if el.Kind == KindGroup {
+			for _, alt := range el.Alts {
+				nonConsuming := true
+				for _, child := range alt {
+					if !elementMayMatchWithoutConsuming(child, nullable) {
+						nonConsuming = false
+						break
+					}
+				}
+				if !nonConsuming {
+					continue
+				}
+				for _, child := range alt {
+					if witness := nonConsumingWitness(child); witness != nil {
+						return witness
+					}
+				}
+				return el
+			}
+			return nil
+		}
+		if el.Kind == KindPlus || (el.Kind == KindRep && el.Min > 0) {
+			if witness := nonConsumingWitness(el.Inner); witness != nil {
+				return witness
+			}
+		}
+		return el
+	}
+
 	var walk func(*Element, *Production) *EmitError
 	walk = func(el *Element, prod *Production) *EmitError {
 		if el == nil {
@@ -370,7 +409,11 @@ func validateRepetitions(grammar *Grammar) *EmitError {
 		unbounded := el.Kind == KindStar || el.Kind == KindPlus ||
 			(el.Kind == KindRep && el.Max == MaxInfinity)
 		if unbounded && elementMayMatchWithoutConsuming(el.Inner, nullable) {
-			return refuse(el, prod,
+			witness := nonConsumingWitness(el.Inner)
+			if witness == nil {
+				witness = el
+			}
+			return refuse(witness, prod,
 				"has an unbounded repetition whose item can succeed without consuming input. "+
 					"An unbounded repetition must consume input on every iteration.")
 		}
@@ -420,6 +463,28 @@ func validateRepetitions(grammar *Grammar) *EmitError {
 				if err := walk(el, prod); err != nil {
 					return err
 				}
+			}
+		}
+		if prod.TailRepeat != nil {
+			cycle := append(append(Sequence{}, prod.TailRepeat.Sep...), prod.Alts[0]...)
+			nonConsuming := len(cycle) > 0
+			for _, el := range cycle {
+				if !elementMayMatchWithoutConsuming(el, nullable) {
+					nonConsuming = false
+					break
+				}
+			}
+			if nonConsuming {
+				witness := cycle[0]
+				for _, el := range cycle {
+					if found := nonConsumingWitness(el); found != nil {
+						witness = found
+						break
+					}
+				}
+				return refuse(witness, prod,
+					"has an unbounded tail repetition that can succeed without consuming input. "+
+						"An unbounded repetition must consume input on every iteration.")
 			}
 		}
 	}

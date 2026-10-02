@@ -3181,8 +3181,10 @@ function regexAssertionEnd(pattern: string, open: number): number | null {
 
 // A regex can succeed without consuming even when it does not match the
 // wholly empty input: `\\b` before a word character and `(?=word)` are the
-// common examples. Remove zero-width assertions and ask whether the
-// remaining consuming skeleton is nullable. This is deliberately
+// common examples. Replace zero-width assertions with an empty group and ask
+// whether the remaining consuming skeleton is nullable. The placeholder is
+// load-bearing: removing `\\b` from `(?:\\b)+` leaves the invalid `(?:)+`
+// and would hide a valid non-consuming matcher. This is deliberately
 // conservative for contradictory assertions; refusing an impossible loop is
 // safer than admitting a loop that can re-enter at one source position.
 function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean {
@@ -3203,6 +3205,7 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
       const next = pattern[i + 1]
       if (!inClass && ('b' === next || 'B' === next)) {
         changed = true
+        skeleton += '()'
         i++
       } else {
         skeleton += ch
@@ -3216,7 +3219,11 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
       continue
     }
     if ('[' === ch) { inClass = true; skeleton += ch; continue }
-    if ('^' === ch || '$' === ch) { changed = true; continue }
+    if ('^' === ch || '$' === ch) {
+      changed = true
+      skeleton += '()'
+      continue
+    }
     if ('(' === ch && '?' === pattern[i + 1] &&
         ('=' === pattern[i + 2] || '!' === pattern[i + 2] ||
          ('<' === pattern[i + 2] &&
@@ -3224,6 +3231,7 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
       const end = regexAssertionEnd(pattern, i)
       if (null == end) return false
       changed = true
+      skeleton += '()'
       i = end - 1
       continue
     }
@@ -3409,6 +3417,27 @@ function validateRepetitions(grammar: Grammar): void {
 
   const nullable = nonConsumingRules(grammar.productions)
 
+  // Point a refusal at the authored element that establishes non-consumption,
+  // rather than at a synthesized group carrying the first alternative's
+  // source. Paull substitution can combine tails from several productions.
+  const nonConsumingWitness = (el: Element): Element | null => {
+    if (!elementMayMatchWithoutConsuming(el, nullable)) return null
+    if ('group' === el.kind) {
+      const alt = el.alts.find((candidate) => candidate.every((child) =>
+        elementMayMatchWithoutConsuming(child, nullable)))
+      if (null == alt) return null
+      for (const child of alt) {
+        const witness = nonConsumingWitness(child)
+        if (null != witness) return witness
+      }
+      return el
+    }
+    if ('plus' === el.kind || ('rep' === el.kind && 0 < el.min)) {
+      return nonConsumingWitness(el.inner) ?? el
+    }
+    return el
+  }
+
   const walk = (el: Element, prod: Production): void => {
     if (el.kind === 'group') {
       for (const alt of el.alts) for (const child of alt) walk(child, prod)
@@ -3420,7 +3449,7 @@ function validateRepetitions(grammar: Grammar): void {
     const unbounded = el.kind === 'star' || el.kind === 'plus' ||
       (el.kind === 'rep' && el.max === Infinity)
     if (unbounded && elementMayMatchWithoutConsuming(el.inner, nullable)) {
-      refuse(el, prod,
+      refuse(nonConsumingWitness(el.inner) ?? el, prod,
         `has an unbounded repetition whose item can succeed without ` +
         `consuming input. ` +
         `An unbounded repetition must consume input on every iteration.`)
@@ -3445,6 +3474,24 @@ function validateRepetitions(grammar: Grammar): void {
 
   for (const prod of grammar.productions) {
     for (const alt of prod.alts) for (const el of alt) walk(el, prod)
+    if (null != prod.tailRepeat) {
+      // One close-phase iteration consumes the separator and then re-enters
+      // the rule, whose open phase consumes the prefix. Both must not be
+      // zero-width together; tailRepeat is outside the explicit sugar walk.
+      const cycle = [...prod.tailRepeat.sep, ...(prod.alts[0] ?? [])]
+      if (cycle.length > 0 && cycle.every((el) =>
+        elementMayMatchWithoutConsuming(el, nullable))) {
+        let witness: Element = cycle[0]
+        for (const el of cycle) {
+          const found = nonConsumingWitness(el)
+          if (null != found) { witness = found; break }
+        }
+        refuse(witness, prod,
+          `has an unbounded tail repetition that can succeed without ` +
+          `consuming input. An unbounded repetition must consume input ` +
+          `on every iteration.`)
+      }
+    }
   }
 }
 

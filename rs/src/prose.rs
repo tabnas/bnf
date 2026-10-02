@@ -390,7 +390,9 @@ fn regex_derives_empty(pattern: &str, flags: &str) -> bool {
 /// Whether a regex can succeed without consuming in some following
 /// context. `\b` before a word character is the important case: it does
 /// not match the wholly empty input, but it still lets a repetition
-/// re-enter at one source position.
+/// re-enter at one source position. Assertions become an empty group rather
+/// than disappearing: deleting one from a quantified group can leave an
+/// invalid skeleton and hide a valid non-consuming matcher.
 fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
     let mut seen = String::new();
     for flag in flags.chars() {
@@ -422,6 +424,7 @@ fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
             let next = bytes[i + 1];
             if !in_class && matches!(next, b'b' | b'B' | b'A' | b'z' | b'<' | b'>') {
                 changed = true;
+                skeleton.extend_from_slice(b"()");
                 i += 2;
                 continue;
             }
@@ -442,6 +445,7 @@ fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
             skeleton.push(ch);
         } else if ch == b'^' || ch == b'$' {
             changed = true;
+            skeleton.extend_from_slice(b"()");
         } else {
             skeleton.push(ch);
         }
@@ -591,6 +595,34 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
 
     let nullable = non_consuming_rules(&grammar.productions);
 
+    fn non_consuming_witness<'a>(
+        el: &'a Element,
+        nullable: &IndexSet<String>,
+    ) -> Option<&'a Element> {
+        if !element_may_match_without_consuming(el, nullable) {
+            return None;
+        }
+        if let Kind::Group { alts } = &el.kind {
+            let alt = alts.iter().find(|alt| {
+                alt.iter()
+                    .all(|child| element_may_match_without_consuming(child, nullable))
+            })?;
+            for child in alt {
+                if let Some(witness) = non_consuming_witness(child, nullable) {
+                    return Some(witness);
+                }
+            }
+            return Some(el);
+        }
+        match &el.kind {
+            Kind::Plus { inner }
+            | Kind::Rep {
+                min: 1.., inner, ..
+            } => non_consuming_witness(inner, nullable).or(Some(el)),
+            _ => Some(el),
+        }
+    }
+
     fn walk(
         el: &Element,
         prod: &Production,
@@ -615,7 +647,7 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
             || matches!(&el.kind, Kind::Rep { max: None, .. });
         if unbounded && element_may_match_without_consuming(inner, nullable) {
             return Err(refuse(
-                el,
+                non_consuming_witness(inner, nullable).unwrap_or(el),
                 prod,
                 "has an unbounded repetition whose item can succeed without consuming input. \
                  An unbounded repetition must consume input on every iteration."
@@ -663,6 +695,31 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
     for prod in &grammar.productions {
         for el in prod.alts.iter().flatten() {
             walk(el, prod, &nullable, &mut expansion)?;
+        }
+        if let Some(tail) = &prod.tail_repeat {
+            let cycle = tail.sep.iter().chain(prod.alts[0].iter());
+            if cycle.clone().next().is_some()
+                && cycle
+                    .clone()
+                    .all(|el| element_may_match_without_consuming(el, &nullable))
+            {
+                let fallback = tail
+                    .sep
+                    .first()
+                    .or_else(|| prod.alts.first().and_then(|alt| alt.first()))
+                    .expect("a non-empty tail cycle has an element");
+                let witness = cycle
+                    .filter_map(|el| non_consuming_witness(el, &nullable))
+                    .next()
+                    .unwrap_or(fallback);
+                return Err(refuse(
+                    witness,
+                    prod,
+                    "has an unbounded tail repetition that can succeed without consuming input. \
+                     An unbounded repetition must consume input on every iteration."
+                        .to_string(),
+                ));
+            }
         }
     }
     Ok(())

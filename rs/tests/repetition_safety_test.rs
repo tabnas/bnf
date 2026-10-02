@@ -61,6 +61,33 @@ fn allows_a_boundary_regex_that_must_also_consume_input() {
 }
 
 #[test]
+fn refuses_a_quantified_group_containing_only_an_assertion() {
+    let err = emit(&Grammar::new(vec![prod(
+        "top",
+        vec![vec![Element::star(Element::regex(r"(?:\b)+", ""))]],
+    )]))
+    .expect_err("quantified zero-width group compiled");
+    assert!(err.message.contains("unbounded repetition"), "{err}");
+}
+
+#[test]
+fn validates_the_implicit_loop_produced_by_a_tail_repeat_rewrite() {
+    let boundary = || Element::regex(r"\b", "");
+    let err = emit(&Grammar::new(vec![
+        prod("top", vec![vec![reference("X")]]),
+        prod(
+            "X",
+            vec![vec![
+                boundary(),
+                Element::opt(group(vec![vec![boundary(), reference("X")]])),
+            ]],
+        ),
+    ]))
+    .expect_err("non-consuming tail repeat compiled");
+    assert!(err.message.contains("unbounded tail repetition"), "{err}");
+}
+
+#[test]
 fn attributes_a_copied_left_recursion_loop_to_its_source_rule() {
     let sp = SrcSpan::at(20, 21, 2, 1);
     let mut source = prod(
@@ -82,6 +109,32 @@ fn attributes_a_copied_left_recursion_loop_to_its_source_rule() {
     .expect_err("nullable copied loop compiled");
     assert_eq!(err.rule.as_deref(), Some("A"));
     assert_eq!(err.sp, Some(sp));
+}
+
+#[test]
+fn attributes_a_nullable_grouped_tail_to_the_alternative_that_made_it_nullable() {
+    let csp = SrcSpan::at(40, 41, 4, 1);
+    let mut c = prod(
+        "C",
+        vec![vec![reference("A"), Element::opt(sens_term("y"))]],
+    );
+    c.sp = Some(csp);
+    let err = emit(&Grammar::new(vec![
+        prod("top", vec![vec![reference("A")]]),
+        prod(
+            "A",
+            vec![
+                vec![reference("B")],
+                vec![reference("C")],
+                vec![sens_term("z")],
+            ],
+        ),
+        prod("B", vec![vec![reference("A"), sens_term("x")]]),
+        c,
+    ]))
+    .expect_err("nullable grouped tail compiled");
+    assert_eq!(err.rule.as_deref(), Some("C"));
+    assert_eq!(err.sp, Some(csp));
 }
 
 #[test]

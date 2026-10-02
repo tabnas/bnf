@@ -82,6 +82,23 @@ func TestRepetitionSafetyAllowsConsumingBoundaryRegex(t *testing.T) {
 	}
 }
 
+func TestRepetitionSafetyValidatesTailRepeatProgress(t *testing.T) {
+	boundary := func() *Element { return &Element{Kind: KindRegex, Pattern: `\b`} }
+	grammar, opts := safetyEmit(
+		&Production{Name: "top", Alts: []Sequence{{{Kind: KindRef, Name: "X"}}}},
+		&Production{Name: "X", Alts: []Sequence{{
+			boundary(),
+			{Kind: KindOpt, Inner: &Element{Kind: KindGroup, Alts: []Sequence{{
+				boundary(), {Kind: KindRef, Name: "X"},
+			}}}},
+		}}},
+	)
+	_, err := EmitGrammarSpec(grammar, opts)
+	if err == nil || !strings.Contains(err.Error(), "unbounded tail repetition") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRepetitionSafetyAttributesCopiedLoopToSource(t *testing.T) {
 	sp := &SrcSpan{S: 20, E: 21, R: 2, C: 1}
 	grammar, opts := safetyEmit(
@@ -97,6 +114,29 @@ func TestRepetitionSafetyAttributesCopiedLoopToSource(t *testing.T) {
 	ee, ok := err.(*EmitError)
 	if !ok || ee.Rule != "A" || ee.Sp != sp {
 		t.Fatalf("error = %#v, want ranged EmitError for A", err)
+	}
+}
+
+func TestRepetitionSafetyAttributesNullableGroupedTailToItsSource(t *testing.T) {
+	csp := &SrcSpan{S: 40, E: 41, R: 4, C: 1}
+	grammar, opts := safetyEmit(
+		&Production{Name: "top", Alts: []Sequence{{{Kind: KindRef, Name: "A"}}}},
+		&Production{Name: "A", Alts: []Sequence{
+			{{Kind: KindRef, Name: "B"}},
+			{{Kind: KindRef, Name: "C"}},
+			{safetyLit("z")},
+		}},
+		&Production{Name: "B", Alts: []Sequence{{
+			{Kind: KindRef, Name: "A"}, safetyLit("x"),
+		}}},
+		&Production{Name: "C", Sp: csp, Alts: []Sequence{{
+			{Kind: KindRef, Name: "A"}, {Kind: KindOpt, Inner: safetyLit("y")},
+		}}},
+	)
+	_, err := EmitGrammarSpec(grammar, opts)
+	ee, ok := err.(*EmitError)
+	if !ok || ee.Rule != "C" || ee.Sp != csp {
+		t.Fatalf("error = %#v, want ranged EmitError for C", err)
 	}
 }
 
