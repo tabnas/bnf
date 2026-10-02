@@ -9,8 +9,123 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::annotate::exempt_alias;
 use crate::ir::{
-    diag_name, refs_in, Element, EmitError, Grammar, Kind, Production, Sequence, TailRepeatSpec,
+    diag_name, refs_in, Element, EmitError, Grammar, Kind, Production, Sequence, SrcSpan,
+    TailRepeatSpec,
 };
+use crate::prose::{element_may_match_without_consuming, non_consuming_rules};
+
+/// Rewrite provenance is compiler-private. Rust callers can therefore keep
+/// constructing the public `Element { kind, sp }` shape while Paull
+/// substitution still attributes a synthesized loop to the element that was
+/// copied into it. The vectors mirror production alternatives and their
+/// top-level elements; every rewrite below updates both in lockstep.
+#[derive(Clone)]
+struct RewriteSource {
+    rule: String,
+    sp: Option<SrcSpan>,
+    children: RewriteSourceChildren,
+}
+
+#[derive(Clone)]
+enum RewriteSourceChildren {
+    None,
+    Inner(Box<RewriteSource>),
+    Group(Vec<Vec<RewriteSource>>),
+}
+
+type RewriteSources = IndexMap<String, Vec<Vec<RewriteSource>>>;
+type RewriteLoop = (Sequence, Vec<RewriteSource>);
+type DirectRewrite = (Production, Vec<Vec<RewriteSource>>, Vec<RewriteLoop>);
+
+fn authored_source(el: &Element, prod: &Production) -> RewriteSource {
+    let children = match &el.kind {
+        Kind::Opt { inner }
+        | Kind::Star { inner, .. }
+        | Kind::Plus { inner }
+        | Kind::Rep { inner, .. } => {
+            RewriteSourceChildren::Inner(Box::new(authored_source(inner, prod)))
+        }
+        Kind::Group { alts } => RewriteSourceChildren::Group(
+            alts.iter()
+                .map(|alt| {
+                    alt.iter()
+                        .map(|child| authored_source(child, prod))
+                        .collect()
+                })
+                .collect(),
+        ),
+        _ => RewriteSourceChildren::None,
+    };
+    RewriteSource {
+        rule: crate::ir::origin_of(prod).to_string(),
+        sp: el.sp.or(prod.sp),
+        children,
+    }
+}
+
+fn generated_group_source(
+    alts: Vec<Vec<RewriteSource>>,
+    fallback: &RewriteSource,
+) -> RewriteSource {
+    let mut source = alts
+        .iter()
+        .flatten()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| fallback.clone());
+    source.children = RewriteSourceChildren::Group(alts);
+    source
+}
+
+fn nullable_sugar_sources(el: &Element, source: &RewriteSource) -> Option<Vec<RewriteSource>> {
+    let inner = match &source.children {
+        RewriteSourceChildren::Inner(inner) => inner.as_ref().clone(),
+        _ => return None,
+    };
+    match &el.kind {
+        Kind::Opt { .. } => Some(vec![inner]),
+        Kind::Star { .. } => Some(vec![inner, source.clone()]),
+        Kind::Rep { min: 0, max, .. } => match max {
+            Some(0) => None,
+            None => Some(vec![inner, source.clone()]),
+            Some(1) => Some(vec![inner]),
+            Some(_) => Some(vec![inner, source.clone()]),
+        },
+        _ => None,
+    }
+}
+
+fn non_consuming_source<'a>(
+    el: &Element,
+    source: &'a RewriteSource,
+    nullable: &IndexSet<String>,
+) -> Option<&'a RewriteSource> {
+    if !element_may_match_without_consuming(el, nullable) {
+        return None;
+    }
+    match (&el.kind, &source.children) {
+        (Kind::Group { alts }, RewriteSourceChildren::Group(alt_sources)) => {
+            let (alt, sources) = alts.iter().zip(alt_sources).find(|(alt, _)| {
+                alt.iter()
+                    .all(|child| element_may_match_without_consuming(child, nullable))
+            })?;
+            alt.iter()
+                .zip(sources)
+                .find_map(|(child, child_source)| {
+                    non_consuming_source(child, child_source, nullable)
+                })
+                .or(Some(source))
+        }
+        (
+            Kind::Plus { inner }
+            | Kind::Rep {
+                min: 1.., inner, ..
+            },
+            RewriteSourceChildren::Inner(inner_source),
+        ) => non_consuming_source(inner, inner_source, nullable).or(Some(source)),
+        _ => Some(source),
+    }
+}
 
 /// Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
 /// Returns the element sequence for the branch where the sugar DOES
@@ -29,7 +144,7 @@ fn nullable_sugar_present(el: &Element) -> Option<Sequence> {
             Some(1) => Some(vec![(**inner).clone()]),
             Some(max) => Some(vec![
                 (**inner).clone(),
-                Element::rep(0, Some(max - 1), (**inner).clone()).carry_source_from(el),
+                Element::rep(0, Some(max - 1), (**inner).clone()),
             ]),
         },
         _ => None,
@@ -59,7 +174,10 @@ fn is_hidden_left_recursive(alt: &[Element], name: &str) -> bool {
 /// recursion that `eliminate_direct_left_rec` can remove:
 ///
 /// `A = ["x"] A "y" / "z"` becomes `A = "x" A "y" / A "y" / "z"`
-fn expand_nullable_left_prefixes(prods: Vec<Production>) -> Vec<Production> {
+fn expand_nullable_left_prefixes(
+    prods: Vec<Production>,
+    sources: &mut RewriteSources,
+) -> Vec<Production> {
     prods
         .into_iter()
         .map(|p| {
@@ -79,10 +197,24 @@ fn expand_nullable_left_prefixes(prods: Vec<Production>) -> Vec<Production> {
                 let alt = alts[idx].clone();
                 let present = nullable_sugar_present(&alt[0])
                     .expect("hidden left recursion starts with nullable sugar");
+                let present_len = present.len();
                 let mut with: Sequence = present;
                 with.extend(alt[1..].iter().cloned());
                 let without: Sequence = alt[1..].to_vec();
                 alts.splice(idx..=idx, [with, without]);
+                let alt_sources = sources
+                    .get_mut(&p.name)
+                    .expect("every rewrite production has source metadata");
+                let original = alt_sources[idx].clone();
+                let first = original
+                    .first()
+                    .expect("hidden left recursion starts with an element");
+                let mut with_sources = nullable_sugar_sources(&alt[0], first)
+                    .expect("source metadata mirrors nullable sugar");
+                debug_assert_eq!(present_len, with_sources.len());
+                with_sources.extend(original[1..].iter().cloned());
+                let without_sources = original[1..].to_vec();
+                alt_sources.splice(idx..=idx, [with_sources, without_sources]);
                 changed = true;
             }
             if changed {
@@ -119,66 +251,29 @@ pub(crate) fn eliminate_left_recursion_keeping(
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
-
-    // Order productions so that rules referenced at a leading position
-    // are processed before the rules that reference them.
-    fn clone_element_for_rewrite(el: &Element, prod: &Production) -> Element {
-        let kind = match &el.kind {
-            Kind::Opt { inner } => Kind::Opt {
-                inner: Box::new(clone_element_for_rewrite(inner, prod)),
-            },
-            Kind::Star { inner, debt_guard } => Kind::Star {
-                inner: Box::new(clone_element_for_rewrite(inner, prod)),
-                debt_guard: debt_guard.clone(),
-            },
-            Kind::Plus { inner } => Kind::Plus {
-                inner: Box::new(clone_element_for_rewrite(inner, prod)),
-            },
-            Kind::Rep { min, max, inner } => Kind::Rep {
-                min: *min,
-                max: *max,
-                inner: Box::new(clone_element_for_rewrite(inner, prod)),
-            },
-            Kind::Group { alts } => Kind::Group {
-                alts: alts
-                    .iter()
-                    .map(|alt| {
-                        alt.iter()
-                            .map(|child| clone_element_for_rewrite(child, prod))
-                            .collect()
-                    })
-                    .collect(),
-            },
-            kind => kind.clone(),
-        };
-        Element {
-            kind,
-            sp: el.sp,
-            source_rule: el
-                .source_rule
-                .clone()
-                .or_else(|| Some(crate::ir::origin_of(prod).to_string())),
-            source_sp: el.source_sp.or(el.sp).or(prod.sp),
-        }
-    }
+    let mut rewrite_loops: Vec<RewriteLoop> = Vec::new();
 
     let copies: Vec<Production> = grammar
         .productions
         .iter()
+        .map(|p| p.rebuilt(p.alts.clone()))
+        .collect();
+    let mut sources: RewriteSources = grammar
+        .productions
+        .iter()
         .map(|p| {
-            p.rebuilt(
-                p.alts
-                    .iter()
-                    .map(|alt| {
-                        alt.iter()
-                            .map(|el| clone_element_for_rewrite(el, p))
-                            .collect()
-                    })
-                    .collect(),
-            )
+            let alts = p
+                .alts
+                .iter()
+                .map(|alt| alt.iter().map(|el| authored_source(el, p)).collect())
+                .collect();
+            (p.name.clone(), alts)
         })
         .collect();
-    let mut prods = topo_order_for_paull(expand_nullable_left_prefixes(copies));
+    // Order productions so that rules referenced at a leading position
+    // are processed before the rules that reference them. Source metadata
+    // is keyed by production name, so reordering cannot detach it.
+    let mut prods = topo_order_for_paull(expand_nullable_left_prefixes(copies, &mut sources));
 
     // Substitution normally runs for every production, even a cycle-free
     // one. One case is exempt: a PURE ALIAS, a production whose single
@@ -209,10 +304,28 @@ pub(crate) fn eliminate_left_recursion_keeping(
                         // substitution gives (the token consumed, no node)
                         // without the one-alternate-per-member fan-out.
                         let class_name = prods[j].name.clone();
-                        prods[i] = substitute_leading_ref_by_token(&prods[i], &class_name);
+                        let target_name = prods[i].name.clone();
+                        let target_sources = sources[&target_name].clone();
+                        let (next, next_sources) = substitute_leading_ref_by_token(
+                            &prods[i],
+                            &target_sources,
+                            &class_name,
+                        );
+                        prods[i] = next;
+                        sources.insert(target_name, next_sources);
                     } else {
                         let source = prods[j].clone();
-                        prods[i] = substitute_leading_ref(&prods[i], &source);
+                        let target_name = prods[i].name.clone();
+                        let target_sources = sources[&target_name].clone();
+                        let source_sources = sources[&source.name].clone();
+                        let (next, next_sources) = substitute_leading_ref(
+                            &prods[i],
+                            &target_sources,
+                            &source,
+                            &source_sources,
+                        );
+                        prods[i] = next;
+                        sources.insert(target_name, next_sources);
                     }
                     changed = true;
                 }
@@ -221,7 +334,12 @@ pub(crate) fn eliminate_left_recursion_keeping(
                 }
             }
         }
-        prods[i] = eliminate_direct_left_rec(&prods[i], &mut debt_names)?;
+        let name = prods[i].name.clone();
+        let (next, next_sources, loops) =
+            eliminate_direct_left_rec(&prods[i], &sources[&name], &mut debt_names)?;
+        prods[i] = next;
+        sources.insert(name, next_sources);
+        rewrite_loops.extend(loops);
     }
 
     // Restore the caller's declared order, so the start rule still ends
@@ -235,6 +353,36 @@ pub(crate) fn eliminate_left_recursion_keeping(
         }
     }
     ordered.extend(by_name.into_values());
+
+    // Validate synthesized loops once, after Paull's algorithm reaches its
+    // final grammar. One nullability fixed point serves every rewritten rule;
+    // the private sidecar still identifies the copied source element.
+    let nullable = non_consuming_rules(&ordered);
+    for (tail, tail_sources) in rewrite_loops {
+        if tail
+            .iter()
+            .all(|el| element_may_match_without_consuming(el, &nullable))
+        {
+            let (witness, source) = tail
+                .iter()
+                .zip(&tail_sources)
+                .find_map(|(el, source)| {
+                    non_consuming_source(el, source, &nullable).map(|found| (el, found))
+                })
+                .expect("a non-consuming tail has a witness");
+            return Err(EmitError::at(
+                format!(
+                    "{}: rule '{}' has an unbounded repetition whose item can succeed without \
+                     consuming input. An unbounded repetition must consume input on every \
+                     iteration.",
+                    diag_name(),
+                    source.rule
+                ),
+                &source.rule,
+                source.sp.or(witness.sp),
+            ));
+        }
+    }
 
     Ok(Grammar {
         productions: ordered,
@@ -456,41 +604,60 @@ fn has_leading_ref_to(prod: &Production, name: &str) -> bool {
 /// For every alternative of `target` that begins with a ref to `source`,
 /// replace that alt with |source.alts| copies, each with the leading
 /// source-ref expanded to one of source's alts.
-fn substitute_leading_ref(target: &Production, source: &Production) -> Production {
+fn substitute_leading_ref(
+    target: &Production,
+    target_sources: &[Vec<RewriteSource>],
+    source: &Production,
+    source_sources: &[Vec<RewriteSource>],
+) -> (Production, Vec<Vec<RewriteSource>>) {
     let mut new_alts: Vec<Sequence> = Vec::new();
-    for alt in &target.alts {
+    let mut new_sources = Vec::new();
+    for (alt, alt_sources) in target.alts.iter().zip(target_sources) {
         if alt.first().is_some_and(|el| el.is_ref_to(&source.name)) {
             let tail = &alt[1..];
-            for src_alt in &source.alts {
+            let tail_sources = &alt_sources[1..];
+            for (src_alt, src_sources) in source.alts.iter().zip(source_sources) {
                 let mut combined = src_alt.clone();
                 combined.extend(tail.iter().cloned());
                 new_alts.push(combined);
+                let mut combined_sources = src_sources.clone();
+                combined_sources.extend(tail_sources.iter().cloned());
+                new_sources.push(combined_sources);
             }
         } else {
             new_alts.push(alt.clone());
+            new_sources.push(alt_sources.clone());
         }
     }
-    target.rebuilt(new_alts)
+    (target.rebuilt(new_alts), new_sources)
 }
 
 /// Replace a leading reference to a token class by the token element
 /// naming the class's set (`ident` -> `#ident`). The set is minted by
 /// `emit_grammar_spec` under exactly that name; see `token_class_names`.
-fn substitute_leading_ref_by_token(target: &Production, class_name: &str) -> Production {
+fn substitute_leading_ref_by_token(
+    target: &Production,
+    target_sources: &[Vec<RewriteSource>],
+    class_name: &str,
+) -> (Production, Vec<Vec<RewriteSource>>) {
+    let mut new_sources = Vec::with_capacity(target.alts.len());
     let new_alts: Vec<Sequence> = target
         .alts
         .iter()
-        .map(|alt| {
+        .zip(target_sources)
+        .map(|(alt, alt_sources)| {
             if alt.first().is_some_and(|el| el.is_ref_to(class_name)) {
                 let mut combined = vec![Element::token(format!("#{class_name}"))];
                 combined.extend(alt[1..].iter().cloned());
+                new_sources.push(alt_sources.clone());
                 combined
             } else {
+                new_sources.push(alt_sources.clone());
                 alt.clone()
             }
         })
         .collect();
-    target.rebuilt(new_alts)
+    (target.rebuilt(new_alts), new_sources)
 }
 
 /// Allocate a suffix-debt counter name for a production. Counter names
@@ -532,24 +699,29 @@ fn seeds_reference_self(seeds: &[Sequence], name: &str) -> bool {
 /// equivalent.
 fn eliminate_direct_left_rec(
     prod: &Production,
+    prod_sources: &[Vec<RewriteSource>],
     debt_names: &mut IndexSet<String>,
-) -> Result<Production, EmitError> {
-    let mut recursive: Vec<Sequence> = Vec::new();
-    let mut seeds: Vec<Sequence> = Vec::new();
-    for alt in &prod.alts {
+) -> Result<DirectRewrite, EmitError> {
+    let mut recursive: Vec<(Sequence, Vec<RewriteSource>)> = Vec::new();
+    let mut seeds: Vec<(Sequence, Vec<RewriteSource>)> = Vec::new();
+    for (alt, alt_sources) in prod.alts.iter().zip(prod_sources) {
         if alt.first().is_some_and(|el| el.is_ref_to(&prod.name)) {
-            recursive.push(alt[1..].to_vec());
+            recursive.push((alt[1..].to_vec(), alt_sources[1..].to_vec()));
         } else {
-            seeds.push(alt.clone());
+            seeds.push((alt.clone(), alt_sources.clone()));
         }
     }
 
     // A trivial recursive alt (P ::= P, nothing else) derives P from P
     // with no progress. Drop it silently: nullable-prefix expansion can
     // legitimately produce one.
-    let non_trivial: Vec<Sequence> = recursive.into_iter().filter(|t| !t.is_empty()).collect();
+    let non_trivial: Vec<(Sequence, Vec<RewriteSource>)> = recursive
+        .into_iter()
+        .filter(|(tail, _)| !tail.is_empty())
+        .collect();
     if non_trivial.is_empty() {
-        return Ok(prod.rebuilt(seeds));
+        let (seed_alts, seed_sources): (Vec<_>, Vec<_>) = seeds.into_iter().unzip();
+        return Ok((prod.rebuilt(seed_alts), seed_sources, Vec::new()));
     }
     if seeds.is_empty() {
         return Err(EmitError::at(
@@ -563,15 +735,24 @@ fn eliminate_direct_left_rec(
         ));
     }
 
+    let (seeds, seed_sources): (Vec<Sequence>, Vec<Vec<RewriteSource>>) = seeds.into_iter().unzip();
+    let (non_trivial, tail_sources): (Vec<Sequence>, Vec<Vec<RewriteSource>>) =
+        non_trivial.into_iter().unzip();
+    let loops = non_trivial
+        .iter()
+        .cloned()
+        .zip(tail_sources.iter().cloned())
+        .collect();
+
     let seed_element = if seeds.len() == 1 && seeds[0].len() == 1 {
         seeds[0][0].clone()
     } else {
-        Element::group(seeds.clone()).carry_source_from(&seeds[0][0])
+        Element::group(seeds.clone())
     };
     let tail_inner = if non_trivial.len() == 1 && non_trivial[0].len() == 1 {
         non_trivial[0][0].clone()
     } else {
-        Element::group(non_trivial.clone()).carry_source_from(&non_trivial[0][0])
+        Element::group(non_trivial.clone())
     };
 
     // The rewrite is correct as a CFG, but it introduces a repetition
@@ -591,11 +772,30 @@ fn eliminate_direct_left_rec(
             debt_guard,
         },
         sp: None,
-        source_rule: tail_inner.source_rule.clone(),
-        source_sp: tail_inner.source_sp,
     };
 
-    Ok(prod.rebuilt(vec![vec![seed_element, star]]))
+    let fallback = RewriteSource {
+        rule: crate::ir::origin_of(prod).to_string(),
+        sp: prod.sp,
+        children: RewriteSourceChildren::None,
+    };
+    let seed_source = if seed_sources.len() == 1 && seed_sources[0].len() == 1 {
+        seed_sources[0][0].clone()
+    } else {
+        generated_group_source(seed_sources, &fallback)
+    };
+    let tail_inner_source = if tail_sources.len() == 1 && tail_sources[0].len() == 1 {
+        tail_sources[0][0].clone()
+    } else {
+        generated_group_source(tail_sources, &fallback)
+    };
+    let mut tail_source = tail_inner_source.clone();
+    tail_source.children = RewriteSourceChildren::Inner(Box::new(tail_inner_source));
+    Ok((
+        prod.rebuilt(vec![vec![seed_element, star]]),
+        vec![vec![seed_source, tail_source]],
+        loops,
+    ))
 }
 
 /// Rewrite tail self-references into same-depth repeats:

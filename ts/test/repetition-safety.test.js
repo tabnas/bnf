@@ -116,6 +116,19 @@ describe('repetition safety', () => {
     }
   })
 
+  it('analyzes many sequential assertions without rescanning the pattern', () => {
+    const pattern = '(?=a)'.repeat(10000)
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern, flags: '',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
   it('validates the implicit loop produced by a tail-repeat rewrite', () => {
     const boundary = () => ({ kind: 'regex', pattern: '\\b', flags: '' })
     assert.throws(

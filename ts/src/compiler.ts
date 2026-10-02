@@ -3158,27 +3158,6 @@ function regexDerivesEmpty(pattern: string, flags: string): boolean {
 }
 
 
-// Return the index after a lookaround group that starts at `open`, or null
-// when the parentheses are malformed. Character classes and escapes do not
-// affect the group depth.
-function regexAssertionEnd(pattern: string, open: number): number | null {
-  let depth = 0
-  let inClass = false
-  for (let i = open; i < pattern.length; i++) {
-    const ch = pattern[i]
-    if ('\\' === ch) { i++; continue }
-    if (inClass) {
-      if (']' === ch) inClass = false
-      continue
-    }
-    if ('[' === ch) { inClass = true; continue }
-    if ('(' === ch) { depth++; continue }
-    if (')' === ch && 0 === --depth) return i + 1
-  }
-  return null
-}
-
-
 type AssertionCapture = {
   index: number
   name?: string
@@ -3186,58 +3165,85 @@ type AssertionCapture = {
 }
 
 
-// True only when the assertion at `open..end` participates in every match
-// of the expression around it. A capture in an optional assertion, an
-// optional enclosing group, or one arm of an enclosing alternation may be
-// absent; JavaScript then lets a later backreference to it match empty. Such
-// a capture cannot be substituted with its consuming body in the nullability
-// skeleton.
-function regexAssertionIsRequired(
-  pattern: string,
-  open: number,
-  end: number,
-): boolean {
-  const isOptionalAfter = (groupEnd: number): boolean => {
-    const suffix = pattern.slice(groupEnd)
-    return '?' === suffix[0] || '*' === suffix[0] ||
-      /^\{0+(?:[,}])/.test(suffix)
-  }
-  if (isOptionalAfter(end)) return false
+type RegexGroupContext = {
+  end: number
+  parent?: number
+  alternates: boolean
+  optional: boolean
+  required: boolean
+}
 
-  const hasTopAlternation = (start: number, stop: number): boolean => {
-    let depth = 0
-    let inClass = false
-    for (let i = start; i < stop; i++) {
-      const ch = pattern[i]
-      if ('\\' === ch) { i++; continue }
-      if (inClass) { if (']' === ch) inClass = false; continue }
-      if ('[' === ch) { inClass = true; continue }
-      if ('(' === ch) { depth++; continue }
-      if (')' === ch) { depth--; continue }
-      if ('|' === ch && 0 === depth) return true
-    }
-    return false
-  }
 
-  // At top level, an alternation can bypass the assertion altogether.
-  if (hasTopAlternation(0, pattern.length)) return false
+type RegexContext = {
+  groups: Map<number, RegexGroupContext>
+}
 
-  // Find every enclosing group. Its own optional quantifier or a direct
-  // alternation inside it can likewise bypass the assertion. Do not skip a
-  // found group: another `(` before `open` may be nested inside it.
+
+// Parse group boundaries and bypass context once for the complete pattern.
+// `required` means every match reaches the INSIDE of this group: no top-level
+// alternation, optional ancestor, or direct alternation in an ancestor can
+// bypass it. The group's own quantifier is applied separately, because it
+// controls whether the group itself participates. Keeping both the closing
+// boundary and this context in one table avoids rescanning the whole pattern
+// for every lookaround in an untrusted matcher.
+function regexContext(pattern: string): RegexContext | null {
+  const groups = new Map<number, RegexGroupContext>()
+  const stack: number[] = []
+  let topAlternates = false
   let inClass = false
-  for (let i = 0; i < open; i++) {
+
+  for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]
     if ('\\' === ch) { i++; continue }
-    if (inClass) { if (']' === ch) inClass = false; continue }
+    if (inClass) {
+      if (']' === ch) inClass = false
+      continue
+    }
     if ('[' === ch) { inClass = true; continue }
-    if ('(' !== ch) continue
-    const groupEnd = regexAssertionEnd(pattern, i)
-    if (null == groupEnd || groupEnd <= open) continue
-    if (isOptionalAfter(groupEnd) ||
-        hasTopAlternation(i + 1, groupEnd - 1)) return false
+    if ('(' === ch) {
+      groups.set(i, {
+        end: -1,
+        parent: stack[stack.length - 1],
+        alternates: false,
+        optional: false,
+        required: false,
+      })
+      stack.push(i)
+      continue
+    }
+    if ('|' === ch) {
+      const open = stack[stack.length - 1]
+      if (null == open) topAlternates = true
+      else groups.get(open)!.alternates = true
+      continue
+    }
+    if (')' !== ch) continue
+    const open = stack.pop()
+    if (null == open) return null
+    const group = groups.get(open)!
+    group.end = i + 1
+    const quantifier = pattern[group.end]
+    group.optional = '?' === quantifier || '*' === quantifier
+    if ('{' === quantifier) {
+      let q = group.end + 1
+      const zeroStart = q
+      while ('0' === pattern[q]) q++
+      group.optional = zeroStart < q &&
+        (',' === pattern[q] || '}' === pattern[q])
+    }
   }
-  return true
+  if (0 !== stack.length) return null
+
+  // Map iteration follows insertion order, hence parents precede children.
+  for (const group of groups.values()) {
+    if (null == group.parent) group.required = !topAlternates
+    else {
+      const parent = groups.get(group.parent)!
+      group.required = parent.required && !parent.optional &&
+        !parent.alternates
+    }
+  }
+  return { groups }
 }
 
 
@@ -3292,13 +3298,16 @@ function regexNonCapturingBody(body: string): string | null {
 function regexAssertionCaptures(
   pattern: string,
   flags: string,
+  context: RegexContext,
   open: number,
   end: number,
   firstIndex: number,
 ): AssertionCapture[] | null {
   const lookbehind = '<' === pattern[open + 2]
   const positive = '=' === pattern[open + (lookbehind ? 3 : 2)]
-  const assertionRequired = regexAssertionIsRequired(pattern, open, end)
+  const assertion = context.groups.get(open)
+  if (null == assertion) return null
+  const assertionRequired = assertion.required && !assertion.optional
   const contentStart = open + (lookbehind ? 4 : 3)
   const contentEnd = end - 1
   let topAlternation = false
@@ -3340,11 +3349,10 @@ function regexAssertionCaptures(
 
     if (null != bodyStart) {
       index++
-      const groupEnd = regexAssertionEnd(pattern, i)
+      const capture = context.groups.get(i)
+      const groupEnd = capture?.end
       if (null == groupEnd || end < groupEnd) return null
-      const quantifier = pattern.slice(groupEnd, contentEnd)
-      const optional = '?' === quantifier[0] || '*' === quantifier[0] ||
-        /^\{0+(?:[,}])/.test(quantifier)
+      const optional = capture!.optional
       const required = positive && assertionRequired && 0 === depth &&
         !topAlternation && !optional
       const rawBody = pattern.slice(bodyStart, groupEnd - 1)
@@ -3375,6 +3383,8 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
     return false
   }
   if (regexDerivesEmpty(pattern, flags)) return true
+  const context = regexContext(pattern)
+  if (null == context) return false
 
   let skeleton = ''
   let inClass = false
@@ -3432,10 +3442,10 @@ function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean 
         ('=' === pattern[i + 2] || '!' === pattern[i + 2] ||
          ('<' === pattern[i + 2] &&
           ('=' === pattern[i + 3] || '!' === pattern[i + 3])))) {
-      const end = regexAssertionEnd(pattern, i)
+      const end = context.groups.get(i)?.end
       if (null == end) return false
       const captures = regexAssertionCaptures(
-        pattern, flags, i, end, captureCount)
+        pattern, flags, context, i, end, captureCount)
       if (null == captures) return true
       changed = true
       // Keep one capture placeholder per removed capture so numeric groups

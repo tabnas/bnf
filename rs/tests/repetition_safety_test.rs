@@ -4,11 +4,20 @@ mod common;
 
 use common::{group, prod, reference, sens_term};
 use tabnas_bnf::{
-    emit_grammar_spec, ConvertOptions, Element, Grammar, SrcSpan, MAX_REPEAT_EXPANSION,
+    emit_grammar_spec, ConvertOptions, Element, Grammar, Kind, SrcSpan, MAX_REPEAT_EXPANSION,
 };
 
 fn emit(grammar: &Grammar) -> Result<tabnas_bnf::GrammarSpec, tabnas_bnf::EmitError> {
     emit_grammar_spec(grammar, &ConvertOptions::tag("safe").start("top"))
+}
+
+#[test]
+fn keeps_the_public_element_literal_shape_source_compatible() {
+    let element = Element {
+        kind: Kind::Token { name: "#TX".into() },
+        sp: None,
+    };
+    assert_eq!(element, Element::token("#TX"));
 }
 
 #[test]

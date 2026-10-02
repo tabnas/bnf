@@ -228,8 +228,6 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
             token_name: Some(name.to_string()),
         },
         sp: None,
-        source_rule: None,
-        source_sp: None,
     };
 
     fn walk(el: &Element, lifted: &IndexMap<String, (String, Option<bool>)>) -> Element {
@@ -242,8 +240,6 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                         token_name: Some(name.clone()),
                     },
                     sp: None,
-                    source_rule: el.source_rule.clone(),
-                    source_sp: el.source_sp,
                 },
                 None => el.clone(),
             },
@@ -252,8 +248,6 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                     inner: Box::new(walk(inner, lifted)),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Star { inner, debt_guard } => Element {
                 kind: Kind::Star {
@@ -261,16 +255,12 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                     debt_guard: debt_guard.clone(),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Plus { inner } => Element {
                 kind: Kind::Plus {
                     inner: Box::new(walk(inner, lifted)),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Rep { min, max, inner } => Element {
                 kind: Kind::Rep {
@@ -279,8 +269,6 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
                     inner: Box::new(walk(inner, lifted)),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Group { alts } => Element::group(
                 alts.iter()
@@ -327,8 +315,6 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
                     inner: Box::new(walk(inner, defined)),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Star { inner, debt_guard } => Element {
                 kind: Kind::Star {
@@ -336,16 +322,12 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
                     debt_guard: debt_guard.clone(),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Plus { inner } => Element {
                 kind: Kind::Plus {
                     inner: Box::new(walk(inner, defined)),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Rep { min, max, inner } => Element {
                 kind: Kind::Rep {
@@ -354,8 +336,6 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
                     inner: Box::new(walk(inner, defined)),
                 },
                 sp: el.sp,
-                source_rule: el.source_rule.clone(),
-                source_sp: el.source_sp,
             },
             Kind::Group { alts } => Element::group(
                 alts.iter()
@@ -493,7 +473,10 @@ pub(crate) fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -
     }
 }
 
-fn element_may_match_without_consuming(el: &Element, nullable: &IndexSet<String>) -> bool {
+pub(crate) fn element_may_match_without_consuming(
+    el: &Element,
+    nullable: &IndexSet<String>,
+) -> bool {
     match &el.kind {
         Kind::Opt { .. } | Kind::Star { .. } => true,
         Kind::Plus { inner } => element_may_match_without_consuming(inner, nullable),
@@ -512,7 +495,7 @@ fn element_may_match_without_consuming(el: &Element, nullable: &IndexSet<String>
     }
 }
 
-fn non_consuming_rules(prods: &[Production]) -> IndexSet<String> {
+pub(crate) fn non_consuming_rules(prods: &[Production]) -> IndexSet<String> {
     let mut nullable = IndexSet::new();
     let mut changed = true;
     while changed {
@@ -566,8 +549,8 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
     let mut expansion = 0usize;
 
     fn refuse(el: &Element, prod: &Production, message: String) -> EmitError {
-        let rule = el.source_rule.as_deref().unwrap_or_else(|| origin_of(prod));
-        let sp = el.source_sp.or(el.sp).or(prod.sp);
+        let rule = origin_of(prod);
+        let sp = el.sp.or(prod.sp);
         EmitError::at(
             format!("{}: rule '{}' {message}", diag_name(), rule),
             rule,
