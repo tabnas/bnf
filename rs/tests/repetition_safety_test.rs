@@ -153,6 +153,27 @@ fn validates_the_implicit_loop_produced_by_a_probe_helper() {
 }
 
 #[test]
+fn attributes_a_probe_vocabulary_matcher_to_its_source_rule() {
+    let xsp = SrcSpan::at(30, 36, 3, 1);
+    let mut x = prod("X", vec![vec![Element::regex("[a-z]*", "")]]);
+    x.sp = Some(xsp);
+    let err = emit(&Grammar::new(vec![
+        prod(
+            "top",
+            vec![vec![
+                Element::opt(group(vec![vec![reference("X"), sens_term("!")]])),
+                reference("X"),
+            ]],
+        ),
+        x,
+    ]))
+    .expect_err("non-consuming referenced probe matcher compiled");
+    assert_eq!(err.rule.as_deref(), Some("X"));
+    assert_eq!(err.sp, Some(xsp));
+    assert!(err.message.contains("probe helper matcher"), "{err}");
+}
+
+#[test]
 fn attributes_a_copied_left_recursion_loop_to_its_source_rule() {
     let sp = SrcSpan::at(20, 21, 2, 1);
     let mut source = prod(

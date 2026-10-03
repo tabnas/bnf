@@ -180,6 +180,41 @@ describe('repetition safety', () => {
     assert.ok(spec.rule.top)
   })
 
+  it('does not execute an exponentially branching original matcher', () => {
+    const pattern = '(?:|)'.repeat(40) + '(?=a)'
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern, flags: '',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
+  it('distinguishes legacy decimal escapes from backreferences', () => {
+    for (const pattern of ['\\8', '\\9', '(a)?\\2']) {
+      const spec = emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern, flags: '',
+        } }]],
+      }])
+      assert.ok(spec.rule.top, pattern)
+    }
+
+    assert.throws(
+      () => emit([{
+        name: 'top',
+        alts: [[{ kind: 'star', inner: {
+          kind: 'regex', pattern: '(a)?\\1', flags: '',
+        } }]],
+      }]),
+      /unbounded repetition.*without consuming input/,
+    )
+  })
+
   it('treats legacy brace escapes as quantified identity escapes', () => {
     for (const pattern of ['\\u{0}', '\\p{0}', '\\P{0}']) {
       assert.throws(

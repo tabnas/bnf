@@ -3180,21 +3180,15 @@ function cloneGrammar(grammar: Grammar): Grammar {
 }
 
 
-// Whether a regex terminal can match nothing.
-//
-// Decided by asking the regex rather than reading the pattern: `[a-z]*`,
-// `a|` and `(?:)` all match the empty string, and pattern-inspection
-// will not keep up with that. An invalid pattern answers false so this
-// analysis does not replace the compiler's specific invalid-regex
-// diagnostic with a derived nullability error.
+// Whether a regex terminal can match nothing. The structural parser is
+// deliberately the only evaluator here: running an untrusted expression on
+// the empty string can still enter exponentially many backtracking paths.
+// An invalid pattern answers false so this analysis does not replace the
+// compiler's specific invalid-regex diagnostic with a nullability error.
 function regexDerivesEmpty(pattern: string, flags: string): boolean {
   try {
     new RegExp(pattern, flags)
-    // A syntactically mandatory consuming atom makes the empty match
-    // impossible. Prove that before asking V8: a failing native match can
-    // otherwise backtrack through exponentially many empty alternatives.
-    if (false === regexSkeletonDerivesEmpty(pattern, flags)) return false
-    return new RegExp('^(?:' + pattern + ')$', flags).test('')
+    return true === regexSkeletonDerivesEmpty(pattern, flags)
   } catch {
     return false
   }
@@ -3490,7 +3484,35 @@ function regexAssertionCaptures(
 type RegexNullabilityFrame = {
   alternative: boolean
   sequence: boolean
-  assertion: boolean
+  assertion: 'none' | 'positive' | 'negative'
+}
+
+
+// Numeric escapes are backreferences only when the complete decimal index
+// names a capture. In legacy mode an out-of-range decimal escape consumes a
+// character instead. Count captures once so the linear nullability parser can
+// distinguish the two without asking V8 to execute the expression.
+function regexCaptureCount(pattern: string, flags: string): number {
+  let count = 0
+  let classDepth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (0 < classDepth) {
+      if (flags.includes('v') && '[' === ch) classDepth++
+      else if (']' === ch) classDepth--
+      continue
+    }
+    if ('[' === ch) { classDepth = 1; continue }
+    if ('(' !== ch) continue
+    if ('?' !== pattern[i + 1]) {
+      count++
+    } else if ('<' === pattern[i + 2] &&
+        '=' !== pattern[i + 3] && '!' !== pattern[i + 3]) {
+      count++
+    }
+  }
+  return count
 }
 
 
@@ -3543,9 +3565,10 @@ function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | nu
   let frame: RegexNullabilityFrame = {
     alternative: false,
     sequence: true,
-    assertion: false,
+    assertion: 'none',
   }
   const stack: RegexNullabilityFrame[] = []
+  const captureCount = regexCaptureCount(pattern, flags)
 
   const applyQuantifier = (
     atomNullable: boolean,
@@ -3599,22 +3622,25 @@ function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | nu
     }
     if (')' === ch) {
       if (0 === stack.length) return null
-      const nullable = frame.assertion || frame.alternative || frame.sequence
+      const bodyNullable = frame.alternative || frame.sequence
+      const nullable = 'positive' === frame.assertion
+        ? bodyNullable
+        : 'negative' === frame.assertion ? !bodyNullable : bodyNullable
       frame = stack.pop()!
       i = appendAtom(nullable, i + 1)
       continue
     }
     if ('(' === ch) {
       let body = i + 1
-      let assertion = false
+      let assertion: RegexNullabilityFrame['assertion'] = 'none'
       if ('?' === pattern[i + 1]) {
         const kind = pattern[i + 2]
         if ('=' === kind || '!' === kind) {
-          assertion = true
+          assertion = '=' === kind ? 'positive' : 'negative'
           body = i + 3
         } else if ('<' === kind &&
             ('=' === pattern[i + 3] || '!' === pattern[i + 3])) {
-          assertion = true
+          assertion = '=' === pattern[i + 3] ? 'positive' : 'negative'
           body = i + 4
         } else if ('<' === kind) {
           const end = pattern.indexOf('>', i + 3)
@@ -3657,9 +3683,10 @@ function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | nu
       const next = pattern[i + 1]
       if (null == next) return null
       let end = i + 2
-      let nullable = 'b' === next || 'B' === next || /[1-9]/.test(next)
+      let nullable = 'B' === next
       if (/[1-9]/.test(next)) {
         while (/[0-9]/.test(pattern[end] ?? '')) end++
+        nullable = Number(pattern.slice(i + 1, end)) <= captureCount
       } else if ('k' === next && '<' === pattern[i + 2]) {
         const close = pattern.indexOf('>', i + 3)
         if (-1 === close) return null
@@ -3688,7 +3715,7 @@ function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | nu
     i = appendAtom(false, i + 1)
   }
   if (0 !== stack.length) return null
-  return frame.assertion || frame.alternative || frame.sequence
+  return frame.alternative || frame.sequence
 }
 
 

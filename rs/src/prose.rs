@@ -9,9 +9,9 @@
 use indexmap::{IndexMap, IndexSet};
 
 use crate::ir::{
-    builtin_token, diag_name, is_prose_name, origin_of, term_key, Element, EmitError, Grammar,
-    Kind, NodeKind, Production, Sequence, BUILTIN_TOKENS, MAX_REPEAT_EXPANSION, REMOVE_ALL,
-    REMOVE_PROSE,
+    builtin_token, diag_name, is_prose_name, origin_of, regex_key, term_key, term_key_of, Element,
+    EmitError, Grammar, Kind, NodeKind, Production, Sequence, BUILTIN_TOKENS, MAX_REPEAT_EXPANSION,
+    REMOVE_ALL, REMOVE_PROSE,
 };
 
 /// Resolve RFC 5234 `prose-val` terminals (`<free text>`).
@@ -612,6 +612,77 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
         )
     }
 
+    fn vocab_key(el: &Element) -> Option<String> {
+        match &el.kind {
+            Kind::Term { .. } => Some(term_key_of(el)),
+            Kind::Regex { pattern, flags } => Some(regex_key(pattern, flags)),
+            Kind::Token { name } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn find_vocab_origin(
+        el: &Element,
+        grammar: &Grammar,
+        key: &str,
+        current: &Production,
+        visited: &mut IndexSet<String>,
+    ) -> Option<(String, Option<crate::ir::SrcSpan>)> {
+        match &el.kind {
+            Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
+                (vocab_key(el).as_deref() == Some(key))
+                    .then(|| (origin_of(current).to_string(), current.sp))
+            }
+            Kind::Ref { name, .. } => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+                let found =
+                    grammar.find(name).and_then(|source| {
+                        source.alts.iter().flatten().find_map(|child| {
+                            find_vocab_origin(child, grammar, key, source, visited)
+                        })
+                    });
+                visited.shift_remove(name);
+                found
+            }
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => find_vocab_origin(inner, grammar, key, current, visited),
+            Kind::Group { alts } => alts
+                .iter()
+                .flatten()
+                .find_map(|child| find_vocab_origin(child, grammar, key, current, visited)),
+            Kind::Prose { .. } => None,
+        }
+    }
+
+    // A probe helper contains cloned terminals rather than references, but
+    // diagnostics still belong to the author-written production that supplied
+    // each terminal. Rewalk the committed `with` branch in the same X-then-Y
+    // order used to build the vocabulary and recover that source rule.
+    fn probe_vocab_origin(
+        grammar: &Grammar,
+        helper: &Production,
+        el: &Element,
+    ) -> Option<(String, Option<crate::ir::SrcSpan>)> {
+        let key = vocab_key(el)?;
+        let dispatch = grammar.productions.iter().find(|prod| {
+            prod.probe_dispatch
+                .as_ref()
+                .is_some_and(|spec| spec.probe_rule == helper.name)
+        })?;
+        let with_name = &dispatch.probe_dispatch.as_ref()?.with_branch;
+        let with_prod = grammar.find(with_name)?;
+        let mut visited = IndexSet::new();
+        with_prod
+            .alts
+            .iter()
+            .flatten()
+            .find_map(|child| find_vocab_origin(child, grammar, &key, with_prod, &mut visited))
+    }
+
     fn validate_bounds(el: &Element, prod: &Production) -> Result<(), EmitError> {
         if let Kind::Group { alts } = &el.kind {
             for child in alts.iter().flatten() {
@@ -757,12 +828,19 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
             // forever at one source position.
             for el in &helper.vocab_elements {
                 if element_may_match_without_consuming(el, &nullable) {
-                    return Err(refuse(
-                        non_consuming_witness(el, &nullable).unwrap_or(el),
-                        prod,
-                        "has a probe helper matcher that can succeed without consuming input. \
-                         An unbounded repetition must consume input on every iteration."
-                            .to_string(),
+                    let witness = non_consuming_witness(el, &nullable).unwrap_or(el);
+                    let (rule, source_sp) = probe_vocab_origin(grammar, prod, el)
+                        .unwrap_or_else(|| (origin_of(prod).to_string(), prod.sp));
+                    return Err(EmitError::at(
+                        format!(
+                            "{}: rule '{}' has a probe helper matcher that can succeed without \
+                             consuming input. An unbounded repetition must consume input on every \
+                             iteration.",
+                            diag_name(),
+                            rule
+                        ),
+                        &rule,
+                        witness.sp.or(source_sp),
                     ));
                 }
             }
