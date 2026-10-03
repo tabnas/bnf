@@ -141,11 +141,16 @@ where
     D: serde::Deserializer<'de>,
 {
     let value: Option<f64> = Option::deserialize(deserializer)?;
-    Ok(match value {
+    let out = match value {
         None => None,
-        Some(n) if n.is_finite() && n >= 0.0 => Some(n as usize),
-        Some(_) => None,
-    })
+        Some(n) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 => Some(n as usize),
+        Some(n) => {
+            return Err(serde::de::Error::custom(format!(
+                "invalid repetition upper bound {n}: expected a non-negative integer or null"
+            )))
+        }
+    };
+    Ok(out)
 }
 
 /// A sequence of elements: one alternative of a production.
@@ -694,6 +699,10 @@ pub(crate) fn set_diag_name(tag: &str) {
 /// TypeScript raises a catchable `RangeError` instead, several hundred
 /// levels later; `DIVERGENCE.md` records the difference.
 pub const MAX_ELEMENT_DEPTH: usize = 128;
+
+/// The most numeric-repetition work desugaring will allocate. One unit is
+/// one mandatory copy or one generated helper.
+pub const MAX_REPEAT_EXPANSION: usize = 8192;
 
 /// Refuse a grammar whose element nesting would overflow the stack of a
 /// pass that walks it. Measured with an explicit stack: finding the depth

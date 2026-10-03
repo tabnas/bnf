@@ -101,6 +101,12 @@ type SrcSpan = {
   c?: number
 }
 
+// Rewrite-only provenance for an element. A symbol keeps this bookkeeping
+// out of the public IR and out of JSON while Paull substitution carries the
+// authored rule along with the element object it copies.
+const ELEMENT_SOURCE = Symbol('elementSource')
+type ElementSource = { rule: string; sp?: SrcSpan }
+
 type Element = (
   | {
       kind: 'term';
@@ -165,6 +171,7 @@ type Element = (
   // seeds, say) carry none, which is correct: the author wrote no such
   // group.
   sp?: SrcSpan
+  [ELEMENT_SOURCE]?: ElementSource
 }
 
 type Sequence = Element[]
@@ -885,6 +892,56 @@ function originOf(prod: Production): string {
   return prod.origin ?? prod.name
 }
 
+
+function elementSource(el: Element, prod: Production): ElementSource {
+  return el[ELEMENT_SOURCE] ?? {
+    rule: originOf(prod),
+    sp: el.sp ?? prod.sp,
+  }
+}
+
+
+function carryElementSource(target: Element, source: Element): Element {
+  if (source[ELEMENT_SOURCE]) target[ELEMENT_SOURCE] = source[ELEMENT_SOURCE]
+  return target
+}
+
+
+function carryElementOrProductionSource(
+  target: Element,
+  source: Element | undefined,
+  prod: Production,
+): Element {
+  if (undefined !== source) return carryElementSource(target, source)
+  target[ELEMENT_SOURCE] = { rule: originOf(prod), sp: prod.sp }
+  return target
+}
+
+
+// Clone the authored tree at the left-recursion boundary and attach its
+// source rule. This keeps copied repetitions auditable without mutating the
+// caller's IR; symbol properties are ignored by JSON serialization.
+function cloneElementForRewrite(el: Element, prod: Production): Element {
+  let copy: Element
+  if ('group' === el.kind) {
+    copy = {
+      ...el,
+      alts: el.alts.map((alt) =>
+        alt.map((child) => cloneElementForRewrite(child, prod))),
+    }
+  } else if ('opt' === el.kind || 'star' === el.kind ||
+             'plus' === el.kind || 'rep' === el.kind) {
+    copy = { ...el, inner: cloneElementForRewrite(el.inner, prod) }
+  } else {
+    copy = { ...el }
+  }
+  copy[ELEMENT_SOURCE] = el[ELEMENT_SOURCE] ?? {
+    rule: originOf(prod),
+    sp: el.sp ?? prod.sp,
+  }
+  return copy
+}
+
 // Configuration attached to a synthesised dispatcher production. The
 // dispatcher is the replacement for an ambiguous `[X D] Y` subsequence
 // in a user rule: on phase 0 it pushes `probeRule` (a failure-proof
@@ -963,7 +1020,8 @@ function nullableSugarPresent(el: Element): Sequence | null {
     if (el.max === 0) return null
     if (el.max === Infinity) return [el.inner, el]
     if (el.max === 1) return [el.inner]
-    return [el.inner, { kind: 'rep', min: 0, max: el.max - 1, inner: el.inner }]
+    return [el.inner, carryElementSource(
+      { kind: 'rep', min: 0, max: el.max - 1, inner: el.inner }, el)]
   }
   return null
 }
@@ -1024,7 +1082,7 @@ function expandNullableLeftPrefixes(prods: Production[]): Production[] {
 }
 
 
-function eliminateLeftRecursion(
+function eliminateLeftRecursionKeeping(
   grammar: Grammar,
   // The token classes (`ConvertOptions.tokenClasses`). A leading
   // reference to one is substituted, exactly where any other leading
@@ -1049,7 +1107,8 @@ function eliminateLeftRecursion(
     expandNullableLeftPrefixes(
       grammar.productions.map((p) => ({
         name: p.name,
-        alts: p.alts.map((a) => a.slice()),
+        alts: p.alts.map((a) =>
+          a.map((el) => cloneElementForRewrite(el, p))),
         nodeKind: p.nodeKind,
         origin: p.origin,
         sp: p.sp,
@@ -1133,6 +1192,31 @@ function eliminateLeftRecursion(
   for (const p of byName.values()) ordered.push(p)
 
   return { productions: ordered }
+}
+
+
+// The standalone pass is public for inspection and tests. Rewrite provenance
+// belongs only to the full emission pipeline: remove the private symbols from
+// its already-private clone before exposing the transformed grammar, so deep
+// equality and object spread still observe only the documented IR.
+function eliminateLeftRecursion(
+  grammar: Grammar,
+  keep: Set<string> = new Set(),
+): Grammar {
+  const out = eliminateLeftRecursionKeeping(grammar, keep)
+  const strip = (el: Element): void => {
+    delete el[ELEMENT_SOURCE]
+    if ('group' === el.kind) {
+      for (const alt of el.alts) for (const child of alt) strip(child)
+    } else if ('opt' === el.kind || 'star' === el.kind ||
+               'plus' === el.kind || 'rep' === el.kind) {
+      strip(el.inner)
+    }
+  }
+  for (const prod of out.productions) {
+    for (const alt of prod.alts) for (const el of alt) strip(el)
+  }
+  return out
 }
 
 
@@ -1391,12 +1475,17 @@ function eliminateDirectLeftRec(
   const seedElement: Element =
     seeds.length === 1 && seeds[0].length === 1
       ? seeds[0][0]
-      : { kind: 'group', alts: seeds }
+      : carryElementOrProductionSource(
+        { kind: 'group', alts: seeds },
+        seeds.find((seed) => 0 < seed.length)?.[0],
+        prod)
 
   const tailInner: Element =
     nonTrivialRecursive.length === 1 && nonTrivialRecursive[0].length === 1
       ? nonTrivialRecursive[0][0]
-      : { kind: 'group', alts: nonTrivialRecursive }
+      : carryElementSource(
+        { kind: 'group', alts: nonTrivialRecursive },
+        nonTrivialRecursive[0][0])
 
   // The rewrite is correct as a CFG, but it introduces a repetition
   // whose greediness can compete with a suffix of the very alternative
@@ -1413,7 +1502,12 @@ function eliminateDirectLeftRec(
   // counter, or drops the flag when the suffix and the loop cannot
   // collide (`A = A "w" / "(" A ")" / "z"` — `")"` never contests
   // `"w"`). Issue #6.
-  const star: Element = { kind: 'star', inner: tailInner }
+  const star = {
+    kind: 'star' as const,
+    inner: tailInner,
+    debtGuard: undefined as string | undefined,
+  }
+  carryElementSource(star, tailInner)
   if (seedsReferenceSelf(seeds, prod.name)) {
     star.debtGuard = freshDebtCounter(prod.name, debtNames)
   }
@@ -3086,20 +3180,650 @@ function cloneGrammar(grammar: Grammar): Grammar {
 }
 
 
-// Whether a regex terminal can match nothing.
-//
-// Decided by asking the regex rather than reading the pattern: `[a-z]*`,
-// `a|` and `(?:)` all match the empty string, and pattern-inspection
-// will not keep up with that. An invalid pattern answers true — the
-// permissive direction, because a wrong `false` here rejects input the
-// grammar does admit, while a wrong `true` only restores the old
-// accept-everything behaviour for that one grammar.
+// Whether a regex terminal can match nothing. The structural parser is
+// deliberately the only evaluator here: running an untrusted expression on
+// the empty string can still enter exponentially many backtracking paths.
+// An invalid pattern answers false so this analysis does not replace the
+// compiler's specific invalid-regex diagnostic with a nullability error.
 function regexDerivesEmpty(pattern: string, flags: string): boolean {
   try {
-    return new RegExp('^(?:' + pattern + ')$', flags).test('')
+    new RegExp(pattern, flags)
+    return true === regexSkeletonDerivesEmpty(pattern, flags)
   } catch {
-    return true
+    return false
   }
+}
+
+
+type AssertionCapture = {
+  index: number
+  name?: string
+  body: string
+}
+
+
+type RegexGroupContext = {
+  end: number
+  parent?: number
+  alternates: boolean
+  optional: boolean
+  required: boolean
+}
+
+
+type RegexContext = {
+  groups: Map<number, RegexGroupContext>
+}
+
+
+// Parse group boundaries and bypass context once for the complete pattern.
+// `required` means every match reaches the INSIDE of this group: no top-level
+// alternation, optional ancestor, or direct alternation in an ancestor can
+// bypass it. The group's own quantifier is applied separately, because it
+// controls whether the group itself participates. Keeping both the closing
+// boundary and this context in one table avoids rescanning the whole pattern
+// for every lookaround in an untrusted matcher.
+function regexContext(pattern: string): RegexContext | null {
+  const groups = new Map<number, RegexGroupContext>()
+  const stack: number[] = []
+  let topAlternates = false
+  let inClass = false
+
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) {
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; continue }
+    if ('(' === ch) {
+      groups.set(i, {
+        end: -1,
+        parent: stack[stack.length - 1],
+        alternates: false,
+        optional: false,
+        required: false,
+      })
+      stack.push(i)
+      continue
+    }
+    if ('|' === ch) {
+      const open = stack[stack.length - 1]
+      if (null == open) topAlternates = true
+      else groups.get(open)!.alternates = true
+      continue
+    }
+    if (')' !== ch) continue
+    const open = stack.pop()
+    if (null == open) return null
+    const group = groups.get(open)!
+    group.end = i + 1
+    const quantifier = pattern[group.end]
+    group.optional = '?' === quantifier || '*' === quantifier
+    if ('{' === quantifier) {
+      let q = group.end + 1
+      const zeroStart = q
+      while ('0' === pattern[q]) q++
+      group.optional = zeroStart < q &&
+        (',' === pattern[q] || '}' === pattern[q])
+    }
+  }
+  if (0 !== stack.length) return null
+
+  // Map iteration follows insertion order, hence parents precede children.
+  for (const group of groups.values()) {
+    if (null == group.parent) group.required = !topAlternates
+    else {
+      const parent = groups.get(group.parent)!
+      group.required = parent.required && !parent.optional &&
+        !parent.alternates
+    }
+  }
+  return { groups }
+}
+
+
+// Turn a captured subexpression into a non-capturing one that can stand in
+// for a later backreference without changing the numbering of every group
+// after it. A capture body containing its own backreference is deliberately
+// left unproved; the caller substitutes an empty body and therefore answers
+// in the safe, possibly-zero-width direction.
+function regexNonCapturingBody(body: string): string | null {
+  let out = ''
+  let inClass = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if ('\\' === ch) {
+      const next = body[i + 1]
+      if (!inClass && (/[1-9]/.test(next ?? '') ||
+          ('k' === next && '<' === body[i + 2]))) return null
+      out += ch
+      if (i + 1 < body.length) out += body[++i]
+      continue
+    }
+    if (inClass) {
+      out += ch
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; out += ch; continue }
+    if ('(' !== ch) { out += ch; continue }
+    if ('?' !== body[i + 1]) {
+      out += '(?:'
+      continue
+    }
+    if ('<' === body[i + 2] &&
+        '=' !== body[i + 3] && '!' !== body[i + 3]) {
+      const close = body.indexOf('>', i + 3)
+      if (-1 === close) return null
+      out += '(?:'
+      i = close
+      continue
+    }
+    out += ch
+  }
+  return out
+}
+
+
+// A capture body can be substituted for a later backreference only when its
+// consumption is locally provable. Assertions, anchors and word boundaries
+// can succeed at one source position without matching the wholly empty input;
+// leave those bodies unproved instead of recursively reparsing a nested body
+// at every capture depth. Bodies without zero-width syntax are decided by the
+// native empty-match check in one pass over each disjoint direct capture.
+function regexCaptureBodyMustConsume(body: string, flags: string): boolean {
+  let inClass = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if ('\\' === ch) {
+      const next = body[++i]
+      if (!inClass && ('b' === next || 'B' === next)) return false
+      continue
+    }
+    if (inClass) {
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; continue }
+    if ('^' === ch || '$' === ch) return false
+    if ('(' === ch && '?' === body[i + 1] &&
+        ('=' === body[i + 2] || '!' === body[i + 2] ||
+         ('<' === body[i + 2] &&
+          ('=' === body[i + 3] || '!' === body[i + 3])))) return false
+  }
+  return false === regexSkeletonDerivesEmpty(body, flags)
+}
+
+
+function regexIsSingleAtom(body: string): boolean {
+  if (1 === [...body].length && !/[\\^$()[\]{}*+?|]/.test(body)) return true
+  if ('.' === body) return true
+  if ('[' === body[0]) {
+    let escaped = false
+    for (let i = 1; i < body.length; i++) {
+      if (escaped) { escaped = false; continue }
+      if ('\\' === body[i]) { escaped = true; continue }
+      if (']' === body[i]) return i === body.length - 1
+    }
+    return false
+  }
+  if ('(' === body[0]) {
+    return regexContext(body)?.groups.get(0)?.end === body.length
+  }
+  return /^\\(?:[dDsSwWfnrtv.]|c[A-Za-z]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|u\{[0-9A-Fa-f]+\}|[pP]\{[^}]+\})$/.test(body)
+}
+
+
+// A required positive lookahead followed by the same GREEDY atom with a
+// zero-minimum, positive-capacity quantifier at the end cannot return a
+// zero-width match: the assertion proves the atom is present and match
+// priority takes it. Keep this deliberately exact. With a later constraint
+// (`(?=a)a?(?=a)`) JavaScript can backtrack the quantifier to zero, so the
+// general conservative skeleton must still reject it.
+function regexAssertionForcesGreedyConsumption(
+  pattern: string,
+  flags: string,
+  context: RegexContext,
+): boolean {
+  if (!pattern.startsWith('(?=')) return false
+  const assertion = context.groups.get(0)
+  if (null == assertion || !assertion.required || assertion.optional) return false
+  const body = pattern.slice(3, assertion.end - 1)
+  if (!regexIsSingleAtom(body)) return false
+  if (!regexCaptureBodyMustConsume(body, flags)) return false
+  const suffix = pattern.slice(assertion.end)
+  for (const atom of [body, '(?:' + body + ')']) {
+    if (!suffix.startsWith(atom)) continue
+    const quantifier = suffix.slice(atom.length)
+    if ('?' === quantifier || '*' === quantifier ||
+        /^\{0,(?:[1-9]\d*|)\}$/.test(quantifier)) return true
+  }
+  return false
+}
+
+
+// Captures inside a positive assertion can be read by a later backreference.
+// Removing the assertion and leaving an empty placeholder gets consumption
+// wrong in both directions. Record the capture body when participation is
+// provable (a direct, mandatory member of a non-alternating assertion); for
+// every more complex shape, use an empty body and remain conservative.
+function regexAssertionCaptures(
+  pattern: string,
+  flags: string,
+  context: RegexContext,
+  open: number,
+  end: number,
+  firstIndex: number,
+): AssertionCapture[] | null {
+  const lookbehind = '<' === pattern[open + 2]
+  const positive = '=' === pattern[open + (lookbehind ? 3 : 2)]
+  const assertion = context.groups.get(open)
+  if (null == assertion) return null
+  const assertionRequired = assertion.required && !assertion.optional
+  const contentStart = open + (lookbehind ? 4 : 3)
+  const contentEnd = end - 1
+  let topAlternation = false
+  let depth = 0
+  let inClass = false
+  for (let i = contentStart; i < contentEnd; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) { if (']' === ch) inClass = false; continue }
+    if ('[' === ch) { inClass = true; continue }
+    if ('(' === ch) { depth++; continue }
+    if (')' === ch) { depth--; continue }
+    if ('|' === ch && 0 === depth) topAlternation = true
+  }
+
+  const captures: AssertionCapture[] = []
+  depth = 0
+  inClass = false
+  let index = firstIndex
+  for (let i = contentStart; i < contentEnd; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (inClass) { if (']' === ch) inClass = false; continue }
+    if ('[' === ch) { inClass = true; continue }
+    if (')' === ch) { depth--; continue }
+    if ('(' !== ch) continue
+
+    let bodyStart: number | null = null
+    let name: string | undefined
+    if ('?' !== pattern[i + 1]) {
+      bodyStart = i + 1
+    } else if ('<' === pattern[i + 2] &&
+        '=' !== pattern[i + 3] && '!' !== pattern[i + 3]) {
+      const nameEnd = pattern.indexOf('>', i + 3)
+      if (-1 === nameEnd || contentEnd <= nameEnd) return null
+      name = pattern.slice(i + 3, nameEnd)
+      bodyStart = nameEnd + 1
+    }
+
+    if (null != bodyStart) {
+      index++
+      const capture = context.groups.get(i)
+      const groupEnd = capture?.end
+      if (null == groupEnd || end < groupEnd) return null
+      const optional = capture!.optional
+      const required = positive && assertionRequired && 0 === depth &&
+        !topAlternation && !optional
+      const rawBody = pattern.slice(bodyStart, groupEnd - 1)
+      const body = required && regexCaptureBodyMustConsume(rawBody, flags)
+        ? regexNonCapturingBody(rawBody)
+        : ''
+      captures.push({ index, name, body: body ?? '' })
+    }
+    depth++
+  }
+  return captures
+}
+
+
+type RegexNullabilityFrame = {
+  alternative: boolean
+  sequence: boolean
+  assertion: 'none' | 'positive' | 'negative'
+}
+
+
+// Numeric escapes are backreferences only when the complete decimal index
+// names a capture. In legacy mode an out-of-range decimal escape consumes a
+// character instead. Count captures once so the linear nullability parser can
+// distinguish the two without asking V8 to execute the expression.
+function regexCaptureCount(pattern: string, flags: string): number {
+  let count = 0
+  let classDepth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) { i++; continue }
+    if (0 < classDepth) {
+      if (flags.includes('v') && '[' === ch) classDepth++
+      else if (']' === ch) classDepth--
+      continue
+    }
+    if ('[' === ch) { classDepth = 1; continue }
+    if ('(' !== ch) continue
+    if ('?' !== pattern[i + 1]) {
+      count++
+    } else if ('<' === pattern[i + 2] &&
+        '=' !== pattern[i + 3] && '!' !== pattern[i + 3]) {
+      count++
+    }
+  }
+  return count
+}
+
+
+// A Unicode-set class can contain strings through `\q{...}`. An empty
+// alternative in one of those disjunctions makes the class itself nullable,
+// unlike every ordinary character class. The pattern has already compiled,
+// so this scan only has to distinguish escaped pipes from separators. It is
+// deliberately conservative around set operations: retaining a possible
+// empty member can reject a safe loop, while dropping one can admit a loop
+// that never advances.
+function unicodeSetClassMayMatchEmpty(
+  pattern: string,
+  start: number,
+  end: number,
+): boolean {
+  for (let i = start; i < end; i++) {
+    if ('\\' !== pattern[i]) continue
+    if ('q' !== pattern[i + 1] || '{' !== pattern[i + 2]) {
+      i++
+      continue
+    }
+    let alternativeHasAtom = false
+    for (i += 3; i < end; i++) {
+      const ch = pattern[i]
+      if ('\\' === ch) {
+        alternativeHasAtom = true
+        i++
+      } else if ('|' === ch) {
+        if (!alternativeHasAtom) return true
+        alternativeHasAtom = false
+      } else if ('}' === ch) {
+        if (!alternativeHasAtom) return true
+        break
+      } else {
+        alternativeHasAtom = true
+      }
+    }
+  }
+  return false
+}
+
+
+// Decide whether an analysis skeleton can derive the empty string without
+// running it through JavaScript's backtracking matcher. The skeleton is made
+// only from a regex which compiled above, but replacing assertions can expose
+// exponentially many empty paths that the original matcher never enters.
+// This parser is linear in the skeleton text. Unknown backreferences and
+// assertions answer in the safe, nullable direction.
+function regexSkeletonDerivesEmpty(pattern: string, flags: string): boolean | null {
+  let frame: RegexNullabilityFrame = {
+    alternative: false,
+    sequence: true,
+    assertion: 'none',
+  }
+  const stack: RegexNullabilityFrame[] = []
+  const captureCount = regexCaptureCount(pattern, flags)
+
+  const applyQuantifier = (
+    atomNullable: boolean,
+    start: number,
+  ): [boolean, number] => {
+    let i = start
+    const ch = pattern[i]
+    if ('?' === ch || '*' === ch) {
+      atomNullable = true
+      i++
+    } else if ('+' === ch) {
+      i++
+    } else if ('{' === ch) {
+      let j = i + 1
+      const digits = j
+      let minimumIsZero = true
+      while (/[0-9]/.test(pattern[j] ?? '')) {
+        if ('0' !== pattern[j]) minimumIsZero = false
+        j++
+      }
+      if (digits < j) {
+        if (',' === pattern[j]) {
+          j++
+          while (/[0-9]/.test(pattern[j] ?? '')) j++
+        }
+        if ('}' === pattern[j]) {
+          atomNullable = atomNullable || minimumIsZero
+          i = j + 1
+        }
+      }
+    }
+    // A lazy marker changes preference, never nullability.
+    if ('?' === pattern[i]) i++
+    return [atomNullable, i]
+  }
+
+  const appendAtom = (atomNullable: boolean, start: number): number => {
+    const quantified = applyQuantifier(atomNullable, start)
+    frame.sequence = frame.sequence && quantified[0]
+    return quantified[1]
+  }
+
+  let i = 0
+  while (i < pattern.length) {
+    const ch = pattern[i]
+    if ('|' === ch) {
+      frame.alternative = frame.alternative || frame.sequence
+      frame.sequence = true
+      i++
+      continue
+    }
+    if (')' === ch) {
+      if (0 === stack.length) return null
+      const bodyNullable = frame.alternative || frame.sequence
+      const nullable = 'positive' === frame.assertion
+        ? bodyNullable
+        : 'negative' === frame.assertion ? !bodyNullable : bodyNullable
+      frame = stack.pop()!
+      i = appendAtom(nullable, i + 1)
+      continue
+    }
+    if ('(' === ch) {
+      let body = i + 1
+      let assertion: RegexNullabilityFrame['assertion'] = 'none'
+      if ('?' === pattern[i + 1]) {
+        const kind = pattern[i + 2]
+        if ('=' === kind || '!' === kind) {
+          assertion = '=' === kind ? 'positive' : 'negative'
+          body = i + 3
+        } else if ('<' === kind &&
+            ('=' === pattern[i + 3] || '!' === pattern[i + 3])) {
+          assertion = '=' === pattern[i + 3] ? 'positive' : 'negative'
+          body = i + 4
+        } else if ('<' === kind) {
+          const end = pattern.indexOf('>', i + 3)
+          if (-1 === end) return null
+          body = end + 1
+        } else if (':' === kind) {
+          body = i + 3
+        } else {
+          // Scoped JavaScript modifiers, for example `(?i-ms:...)`.
+          let end = i + 2
+          while (/[ims-]/.test(pattern[end] ?? '')) end++
+          if (':' !== pattern[end] || end === i + 2) return null
+          body = end + 1
+        }
+      }
+      stack.push(frame)
+      frame = { alternative: false, sequence: true, assertion }
+      i = body
+      continue
+    }
+    if ('[' === ch) {
+      let depth = 1
+      let end = i + 1
+      while (end < pattern.length && 0 < depth) {
+        if ('\\' === pattern[end]) {
+          end += 2
+          continue
+        }
+        if (flags.includes('v') && '[' === pattern[end]) depth++
+        else if (']' === pattern[end]) depth--
+        end++
+      }
+      if (0 !== depth) return null
+      const nullable = flags.includes('v') &&
+        unicodeSetClassMayMatchEmpty(pattern, i + 1, end - 1)
+      i = appendAtom(nullable, end)
+      continue
+    }
+    if ('\\' === ch) {
+      const next = pattern[i + 1]
+      if (null == next) return null
+      let end = i + 2
+      let nullable = 'B' === next
+      if (/[1-9]/.test(next)) {
+        while (/[0-9]/.test(pattern[end] ?? '')) end++
+        nullable = Number(pattern.slice(i + 1, end)) <= captureCount
+      } else if ('k' === next && '<' === pattern[i + 2]) {
+        const close = pattern.indexOf('>', i + 3)
+        if (-1 === close) return null
+        nullable = true
+        end = close + 1
+      } else if ((flags.includes('u') || flags.includes('v')) &&
+          ('p' === next || 'P' === next || 'u' === next) &&
+          '{' === pattern[i + 2]) {
+        const close = pattern.indexOf('}', i + 3)
+        if (-1 === close) return null
+        end = close + 1
+      } else if ('c' === next && end < pattern.length) {
+        end++
+      } else if ('x' === next) {
+        end = Math.min(pattern.length, end + 2)
+      } else if ('u' === next && '{' !== pattern[i + 2]) {
+        end = Math.min(pattern.length, end + 4)
+      }
+      i = appendAtom(nullable, end)
+      continue
+    }
+    if ('^' === ch || '$' === ch) {
+      i = appendAtom(true, i + 1)
+      continue
+    }
+    i = appendAtom(false, i + 1)
+  }
+  if (0 !== stack.length) return null
+  return frame.alternative || frame.sequence
+}
+
+
+// A regex can succeed without consuming even when it does not match the
+// wholly empty input: `\\b` before a word character and `(?=word)` are the
+// common examples. Replace zero-width assertions with an empty group and ask
+// whether the remaining consuming skeleton is nullable. The placeholder is
+// load-bearing: removing `\\b` from `(?:\\b)+` leaves the invalid `(?:)+`
+// and would hide a valid non-consuming matcher. This is deliberately
+// conservative for contradictory assertions; refusing an impossible loop is
+// safer than admitting a loop that can re-enter at one source position.
+function regexMayMatchWithoutConsuming(pattern: string, flags: string): boolean {
+  try {
+    // Preserve the specific invalid-regex diagnostic emitted later.
+    new RegExp(pattern, flags)
+  } catch {
+    return false
+  }
+  if (regexDerivesEmpty(pattern, flags)) return true
+  const context = regexContext(pattern)
+  if (null == context) return false
+
+  let skeleton = ''
+  let inClass = false
+  let captureCount = 0
+  const assertionCaptures = new Map<number, string>()
+  const assertionNamedCaptures = new Map<string, string>()
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if ('\\' === ch) {
+      const next = pattern[i + 1]
+      if (!inClass && ('b' === next || 'B' === next)) {
+        skeleton += '()'
+        i++
+      } else if (!inClass && /[1-9]/.test(next ?? '')) {
+        const digits = pattern.slice(i + 1).match(/^[0-9]+/)?.[0] ?? next
+        const body = assertionCaptures.get(Number(digits))
+        if (undefined !== body) {
+          skeleton += '(?:' + body + ')'
+          i += digits.length
+        } else {
+          skeleton += ch + next
+          i++
+        }
+      } else if (!inClass && 'k' === next && '<' === pattern[i + 2]) {
+        const nameEnd = pattern.indexOf('>', i + 3)
+        const name = -1 === nameEnd ? '' : pattern.slice(i + 3, nameEnd)
+        const body = assertionNamedCaptures.get(name)
+        if (undefined !== body) {
+          skeleton += '(?:' + body + ')'
+          i = nameEnd
+        } else {
+          skeleton += ch
+          if (i + 1 < pattern.length) skeleton += pattern[++i]
+        }
+      } else {
+        skeleton += ch
+        if (i + 1 < pattern.length) skeleton += pattern[++i]
+      }
+      continue
+    }
+    if (inClass) {
+      skeleton += ch
+      if (']' === ch) inClass = false
+      continue
+    }
+    if ('[' === ch) { inClass = true; skeleton += ch; continue }
+    if ('^' === ch || '$' === ch) {
+      skeleton += '()'
+      continue
+    }
+    if ('(' === ch && '?' === pattern[i + 1] &&
+        ('=' === pattern[i + 2] || '!' === pattern[i + 2] ||
+         ('<' === pattern[i + 2] &&
+          ('=' === pattern[i + 3] || '!' === pattern[i + 3])))) {
+      const end = context.groups.get(i)?.end
+      if (null == end) return false
+      const captures = regexAssertionCaptures(
+        pattern, flags, context, i, end, captureCount)
+      if (null == captures) return true
+      // Keep one capture placeholder per removed capture so numeric groups
+      // outside the assertion retain their original numbering.
+      skeleton += captures.length === 0 ? '()' : '()'.repeat(captures.length)
+      for (const capture of captures) {
+        assertionCaptures.set(capture.index, capture.body)
+        if (null != capture.name) {
+          assertionNamedCaptures.set(capture.name, capture.body)
+        }
+      }
+      captureCount += captures.length
+      i = end - 1
+      continue
+    }
+    if ('(' === ch && ('?' !== pattern[i + 1] ||
+        ('<' === pattern[i + 2] &&
+         '=' !== pattern[i + 3] && '!' !== pattern[i + 3]))) {
+      captureCount++
+    }
+    skeleton += ch
+  }
+  const skeletonMayBeEmpty = regexSkeletonDerivesEmpty(skeleton, flags)
+  // The original expression compiled above. Replacing a lookaround can
+  // still leave an analysis-only skeleton this bounded parser cannot read.
+  // Fail closed: the matcher may be zero-width, so it cannot sit in an
+  // unbounded loop.
+  return null == skeletonMayBeEmpty ||
+    (skeletonMayBeEmpty &&
+      !regexAssertionForcesGreedyConsumption(pattern, flags, context))
 }
 
 
@@ -3147,6 +3871,53 @@ function elementDerivesEmpty(el: Element, nullable: Set<string>): boolean {
 }
 
 
+function elementMayMatchWithoutConsuming(
+  el: Element,
+  nullable: Set<string>,
+): boolean {
+  switch (el.kind) {
+    case 'opt':
+    case 'star':
+      return true
+    case 'plus':
+      return elementMayMatchWithoutConsuming(el.inner, nullable)
+    case 'rep':
+      return 0 === el.min || elementMayMatchWithoutConsuming(el.inner, nullable)
+    case 'group':
+      return el.alts.some((alt) =>
+        alt.every((child) => elementMayMatchWithoutConsuming(child, nullable)))
+    case 'ref':
+      return nullable.has(el.name)
+    case 'term':
+      return '' === el.literal
+    case 'regex':
+      return regexMayMatchWithoutConsuming(el.pattern, el.flags)
+    case 'token':
+      return '#ZZ' === el.name || '#AA' === el.name
+    default:
+      return false
+  }
+}
+
+
+function nonConsumingRules(prods: Production[]): Set<string> {
+  const nullable = new Set<string>()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const p of prods) {
+      if (nullable.has(p.name)) continue
+      if (p.alts.some((alt) =>
+        alt.every((el) => elementMayMatchWithoutConsuming(el, nullable)))) {
+        nullable.add(p.name)
+        changed = true
+      }
+    }
+  }
+  return nullable
+}
+
+
 const sequenceDerivesEmpty = (
   alt: Sequence,
   nullable: Set<string>,
@@ -3174,6 +3945,153 @@ function nullableRules(prods: Production[]): Set<string> {
     }
   }
   return nullable
+}
+
+
+// The most work numeric repetition may add before desugaring refuses the
+// grammar. One unit is one mandatory copy or one generated helper; a finite
+// optional copy costs its group and optional helpers. This admits the two
+// 998-bound repetitions in RFC 5322 while refusing `1*5000` before it can
+// allocate roughly ten thousand rules (tabnas/bnf#86).
+const MAX_REPEAT_EXPANSION = 8192
+
+
+// Repetition is the only sugar whose authored numeric bound can turn a small
+// IR into an arbitrarily large compiler product. Validate it after the
+// structural rewrites (which may duplicate an authored repetition) but before
+// desugar allocates any helper. The same walk also refuses an unbounded loop
+// whose item derives epsilon: such a loop can re-enter at the same input
+// position forever (tabnas/bnf#87).
+function validateRepetitions(grammar: Grammar): void {
+  let expansion = 0
+
+  const refuse = (el: Element, prod: Production, message: string): never => {
+    const source = elementSource(el, prod)
+    throw new EmitError(
+      `${diagName()}: rule '${source.rule}' ${message}`,
+      { rule: source.rule, sp: source.sp })
+  }
+
+  // Validate the public numeric IR before nullability reads its bounds.
+  const validateBounds = (el: Element, prod: Production): void => {
+    if ('group' === el.kind) {
+      for (const alt of el.alts) for (const child of alt) {
+        validateBounds(child, prod)
+      }
+      return
+    }
+    if ('rep' === el.kind) {
+      const validMin = Number.isInteger(el.min) && 0 <= el.min
+      const validMax = el.max === Infinity ||
+        (Number.isInteger(el.max) && 0 <= el.max)
+      if (!validMin || !validMax ||
+          (el.max !== Infinity && el.max < el.min)) {
+        refuse(el, prod,
+          `has invalid repetition bounds '${el.min}*${el.max}'. ` +
+          `Bounds must be non-negative integers and the upper bound ` +
+          `must not be lower than the lower bound.`)
+      }
+    }
+    if ('opt' === el.kind || 'star' === el.kind ||
+        'plus' === el.kind || 'rep' === el.kind) {
+      validateBounds(el.inner, prod)
+    }
+  }
+  for (const prod of grammar.productions) {
+    for (const alt of prod.alts) for (const el of alt) validateBounds(el, prod)
+  }
+
+  const nullable = nonConsumingRules(grammar.productions)
+
+  // Point a refusal at the authored element that establishes non-consumption,
+  // rather than at a synthesized group carrying the first alternative's
+  // source. Paull substitution can combine tails from several productions.
+  const nonConsumingWitness = (el: Element): Element | null => {
+    if (!elementMayMatchWithoutConsuming(el, nullable)) return null
+    if ('group' === el.kind) {
+      const alt = el.alts.find((candidate) => candidate.every((child) =>
+        elementMayMatchWithoutConsuming(child, nullable)))
+      if (null == alt) return null
+      for (const child of alt) {
+        const witness = nonConsumingWitness(child)
+        if (null != witness) return witness
+      }
+      return el
+    }
+    if ('plus' === el.kind || ('rep' === el.kind && 0 < el.min)) {
+      return nonConsumingWitness(el.inner) ?? el
+    }
+    return el
+  }
+
+  const walk = (el: Element, prod: Production): void => {
+    if (el.kind === 'group') {
+      for (const alt of el.alts) for (const child of alt) walk(child, prod)
+      return
+    }
+    if (el.kind !== 'opt' && el.kind !== 'star' &&
+        el.kind !== 'plus' && el.kind !== 'rep') return
+
+    const unbounded = el.kind === 'star' || el.kind === 'plus' ||
+      (el.kind === 'rep' && el.max === Infinity)
+    if (unbounded && elementMayMatchWithoutConsuming(el.inner, nullable)) {
+      refuse(nonConsumingWitness(el.inner) ?? el, prod,
+        `has an unbounded repetition whose item can succeed without ` +
+        `consuming input. ` +
+        `An unbounded repetition must consume input on every iteration.`)
+    }
+
+    if (el.kind === 'rep') {
+      const mandatory = Math.max(0, el.min)
+      const cost = el.max === Infinity
+        ? 2 + mandatory
+        : 1 + mandatory + 2 * Math.max(0, el.max - el.min)
+      if (!Number.isFinite(cost) || cost > MAX_REPEAT_EXPANSION - expansion) {
+        const upper = el.max === Infinity ? '' : String(el.max)
+        refuse(el, prod,
+          `exceeds the repetition expansion limit of ` +
+          `${MAX_REPEAT_EXPANSION} while expanding '${el.min}*${upper}'. ` +
+          `Split the repetition into named rules or lower its bounds.`)
+      }
+      expansion += cost
+    }
+    walk(el.inner, prod)
+  }
+
+  for (const prod of grammar.productions) {
+    for (const alt of prod.alts) for (const el of alt) walk(el, prod)
+    if (null != prod.probeHelper) {
+      // A probe helper re-enters itself after each vocabulary matcher.
+      // Its matchers live outside `alts`, so the ordinary sugar walk above
+      // cannot see them. Every successful probe iteration must consume.
+      for (const el of prod.probeHelper.vocabElements) {
+        if (elementMayMatchWithoutConsuming(el, nullable)) {
+          refuse(nonConsumingWitness(el) ?? el, prod,
+            `has a probe helper matcher that can succeed without consuming ` +
+            `input. An unbounded repetition must consume input on every ` +
+            `iteration.`)
+        }
+      }
+    }
+    if (null != prod.tailRepeat) {
+      // One close-phase iteration consumes the separator and then re-enters
+      // the rule, whose open phase consumes the prefix. Both must not be
+      // zero-width together; tailRepeat is outside the explicit sugar walk.
+      const cycle = [...prod.tailRepeat.sep, ...(prod.alts[0] ?? [])]
+      if (cycle.length > 0 && cycle.every((el) =>
+        elementMayMatchWithoutConsuming(el, nullable))) {
+        let witness: Element = cycle[0]
+        for (const el of cycle) {
+          const found = nonConsumingWitness(el)
+          if (null != found) { witness = found; break }
+        }
+        refuse(witness, prod,
+          `has an unbounded tail repetition that can succeed without ` +
+          `consuming input. An unbounded repetition must consume input ` +
+          `on every iteration.`)
+      }
+    }
+  }
 }
 
 
@@ -3314,13 +4232,14 @@ function emitGrammarSpec(
   // ambiguous `[X D] Y` optional-prefix patterns and rewrite them
   // into probe-dispatch helpers; finally flatten any EBNF sugar
   // (`?`, `*`, `+`, grouping) into plain ABNF.
-  grammar = eliminateLeftRecursion(grammar, classNames)
+  grammar = eliminateLeftRecursionKeeping(grammar, classNames)
   grammar = rewriteProbeDispatches(grammar)
   // Left factoring runs after the probe rewriter (so `[X D] Y`
   // patterns are recognised in their original alternatives) and
   // before tail-repeat detection and desugaring.
   grammar = leftFactor(grammar)
   grammar = rewriteTailRepeats(grammar, start)
+  validateRepetitions(grammar)
   grammar = desugar(grammar)
 
   // Both are named AFTER desugar, because both are keyed by the rule
@@ -7021,6 +7940,7 @@ export {
   termKey,
   isEffectivelyCaseSensitive,
   BUILTIN_TOKENS,
+  MAX_REPEAT_EXPANSION,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,

@@ -195,6 +195,12 @@ describe('bnf', () => {
       ],
     }
     const out = eliminateLeftRecursion(grammar)
+    for (const prod of out.productions) {
+      for (const alt of prod.alts) for (const el of alt) {
+        assert.deepStrictEqual(Object.getOwnPropertySymbols(el), [],
+          'the public pass must not expose rewrite provenance')
+      }
+    }
     const expr = out.productions.find((p) => p.name === 'expr')
     const stillLeftRec = expr.alts.some(
       (alt) => alt[0] && alt[0].kind === 'ref' && alt[0].name === 'expr')
@@ -518,17 +524,17 @@ describe('bnf', () => {
         'an uncontested loop must compile exactly as before')
     })
 
-    it('leaves a nullable suffix alone', () => {
-      // `A = ["x"] A ["y"] / "z"` commits the enclosing frame to
-      // nothing, so the loop stays greedy — and already parses its
-      // whole language.
-      const spec = emitGrammarSpec(
-        hidden(
-          [{ kind: 'opt', inner: x }, ref('A'), { kind: 'opt', inner: y }],
-          [z]),
-        { tag: 'demo' })
-
-      assert.deepEqual(alts(spec).filter((a) => counts(a) || guard(a)), [])
+    it('refuses a rewritten loop whose suffix is nullable', () => {
+      // `A = ["x"] A ["y"] / "z"` can take its recursive branch while
+      // both optionals consume nothing. The rewritten repetition would
+      // therefore re-enter at the same input position forever.
+      assert.throws(
+        () => emitGrammarSpec(
+          hidden(
+            [{ kind: 'opt', inner: x }, ref('A'), { kind: 'opt', inner: y }],
+            [z]),
+          { tag: 'demo' }),
+        /unbounded repetition.*without consuming input/)
     })
 
     it('leaves plain direct left recursion alone', () => {

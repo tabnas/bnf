@@ -483,20 +483,15 @@ func TestRepeatDepthTakesARepetitionMemberAsItsText(t *testing.T) {
 	}
 }
 
-func TestRepeatDepthEndsAStarOfSomethingThatCanMatchNothing(t *testing.T) {
-	// `*[x]` is `*x`: an iteration whose item matched nothing makes no
-	// progress, so the loop does not take one. The push chain took it
-	// forever, and failed when the engine's step budget ran out.
-	p := newRdParser(t, []*Production{rdProd("doc", Sequence{rdStar(rdOpt(rdLit("x"))), rdLit(";")})}, rdOpts{})
-	for _, src := range []string{";", "xxx;"} {
-		if out, _ := p.parse(t, src); rdSrc(t, out) != src {
-			t.Errorf("%q came back as %q", src, rdSrc(t, out))
-		}
-	}
-	_, many := p.parse(t, rdTimes(rdN, "x", "")+";")
-	_, one := p.parse(t, "x;")
-	if many != one {
-		t.Errorf("depth %d over %d items, %d over one", many, rdN, one)
+func TestRepeatDepthRefusesAStarOfSomethingThatCanMatchNothing(t *testing.T) {
+	// `*[x]` has an iteration that can match without progress. Refuse it
+	// before the engine has to detect the non-advancing loop.
+	_, err := EmitGrammarSpec(&Grammar{Productions: []*Production{
+		rdProd("doc", Sequence{rdStar(rdOpt(rdLit("x"))), rdLit(";")}),
+	}}, &ConvertOptions{Tag: "depth"})
+	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") ||
+		!strings.Contains(err.Error(), "without consuming input") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

@@ -78,10 +78,9 @@ const loopCounter = "rep"
 //
 // Decided by asking the regex rather than reading the pattern: `[a-z]*`,
 // `a|` and `(?:)` all match the empty string, and pattern-inspection will
-// not keep up with that. A pattern this port cannot compile answers true
-// — the permissive direction, because a wrong false here rejects input
-// the grammar does admit, while a wrong true only restores the old
-// accept-everything behaviour for that one grammar.
+// not keep up with that. A pattern this port cannot compile answers false
+// so this analysis does not replace the compiler's specific invalid-regex
+// diagnostic with a derived nullability error.
 func regexDerivesEmpty(pattern, flags string) bool {
 	src := "^(?:" + pattern + ")$"
 	if strings.Contains(flags, "i") {
@@ -89,9 +88,66 @@ func regexDerivesEmpty(pattern, flags string) bool {
 	}
 	re, err := regexp.Compile(src)
 	if err != nil {
-		return true
+		return false
 	}
 	return re.MatchString("")
+}
+
+// regexMayMatchWithoutConsuming catches context-dependent zero-width
+// matches such as `\b` before a word character. Replace the zero-width
+// assertions understood by RE2 with an empty group and ask whether the
+// consuming skeleton is nullable. Keeping a placeholder matters when an
+// assertion is itself grouped or quantified: deleting it can leave an invalid
+// skeleton and hide a valid non-consuming matcher. Invalid patterns remain
+// for the emitter's specific diagnostic.
+func regexMayMatchWithoutConsuming(pattern, flags string) bool {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return false
+	}
+	if regexDerivesEmpty(pattern, flags) {
+		return true
+	}
+	var skeleton strings.Builder
+	inClass := false
+	changed := false
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		if ch == '\\' {
+			if i+1 < len(pattern) {
+				next := pattern[i+1]
+				if !inClass && (next == 'b' || next == 'B' ||
+					next == 'A' || next == 'z') {
+					changed = true
+					skeleton.WriteString("()")
+					i++
+					continue
+				}
+				skeleton.WriteByte(ch)
+				skeleton.WriteByte(next)
+				i++
+				continue
+			}
+		}
+		if inClass {
+			skeleton.WriteByte(ch)
+			if ch == ']' {
+				inClass = false
+			}
+			continue
+		}
+		if ch == '[' {
+			inClass = true
+			skeleton.WriteByte(ch)
+			continue
+		}
+		if ch == '^' || ch == '$' {
+			changed = true
+			skeleton.WriteString("()")
+			continue
+		}
+		skeleton.WriteByte(ch)
+	}
+	return changed && regexDerivesEmpty(skeleton.String(), flags)
 }
 
 func elementDerivesEmpty(el *Element, nullable map[string]bool) bool {
@@ -139,6 +195,66 @@ func elementDerivesEmpty(el *Element, nullable map[string]bool) bool {
 	return false
 }
 
+func elementMayMatchWithoutConsuming(el *Element, nullable map[string]bool) bool {
+	switch el.Kind {
+	case KindOpt, KindStar:
+		return true
+	case KindPlus:
+		return elementMayMatchWithoutConsuming(el.Inner, nullable)
+	case KindRep:
+		return el.Min == 0 || elementMayMatchWithoutConsuming(el.Inner, nullable)
+	case KindGroup:
+		for _, alt := range el.Alts {
+			all := true
+			for _, child := range alt {
+				if !elementMayMatchWithoutConsuming(child, nullable) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
+			}
+		}
+	case KindRef:
+		return nullable[el.Name]
+	case KindTerm:
+		return el.Literal == ""
+	case KindRegex:
+		return regexMayMatchWithoutConsuming(el.Pattern, el.Flags)
+	case KindToken:
+		return el.Name == "#ZZ" || el.Name == "#AA"
+	}
+	return false
+}
+
+func nonConsumingRules(prods []*Production) map[string]bool {
+	nullable := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, p := range prods {
+			if nullable[p.Name] {
+				continue
+			}
+			for _, alt := range p.Alts {
+				all := true
+				for _, el := range alt {
+					if !elementMayMatchWithoutConsuming(el, nullable) {
+						all = false
+						break
+					}
+				}
+				if all {
+					nullable[p.Name] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return nullable
+}
+
 func sequenceDerivesEmpty(alt Sequence, nullable map[string]bool) bool {
 	for _, el := range alt {
 		if !elementDerivesEmpty(el, nullable) {
@@ -173,6 +289,222 @@ func nullableRules(prods []*Production) map[string]bool {
 		}
 	}
 	return nullable
+}
+
+// validateRepetitions runs after structural rewrites, which may duplicate an
+// authored repetition, and before desugar allocates any helper. It bounds the
+// expansion a numeric repetition can request and rejects an unbounded loop
+// whose item derives epsilon, since that loop can re-enter without advancing.
+func validateRepetitions(grammar *Grammar) *EmitError {
+	expansion := 0
+
+	refuse := func(el *Element, prod *Production, message string) *EmitError {
+		rule, sp := el.sourceRule, el.sourceSp
+		if rule == "" {
+			rule, sp = originOf(prod), el.Sp
+			if sp == nil {
+				sp = prod.Sp
+			}
+		}
+		return &EmitError{
+			Rule: rule, Sp: sp,
+			Message: fmt.Sprintf("%s: rule '%s' %s", diagName(), rule, message),
+		}
+	}
+
+	var validateBounds func(*Element, *Production) *EmitError
+	validateBounds = func(el *Element, prod *Production) *EmitError {
+		if el == nil {
+			return nil
+		}
+		if el.Kind == KindGroup {
+			for _, alt := range el.Alts {
+				for _, child := range alt {
+					if err := validateBounds(child, prod); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if el.Kind == KindRep && (el.Min < 0 || el.Max < 0 ||
+			(el.Max != MaxInfinity && el.Max < el.Min)) {
+			return refuse(el, prod, fmt.Sprintf(
+				"has invalid repetition bounds '%d*%d'. Bounds must be non-negative "+
+					"integers and the upper bound must not be lower than the lower bound.",
+				el.Min, el.Max))
+		}
+		if el.Kind == KindOpt || el.Kind == KindStar ||
+			el.Kind == KindPlus || el.Kind == KindRep {
+			return validateBounds(el.Inner, prod)
+		}
+		return nil
+	}
+	for _, prod := range grammar.Productions {
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if err := validateBounds(el, prod); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	nullable := nonConsumingRules(grammar.Productions)
+
+	var nonConsumingWitness func(*Element) *Element
+	nonConsumingWitness = func(el *Element) *Element {
+		if el == nil || !elementMayMatchWithoutConsuming(el, nullable) {
+			return nil
+		}
+		if el.Kind == KindGroup {
+			for _, alt := range el.Alts {
+				nonConsuming := true
+				for _, child := range alt {
+					if !elementMayMatchWithoutConsuming(child, nullable) {
+						nonConsuming = false
+						break
+					}
+				}
+				if !nonConsuming {
+					continue
+				}
+				for _, child := range alt {
+					if witness := nonConsumingWitness(child); witness != nil {
+						return witness
+					}
+				}
+				return el
+			}
+			return nil
+		}
+		if el.Kind == KindPlus || (el.Kind == KindRep && el.Min > 0) {
+			if witness := nonConsumingWitness(el.Inner); witness != nil {
+				return witness
+			}
+		}
+		return el
+	}
+
+	var walk func(*Element, *Production) *EmitError
+	walk = func(el *Element, prod *Production) *EmitError {
+		if el == nil {
+			return nil
+		}
+		if el.Kind == KindGroup {
+			for _, alt := range el.Alts {
+				for _, child := range alt {
+					if err := walk(child, prod); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if el.Kind != KindOpt && el.Kind != KindStar &&
+			el.Kind != KindPlus && el.Kind != KindRep {
+			return nil
+		}
+
+		unbounded := el.Kind == KindStar || el.Kind == KindPlus ||
+			(el.Kind == KindRep && el.Max == MaxInfinity)
+		if unbounded && elementMayMatchWithoutConsuming(el.Inner, nullable) {
+			witness := nonConsumingWitness(el.Inner)
+			if witness == nil {
+				witness = el
+			}
+			return refuse(witness, prod,
+				"has an unbounded repetition whose item can succeed without consuming input. "+
+					"An unbounded repetition must consume input on every iteration.")
+		}
+
+		if el.Kind == KindRep {
+			mandatory := el.Min
+			if mandatory < 0 {
+				mandatory = 0
+			}
+			remaining := MaxRepeatExpansion - expansion
+			cost := 1
+			tooLarge := mandatory > remaining-cost
+			if !tooLarge {
+				cost += mandatory
+				if el.Max == MaxInfinity {
+					tooLarge = cost >= remaining
+					cost++
+				} else {
+					optional := el.Max - el.Min
+					if optional < 0 {
+						optional = 0
+					}
+					tooLarge = optional > (remaining-cost)/2
+					if !tooLarge {
+						cost += 2 * optional
+					}
+				}
+			}
+			if tooLarge {
+				upper := fmt.Sprintf("%d", el.Max)
+				if el.Max == MaxInfinity {
+					upper = ""
+				}
+				return refuse(el, prod, fmt.Sprintf(
+					"exceeds the repetition expansion limit of %d while expanding '%d*%s'. "+
+						"Split the repetition into named rules or lower its bounds.",
+					MaxRepeatExpansion, el.Min, upper))
+			}
+			expansion += cost
+		}
+		return walk(el.Inner, prod)
+	}
+
+	for _, prod := range grammar.Productions {
+		for _, alt := range prod.Alts {
+			for _, el := range alt {
+				if err := walk(el, prod); err != nil {
+					return err
+				}
+			}
+		}
+		if prod.ProbeHelper != nil {
+			// Probe-helper vocabulary lives outside Alts. Every successful
+			// matcher re-enters the helper, so a nullable matcher would loop
+			// forever at one source position.
+			for _, el := range prod.ProbeHelper.VocabElements {
+				if elementMayMatchWithoutConsuming(el, nullable) {
+					witness := nonConsumingWitness(el)
+					if witness == nil {
+						witness = el
+					}
+					return refuse(witness, prod,
+						"has a probe helper matcher that can succeed without consuming input. "+
+							"An unbounded repetition must consume input on every iteration.")
+				}
+			}
+		}
+		if prod.TailRepeat != nil {
+			cycle := append(append(Sequence{}, prod.TailRepeat.Sep...), prod.Alts[0]...)
+			nonConsuming := len(cycle) > 0
+			for _, el := range cycle {
+				if !elementMayMatchWithoutConsuming(el, nullable) {
+					nonConsuming = false
+					break
+				}
+			}
+			if nonConsuming {
+				witness := cycle[0]
+				for _, el := range cycle {
+					if found := nonConsumingWitness(el); found != nil {
+						witness = found
+						break
+					}
+				}
+				return refuse(witness, prod,
+					"has an unbounded tail repetition that can succeed without consuming input. "+
+						"An unbounded repetition must consume input on every iteration.")
+			}
+		}
+	}
+	return nil
 }
 
 func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.GrammarSpec, err error) {
@@ -328,6 +660,9 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// before tail-repeat detection and desugaring.
 	grammar = leftFactor(grammar)
 	grammar = rewriteTailRepeats(grammar, start)
+	if err := validateRepetitions(grammar); err != nil {
+		return nil, err
+	}
 	grammar = desugar(grammar)
 
 	// Both are named AFTER desugar, because both are keyed by the rule

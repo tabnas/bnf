@@ -60,14 +60,15 @@ mod readme_examples {}
 /// release orchestrator rewrites both, and `tests/version_test.rs` fails
 /// the build if they drift. Mirrors `VERSION` in `ts/src/bnf.ts` and
 /// `const VERSION` in `go/bnf.go`.
-pub const VERSION: &str = "0.1.23";
+pub const VERSION: &str = "0.1.24";
 
 pub use emit::emit_grammar_spec;
 pub use ir::{
     builtin_token, diag_name, escape_regexp, is_effectively_case_sensitive, is_prose_name,
     origin_of, refs_in, term_key, AmbiguityReport, ConvertOptions, Element, EmitError, Grammar,
     Kind, NodeKind, ProbeDispatchSpec, ProbeHelperSpec, Production, Sequence, SrcSpan,
-    TailRepeatSpec, ValueAnnotation, BUILTIN_TOKENS, MAX_ELEMENT_DEPTH, REMOVE_ALL, REMOVE_PROSE,
+    TailRepeatSpec, ValueAnnotation, BUILTIN_TOKENS, MAX_ELEMENT_DEPTH, MAX_REPEAT_EXPANSION,
+    REMOVE_ALL, REMOVE_PROSE,
 };
 pub use leftrec::eliminate_left_recursion;
 pub use spec::{

@@ -9,8 +9,9 @@
 use indexmap::{IndexMap, IndexSet};
 
 use crate::ir::{
-    builtin_token, diag_name, is_prose_name, term_key, Element, EmitError, Grammar, Kind, NodeKind,
-    Production, Sequence, BUILTIN_TOKENS, REMOVE_ALL, REMOVE_PROSE,
+    builtin_token, diag_name, is_prose_name, origin_of, regex_key, term_key, term_key_of, Element,
+    EmitError, Grammar, Kind, NodeKind, Production, Sequence, BUILTIN_TOKENS, MAX_REPEAT_EXPANSION,
+    REMOVE_ALL, REMOVE_PROSE,
 };
 
 /// Resolve RFC 5234 `prose-val` terminals (`<free text>`).
@@ -355,14 +356,157 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
 }
 
 /// Whether a regex terminal can match nothing, decided by asking the
-/// regex. An invalid pattern answers true, the permissive direction.
+/// regex. An invalid pattern answers false so the compiler's specific
+/// invalid-regex diagnostic takes precedence over derived nullability.
 fn regex_derives_empty(pattern: &str, flags: &str) -> bool {
     let mut builder = regex::RegexBuilder::new(&format!("^(?:{pattern})$"));
     builder.case_insensitive(flags.contains('i'));
     match builder.build() {
         Ok(re) => re.is_match(""),
-        Err(_) => true,
+        Err(_) => false,
     }
+}
+
+/// Whether a regex can succeed without consuming in some following
+/// context. `\b` before a word character is the important case: it does
+/// not match the wholly empty input, but it still lets a repetition
+/// re-enter at one source position. Assertions become an empty group rather
+/// than disappearing: deleting one from a quantified group can leave an
+/// invalid skeleton and hide a valid non-consuming matcher.
+fn regex_may_match_without_consuming(pattern: &str, flags: &str) -> bool {
+    let mut seen = String::new();
+    for flag in flags.chars() {
+        if !"dgimsuvy".contains(flag) || seen.contains(flag) {
+            return false;
+        }
+        seen.push(flag);
+    }
+    if seen.contains('u') && seen.contains('v') {
+        return false;
+    }
+    let mut valid = regex::RegexBuilder::new(pattern);
+    valid.case_insensitive(flags.contains('i'));
+    if valid.build().is_err() {
+        return false;
+    }
+    if regex_derives_empty(pattern, flags) {
+        return true;
+    }
+
+    let bytes = pattern.as_bytes();
+    let mut skeleton = Vec::with_capacity(bytes.len());
+    let mut in_class = false;
+    let mut extended = false;
+    let mut extended_stack = Vec::new();
+    let mut changed = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'\\' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            if !in_class && matches!(next, b'b' | b'B' | b'A' | b'z' | b'<' | b'>') {
+                changed = true;
+                skeleton.extend_from_slice(b"()");
+                i += 2;
+                // regex-syntax extends `\b` with four named boundary
+                // assertions. Consume the whole assertion; leaving the
+                // brace suffix behind makes the analysis skeleton invalid
+                // and can hide a real zero-width matcher. Ordinary
+                // quantifiers such as `\b{5}` deliberately remain.
+                if next == b'b' {
+                    for suffix in [
+                        b"{start}".as_slice(),
+                        b"{end}".as_slice(),
+                        b"{start-half}".as_slice(),
+                        b"{end-half}".as_slice(),
+                    ] {
+                        if bytes[i..].starts_with(suffix) {
+                            i += suffix.len();
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            skeleton.extend_from_slice(&bytes[i..=i + 1]);
+            i += 2;
+            continue;
+        }
+        if !in_class && extended && ch == b'#' {
+            // In extended mode a comment runs to the next LF. Its contents
+            // are not regex syntax: in particular, an unmatched `[` in the
+            // comment must not hide a real boundary on the following line.
+            while i < bytes.len() {
+                let comment = bytes[i];
+                skeleton.push(comment);
+                i += 1;
+                if comment == b'\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if in_class {
+            skeleton.push(ch);
+            if ch == b']' {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == b'(' && i + 2 < bytes.len() && bytes[i + 1] == b'?' {
+            let mut j = i + 2;
+            let mut enabled = true;
+            let mut next_extended = extended;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'-' => enabled = false,
+                    b'x' => next_extended = enabled,
+                    b'i' | b'm' | b's' | b'R' | b'U' | b'u' => {}
+                    _ => break,
+                }
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b':' {
+                // `(?:...)` is the empty flag set; `(?x:...)` and
+                // `(?-x:...)` change extended mode only for this group.
+                extended_stack.push(extended);
+                extended = next_extended;
+                skeleton.extend_from_slice(&bytes[i..=j]);
+                i = j + 1;
+                continue;
+            }
+            if i + 2 < j && j < bytes.len() && bytes[j] == b')' {
+                // A flag-only group changes the rest of the current scope.
+                extended = next_extended;
+                skeleton.extend_from_slice(&bytes[i..=j]);
+                i = j + 1;
+                continue;
+            }
+        }
+        if ch == b'(' {
+            extended_stack.push(extended);
+            skeleton.push(ch);
+        } else if ch == b')' {
+            if let Some(outer) = extended_stack.pop() {
+                extended = outer;
+            }
+            skeleton.push(ch);
+        } else if ch == b'[' {
+            in_class = true;
+            skeleton.push(ch);
+        } else if ch == b'^' || ch == b'$' {
+            changed = true;
+            skeleton.extend_from_slice(b"()");
+        } else {
+            skeleton.push(ch);
+        }
+        i += 1;
+    }
+    changed
+        && String::from_utf8(skeleton)
+            .ok()
+            .is_some_and(|skeleton| regex_derives_empty(&skeleton, flags))
 }
 
 pub(crate) fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -> bool {
@@ -381,6 +525,49 @@ pub(crate) fn element_derives_empty(el: &Element, nullable: &IndexSet<String>) -
         Kind::Token { name } => name == "#ZZ" || name == "#AA",
         Kind::Prose { .. } => false,
     }
+}
+
+pub(crate) fn element_may_match_without_consuming(
+    el: &Element,
+    nullable: &IndexSet<String>,
+) -> bool {
+    match &el.kind {
+        Kind::Opt { .. } | Kind::Star { .. } => true,
+        Kind::Plus { inner } => element_may_match_without_consuming(inner, nullable),
+        Kind::Rep { min, inner, .. } => {
+            *min == 0 || element_may_match_without_consuming(inner, nullable)
+        }
+        Kind::Group { alts } => alts.iter().any(|alt| {
+            alt.iter()
+                .all(|child| element_may_match_without_consuming(child, nullable))
+        }),
+        Kind::Ref { name, .. } => nullable.contains(name),
+        Kind::Term { literal, .. } => literal.is_empty(),
+        Kind::Regex { pattern, flags } => regex_may_match_without_consuming(pattern, flags),
+        Kind::Token { name } => name == "#ZZ" || name == "#AA",
+        Kind::Prose { .. } => false,
+    }
+}
+
+pub(crate) fn non_consuming_rules(prods: &[Production]) -> IndexSet<String> {
+    let mut nullable = IndexSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for prod in prods {
+            if nullable.contains(&prod.name) {
+                continue;
+            }
+            if prod.alts.iter().any(|alt| {
+                alt.iter()
+                    .all(|el| element_may_match_without_consuming(el, &nullable))
+            }) {
+                nullable.insert(prod.name.clone());
+                changed = true;
+            }
+        }
+    }
+    nullable
 }
 
 fn sequence_derives_empty(alt: &[Element], nullable: &IndexSet<String>) -> bool {
@@ -407,4 +594,282 @@ pub(crate) fn nullable_rules(prods: &[Production]) -> IndexSet<String> {
         }
     }
     nullable
+}
+
+/// Bound numeric repetition expansion and refuse unbounded loops whose item
+/// can derive epsilon. Run after structural rewrites, which may duplicate an
+/// authored repetition, and before desugaring allocates any helper.
+pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
+    let mut expansion = 0usize;
+
+    fn refuse(el: &Element, prod: &Production, message: String) -> EmitError {
+        let rule = origin_of(prod);
+        let sp = el.sp.or(prod.sp);
+        EmitError::at(
+            format!("{}: rule '{}' {message}", diag_name(), rule),
+            rule,
+            sp,
+        )
+    }
+
+    fn vocab_key(el: &Element) -> Option<String> {
+        match &el.kind {
+            Kind::Term { .. } => Some(term_key_of(el)),
+            Kind::Regex { pattern, flags } => Some(regex_key(pattern, flags)),
+            Kind::Token { name } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn find_vocab_origin(
+        el: &Element,
+        grammar: &Grammar,
+        key: &str,
+        current: &Production,
+        visited: &mut IndexSet<String>,
+    ) -> Option<(String, Option<crate::ir::SrcSpan>)> {
+        match &el.kind {
+            Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
+                (vocab_key(el).as_deref() == Some(key))
+                    .then(|| (origin_of(current).to_string(), current.sp))
+            }
+            Kind::Ref { name, .. } => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+                let found =
+                    grammar.find(name).and_then(|source| {
+                        source.alts.iter().flatten().find_map(|child| {
+                            find_vocab_origin(child, grammar, key, source, visited)
+                        })
+                    });
+                visited.shift_remove(name);
+                found
+            }
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => find_vocab_origin(inner, grammar, key, current, visited),
+            Kind::Group { alts } => alts
+                .iter()
+                .flatten()
+                .find_map(|child| find_vocab_origin(child, grammar, key, current, visited)),
+            Kind::Prose { .. } => None,
+        }
+    }
+
+    // A probe helper contains cloned terminals rather than references, but
+    // diagnostics still belong to the author-written production that supplied
+    // each terminal. Rewalk the committed `with` branch in the same X-then-Y
+    // order used to build the vocabulary and recover that source rule.
+    fn probe_vocab_origin(
+        grammar: &Grammar,
+        helper: &Production,
+        el: &Element,
+    ) -> Option<(String, Option<crate::ir::SrcSpan>)> {
+        let key = vocab_key(el)?;
+        let dispatch = grammar.productions.iter().find(|prod| {
+            prod.probe_dispatch
+                .as_ref()
+                .is_some_and(|spec| spec.probe_rule == helper.name)
+        })?;
+        let with_name = &dispatch.probe_dispatch.as_ref()?.with_branch;
+        let with_prod = grammar.find(with_name)?;
+        let mut visited = IndexSet::new();
+        with_prod
+            .alts
+            .iter()
+            .flatten()
+            .find_map(|child| find_vocab_origin(child, grammar, &key, with_prod, &mut visited))
+    }
+
+    fn validate_bounds(el: &Element, prod: &Production) -> Result<(), EmitError> {
+        if let Kind::Group { alts } = &el.kind {
+            for child in alts.iter().flatten() {
+                validate_bounds(child, prod)?;
+            }
+            return Ok(());
+        }
+        if let Kind::Rep { min, max, .. } = &el.kind {
+            if max.is_some_and(|max| max < *min) {
+                return Err(refuse(
+                    el,
+                    prod,
+                    format!(
+                        "has invalid repetition bounds '{}*{}'. Bounds must be non-negative \
+                         integers and the upper bound must not be lower than the lower bound.",
+                        min,
+                        max.expect("checked as present")
+                    ),
+                ));
+            }
+        }
+        match &el.kind {
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => validate_bounds(inner, prod),
+            _ => Ok(()),
+        }
+    }
+
+    for prod in &grammar.productions {
+        for el in prod.alts.iter().flatten() {
+            validate_bounds(el, prod)?;
+        }
+    }
+
+    let nullable = non_consuming_rules(&grammar.productions);
+
+    fn non_consuming_witness<'a>(
+        el: &'a Element,
+        nullable: &IndexSet<String>,
+    ) -> Option<&'a Element> {
+        if !element_may_match_without_consuming(el, nullable) {
+            return None;
+        }
+        if let Kind::Group { alts } = &el.kind {
+            let alt = alts.iter().find(|alt| {
+                alt.iter()
+                    .all(|child| element_may_match_without_consuming(child, nullable))
+            })?;
+            for child in alt {
+                if let Some(witness) = non_consuming_witness(child, nullable) {
+                    return Some(witness);
+                }
+            }
+            return Some(el);
+        }
+        match &el.kind {
+            Kind::Plus { inner }
+            | Kind::Rep {
+                min: 1.., inner, ..
+            } => non_consuming_witness(inner, nullable).or(Some(el)),
+            _ => Some(el),
+        }
+    }
+
+    fn walk(
+        el: &Element,
+        prod: &Production,
+        nullable: &IndexSet<String>,
+        expansion: &mut usize,
+    ) -> Result<(), EmitError> {
+        if let Kind::Group { alts } = &el.kind {
+            for child in alts.iter().flatten() {
+                walk(child, prod, nullable, expansion)?;
+            }
+            return Ok(());
+        }
+
+        let inner = match &el.kind {
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => inner.as_ref(),
+            _ => return Ok(()),
+        };
+        let unbounded = matches!(&el.kind, Kind::Star { .. } | Kind::Plus { .. })
+            || matches!(&el.kind, Kind::Rep { max: None, .. });
+        if unbounded && element_may_match_without_consuming(inner, nullable) {
+            return Err(refuse(
+                non_consuming_witness(inner, nullable).unwrap_or(el),
+                prod,
+                "has an unbounded repetition whose item can succeed without consuming input. \
+                 An unbounded repetition must consume input on every iteration."
+                    .to_string(),
+            ));
+        }
+
+        if let Kind::Rep { min, max, .. } = &el.kind {
+            let remaining = MAX_REPEAT_EXPANSION - *expansion;
+            let mut cost = 1usize;
+            let mut too_large = cost > remaining || *min > remaining.saturating_sub(cost);
+            if !too_large {
+                cost += *min;
+                match max {
+                    None => {
+                        too_large = cost >= remaining;
+                        cost += 1;
+                    }
+                    Some(max) => {
+                        let optional = max.saturating_sub(*min);
+                        too_large = optional > remaining.saturating_sub(cost) / 2;
+                        if !too_large {
+                            cost += 2 * optional;
+                        }
+                    }
+                }
+            }
+            if too_large {
+                let upper = max.map_or_else(String::new, |max| max.to_string());
+                return Err(refuse(
+                    el,
+                    prod,
+                    format!(
+                        "exceeds the repetition expansion limit of {MAX_REPEAT_EXPANSION} \
+                         while expanding '{min}*{upper}'. Split the repetition into named \
+                         rules or lower its bounds."
+                    ),
+                ));
+            }
+            *expansion += cost;
+        }
+        walk(inner, prod, nullable, expansion)
+    }
+
+    for prod in &grammar.productions {
+        for el in prod.alts.iter().flatten() {
+            walk(el, prod, &nullable, &mut expansion)?;
+        }
+        if let Some(helper) = &prod.probe_helper {
+            // Probe-helper vocabulary lives outside `alts`. Every successful
+            // matcher re-enters the helper, so a nullable matcher would loop
+            // forever at one source position.
+            for el in &helper.vocab_elements {
+                if element_may_match_without_consuming(el, &nullable) {
+                    let witness = non_consuming_witness(el, &nullable).unwrap_or(el);
+                    let (rule, source_sp) = probe_vocab_origin(grammar, prod, el)
+                        .unwrap_or_else(|| (origin_of(prod).to_string(), prod.sp));
+                    return Err(EmitError::at(
+                        format!(
+                            "{}: rule '{}' has a probe helper matcher that can succeed without \
+                             consuming input. An unbounded repetition must consume input on every \
+                             iteration.",
+                            diag_name(),
+                            rule
+                        ),
+                        &rule,
+                        witness.sp.or(source_sp),
+                    ));
+                }
+            }
+        }
+        if let Some(tail) = &prod.tail_repeat {
+            let cycle = tail.sep.iter().chain(prod.alts[0].iter());
+            if cycle.clone().next().is_some()
+                && cycle
+                    .clone()
+                    .all(|el| element_may_match_without_consuming(el, &nullable))
+            {
+                let fallback = tail
+                    .sep
+                    .first()
+                    .or_else(|| prod.alts.first().and_then(|alt| alt.first()))
+                    .expect("a non-empty tail cycle has an element");
+                let witness = cycle
+                    .filter_map(|el| non_consuming_witness(el, &nullable))
+                    .next()
+                    .unwrap_or(fallback);
+                return Err(refuse(
+                    witness,
+                    prod,
+                    "has an unbounded tail repetition that can succeed without consuming input. \
+                     An unbounded repetition must consume input on every iteration."
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }

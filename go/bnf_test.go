@@ -301,6 +301,26 @@ func TestEliminatesLeftRecursion(t *testing.T) {
 		{Name: "num", Alts: []Sequence{{tok("#NR")}}},
 	}})
 	for _, p := range out.Productions {
+		var checkPublic func(*Element)
+		checkPublic = func(el *Element) {
+			if el == nil {
+				return
+			}
+			if el.sourceRule != "" || el.sourceSp != nil {
+				t.Errorf("public elimination leaked rewrite provenance on %#v", el)
+			}
+			checkPublic(el.Inner)
+			for _, groupAlt := range el.Alts {
+				for _, child := range groupAlt {
+					checkPublic(child)
+				}
+			}
+		}
+		for _, alt := range p.Alts {
+			for _, el := range alt {
+				checkPublic(el)
+			}
+		}
 		if p.Name != "expr" {
 			continue
 		}
@@ -524,11 +544,6 @@ func TestSuffixDebtLeavesUncontestedGrammarsAlone(t *testing.T) {
 			Sequence{ref("A"), sensTerm("w")},
 			Sequence{sensTerm("("), ref("A"), sensTerm(")")},
 			Sequence{sensTerm("z")}),
-		// A nullable suffix commits the enclosing frame to nothing, so the
-		// loop stays greedy.
-		"nullable suffix": hiddenLeftRec(
-			Sequence{optOf(sensTerm("x")), ref("A"), optOf(sensTerm("y"))},
-			Sequence{sensTerm("z")}),
 		"plain direct left recursion": hiddenLeftRec(
 			Sequence{ref("A"), sensTerm("y")},
 			Sequence{sensTerm("z")}),
@@ -540,6 +555,19 @@ func TestSuffixDebtLeavesUncontestedGrammarsAlone(t *testing.T) {
 					name, a.N, a.C)
 			}
 		}
+	}
+}
+
+func TestSuffixDebtRefusesANullableLoop(t *testing.T) {
+	// `A = ["x"] A ["y"] / "z"` can take its recursive branch while
+	// both optionals consume nothing. Its rewritten repetition cannot
+	// make progress.
+	_, err := EmitGrammarSpec(hiddenLeftRec(
+		Sequence{optOf(sensTerm("x")), ref("A"), optOf(sensTerm("y"))},
+		Sequence{sensTerm("z")}), &ConvertOptions{Tag: "demo"})
+	if err == nil || !strings.Contains(err.Error(), "unbounded repetition") ||
+		!strings.Contains(err.Error(), "without consuming input") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

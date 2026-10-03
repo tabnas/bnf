@@ -81,6 +81,12 @@ type SrcSpan struct {
 type Element struct {
 	Kind ElemKind
 
+	// sourceRule/sourceSp are rewrite-only provenance. They stay unexported
+	// and are populated on the compiler's private copy so Paull substitution
+	// cannot make a diagnostic blame the caller that received a copied item.
+	sourceRule string
+	sourceSp   *SrcSpan
+
 	// Sp is where this element came from in the grammar source
 	// (front-end populated, nil when unrecorded). Rewrite passes share
 	// element objects by reference — cloneGrammar copies productions and
@@ -141,6 +147,10 @@ type Element struct {
 
 // MaxInfinity stands in for the TS `Infinity` upper bound on repetition.
 const MaxInfinity = 1 << 30
+
+// MaxRepeatExpansion is the most numeric-repetition work desugaring will
+// allocate. One unit is a mandatory copy or a generated helper.
+const MaxRepeatExpansion = 8192
 
 type Sequence []*Element
 

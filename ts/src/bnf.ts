@@ -35,6 +35,7 @@ export {
   termKey,
   isEffectivelyCaseSensitive,
   BUILTIN_TOKENS,
+  MAX_REPEAT_EXPANSION,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,
@@ -70,4 +71,4 @@ export type { CompileOptions, JsonicOptions, ActionsMap } from './spec'
 // "version": the release orchestrator rewrites both, and the version
 // test fails the build if they drift. Mirrors `const VERSION` in
 // go/bnf.go.
-export const VERSION = '0.1.23'
+export const VERSION = '0.1.24'
