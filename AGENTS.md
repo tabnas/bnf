@@ -199,10 +199,14 @@ cd rs && cargo test --all-targets && cargo test --doc
 ```
 
 The Rust crate resolves the engine as a sibling checkout
-(`tabnas = { package = "tabnas-parser", path = "../../parser/rs" }` in `rs/Cargo.toml`); the crate
-is unpublished, so there is no registry version to fall back on, which is
-why `ci/rust/run.sh` runs cargo **without** `--locked` and checks the
-lockfile by diffing it with the engine's version exempted. `make test-rs`
+(`tabnas = { package = "tabnas-parser", path = "../../parser/rs" }` in `rs/Cargo.toml`). The engine is
+on crates.io as `tabnas-parser`, and so is this crate, as `tabnas-bnf`, but
+the committed manifest stays path-only: `crates-release.yml` rewrites the
+path into a crates.io requirement only in the copy it publishes. A path
+dependency resolves to whatever version the sibling checkout holds, so
+`rs/Cargo.lock`'s entry for the engine moves whenever that checkout does.
+That is why `ci/rust/run.sh` runs cargo **without** `--locked` and checks
+the lockfile by diffing it with the engine's version exempted. `make test-rs`
 is the fast loop; `ci/rust/run.sh` is the full gate (fmt, build, tests,
 doctests, clippy, lockfile).
 
@@ -476,10 +480,15 @@ So assert the absence first, and only then believe the run:
 ```bash
 (
   cd go
-  go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod still has a replace'; exit 1; }
+  go mod edit -json | jq -e '.Replace == null' >/dev/null || { echo 'go.mod still has a replace'; exit 1; }
   GOWORK=off go test ./...
 )
 ```
+
+The check asks `jq`, not `grep`: current Go leaves the `Replace` key out
+when there is no replace, where older Go printed `"Replace": null`, and
+`jq` reads a missing key as null, so the check passes on a clean `go.mod`
+and fails on a replace either way.
 
 Stage deliberately and read `git status --short` before committing. This
 bites hardest on a PR whose CI is *expected* red for a known dependency: a

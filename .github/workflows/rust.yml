@@ -50,9 +50,11 @@ jobs:
         with:
           path: bnf
 
-      # Engine main, not a release: the crate is unpublished, so this is
-      # the only resolution there is. It is also the one CI already uses
-      # for Go, so both ports are measured against the same engine.
+      # Engine main, not a release: rs/Cargo.toml names the engine by path
+      # (tabnas-parser is on crates.io, but the committed manifest stays
+      # path-only), so this is the only resolution there is. It is also
+      # the one CI already uses for Go, so both ports are measured against
+      # the same engine.
       - name: Clone the sibling engine
         run: git clone --depth 1 https://github.com/tabnas/parser.git parser
 

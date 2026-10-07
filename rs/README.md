@@ -106,21 +106,21 @@ assigned.
 
 ## Install
 
-The `tabnas` crate is not published to a registry, so the engine is
-consumed as a **sibling checkout**, the standard tabnas development
-model. Clone `https://github.com/tabnas/parser` next to this repository
-and point at it:
+The engine is not part of this crate. Both are on crates.io, the engine
+as `tabnas-parser`, whose library is named `tabnas` in code, so add both:
 
-```toml
-[dependencies]
-tabnas-bnf = { path = "../bnf/rs" }
-tabnas = { package = "tabnas-parser", path = "../parser/rs" }
+```bash
+cargo add tabnas-bnf tabnas-parser
 ```
 
 Both entries are needed. A crate's dependencies are not passed on to its
 dependents, so `tabnas-bnf` alone does not put `tabnas` in your extern
 prelude, and the examples above that name `tabnas::Tabnas` would not
 resolve.
+
+In this repository, `Cargo.toml` takes the engine by path from a sibling
+checkout instead. The release workflow swaps that path for a crates.io
+version when it publishes this crate.
 
 ## Differences from the canonical TypeScript
 
