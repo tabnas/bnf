@@ -4,8 +4,9 @@
 # you. `make test-rs` is the fast inner loop; this is the full gate.
 #
 # The engine is a PATH DEPENDENCY on the sibling checkout
-# (rs/Cargo.toml: `tabnas = { package = "tabnas-parser", path = "../../parser/rs" }`), and the crate
-# is unpublished, so there is no registry version to fall back on. Clone
+# (rs/Cargo.toml: `tabnas = { package = "tabnas-parser", path = "../../parser/rs" }`). The engine is
+# on crates.io as tabnas-parser, but the committed manifest names it by
+# path alone, so there is no registry version to fall back on. Clone
 # https://github.com/tabnas/parser next to this repo before running.
 set -euo pipefail
 

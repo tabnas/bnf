@@ -3123,9 +3123,10 @@ class EmitError extends Error {
 //     grammar, where the host's tags would otherwise disable the
 //     fallback these rules were relying on.
 //
-// Emitted as a comma-separated string because that is the form BOTH
-// runtimes accept (`g` as an array is TypeScript-only), with no spaces
-// around the comma (the TS grammar builder rejects a padded tag).
+// Emitted as a comma-separated string, the form every engine reads (the
+// TypeScript engine also takes an array, and the Go and Rust grammar
+// loaders join an array into this string), with no spaces around the comma
+// (the TS grammar builder rejects a padded tag).
 function syncG(tag: string, group: 'close' | 'comma' | 'end'): string {
   return tag + ',' + group
 }

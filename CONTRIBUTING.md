@@ -10,27 +10,43 @@ repository for humans and agents alike.
 
 ## Build & test
 
-This repository is *polyglot*: `ts/` and `go/` hold two parallel
-implementations of the same package. **`ts/` is canonical; `go/` tracks
-it** — a behaviour change normally lands in both, with tests in both.
+This repository is *polyglot*: `ts/`, `go/` and `rs/` hold three parallel
+implementations of the same package. **`ts/` is canonical; `go/` and `rs/`
+track it** — a behaviour change normally lands in all three, with tests in
+all three.
 
 ```bash
-make build   # builds ts/ and go/
-make test    # tests ts/ and go/
+make build   # builds ts/, go/ and rs/
+make test    # tests the same
 
 # or per stack:
 cd ts && npm install && npm run build && npm test
 cd go && go build ./... && go test ./...
+cd rs && cargo build --all-targets && cargo test --all-targets
 ```
 
-Tabnas repos resolve their unpublished `@tabnas/*` siblings from
-**side-by-side checkouts**, so clone this repo's tabnas dependencies into the
-same parent directory. Check `.github/workflows/` for the exact list.
+The TypeScript and Go sides install published packages, `@tabnas/*` from
+the npm registry and `github.com/tabnas/*/go` from the module proxy, so they
+need no other checkout. Sibling checkouts are optional there: to work
+against unreleased siblings, clone them into the same parent directory and
+run admin's `scripts/link.sh`, which links them over
+`ts/node_modules/@tabnas/*` and writes a `go.work` one level up. Never commit
+that wiring. CI builds the siblings named in `.github/workflows/ci.yml`'s
+`deps` from source. `rs/` is the exception: `rs/Cargo.toml` takes the engine
+crate as a path dependency, so it needs `parser` checked out beside this
+repository even for a plain build. The engine is on crates.io as
+`tabnas-parser`, but the committed manifest stays path-only: only when it
+publishes `tabnas-bnf` does the release workflow swap that path for a
+crates.io version.
 
 ## Commit messages
 
-[Conventional Commits](https://www.conventionalcommits.org/) — release
-automation derives versions and changelogs from them, so this is required:
+[Conventional Commits](https://www.conventionalcommits.org/) are required,
+for commit messages and PR titles alike. PRs are squash-merged, so a PR's
+title is its commit message, and the GitHub Release that each release creates
+lists those titles in its generated notes. They do not set the version: a
+release is its own version-bump pull request, then a `release.yml` dispatch
+(see [`AGENTS.md`](AGENTS.md), "Releasing"). For example:
 
 ```
 feat: add lax mode for trailing commas
@@ -44,7 +60,7 @@ Use `feat!:` / `fix!:` (or a `BREAKING CHANGE:` footer) for breaking changes.
 
 1. Open an issue first for anything larger than a small fix.
 2. Branch from `main`; keep the PR focused on one change.
-3. `make test` must pass for **both** implementations.
+3. `make test` must pass for **all three** implementations.
 4. PR titles follow Conventional Commits — PRs are squash-merged, so the
    title becomes the commit message.
 5. CI must be green before merge.
