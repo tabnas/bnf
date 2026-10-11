@@ -681,35 +681,37 @@ function reachesAnnotated(
   byName: Map<string, Production>,
   seen: Set<string>,
 ): string | null {
-  switch (el.kind) {
-    case 'ref': {
-      const target = byName.get(el.name)
-      if (null == target) return null
-      if (null != target.value) return target.name
-      if (seen.has(target.name)) return null
-      seen.add(target.name)
-      for (const alt of target.alts) {
-        for (const inner of alt) {
-          const hit = reachesAnnotated(inner, byName, seen)
-          if (null != hit) return hit
-        }
+  // Depth first and in the order the elements are written, on a stack of
+  // its own: the references are the grammar author's, and a chain of them
+  // as long as the grammar overflowed a walk that recursed per rule.
+  const stack: Element[] = [el]
+  while (stack.length > 0) {
+    const e = stack.pop() as Element
+    switch (e.kind) {
+      case 'ref': {
+        const target = byName.get(e.name)
+        if (null == target) break
+        if (null != target.value) return target.name
+        if (seen.has(target.name)) break
+        seen.add(target.name)
+        // Pushed last first, so the first element is walked first.
+        const inner = target.alts.flat()
+        for (let i = inner.length - 1; i >= 0; i--) stack.push(inner[i])
+        break
       }
-      return null
-    }
-    case 'opt': case 'star': case 'plus': case 'rep':
-      return reachesAnnotated(el.inner, byName, seen)
-    case 'group': {
-      for (const alt of el.alts) {
-        for (const inner of alt) {
-          const hit = reachesAnnotated(inner, byName, seen)
-          if (null != hit) return hit
-        }
+      case 'opt': case 'star': case 'plus': case 'rep':
+        stack.push(e.inner)
+        break
+      case 'group': {
+        const inner = e.alts.flat()
+        for (let i = inner.length - 1; i >= 0; i--) stack.push(inner[i])
+        break
       }
-      return null
+      default:
+        break
     }
-    default:
-      return null
   }
+  return null
 }
 
 
@@ -1007,8 +1009,9 @@ type AmbiguityReport = {
 // MAX_LEFT_RECURSION_EXPANSION, below, refuses the grammar before the
 // substitution that would pass the bound is made. A chain of rules of one
 // alternative each gains no alternatives but copies the rest of the chain
-// into every rule, so the element occurrences the whole grammar gains are
-// bounded too: MAX_LEFT_RECURSION_ELEMENTS, refused the same way.
+// into every rule, so what the whole grammar gains, in elements and
+// alternatives, is bounded too: MAX_LEFT_RECURSION_ELEMENTS, refused the
+// same way.
 // Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
 // Returns the element sequence for the branch where the sugar *does*
 // match at least once, or null if the element is not nullable sugar.
@@ -1144,8 +1147,9 @@ function eliminateLeftRecursionKeeping(
   const cyclic = findLeadingRefCycleMembers(prods)
   const isExemptAlias = (p: Production): boolean => exemptAlias(p, cyclic)
 
-  // The element occurrences substitution has added to the grammar so far,
-  // held to MAX_LEFT_RECURSION_ELEMENTS before each substitution is made.
+  // What substitution has added to the grammar so far, in elements and
+  // alternatives, held to MAX_LEFT_RECURSION_ELEMENTS before each
+  // substitution is made.
   let added = 0
 
   for (let i = 0; i < prods.length; i++) {
@@ -1259,39 +1263,60 @@ function findLeadingRefCycleMembers(prods: Production[]): Set<string> {
   const lowlinks = new Map<string, number>()
   const cyclic = new Set<string>()
 
-  function strongConnect(name: string) {
+  // Tarjan's algorithm with the depth-first search carried on a stack of
+  // its own rather than the call stack: the reference graph is as deep as
+  // the grammar's author made it, and a chain of rules each led by the next
+  // overflowed the recursive walk. The visits, the lowlink updates and the
+  // components popped are exactly the recursive ones.
+  type Frame = { name: string; targets: string[]; next: number }
+  const open = (name: string): Frame => {
     indices.set(name, index)
     lowlinks.set(name, index)
     index++
     stack.push(name)
     onStack.add(name)
-
     const prod = byName.get(name)
-    if (prod) {
-      for (const target of leadingRefs(prod)) {
-        if (!indices.has(target)) {
-          strongConnect(target)
-          lowlinks.set(name, Math.min(lowlinks.get(name)!, lowlinks.get(target)!))
-        } else if (onStack.has(target)) {
-          lowlinks.set(name, Math.min(lowlinks.get(name)!, indices.get(target)!))
-        }
-      }
-    }
+    return { name, targets: prod ? leadingRefs(prod) : [], next: 0 }
+  }
 
-    if (lowlinks.get(name) === indices.get(name)) {
-      // Pop the SCC. If it has more than one member, or it's a
-      // single member with a self-loop, mark as cyclic.
-      const scc: string[] = []
-      let w: string
-      do {
-        w = stack.pop() as string
-        onStack.delete(w)
-        scc.push(w)
-      } while (w !== name)
-      const isCycle =
-        scc.length > 1 ||
-        (scc.length === 1 && leadingRefs(byName.get(scc[0])!).includes(scc[0]))
-      if (isCycle) for (const n of scc) cyclic.add(n)
+  function strongConnect(root: string) {
+    const frames: Frame[] = [open(root)]
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]
+      if (frame.next < frame.targets.length) {
+        const target = frame.targets[frame.next++]
+        if (!indices.has(target)) {
+          frames.push(open(target))
+        } else if (onStack.has(target)) {
+          lowlinks.set(frame.name,
+            Math.min(lowlinks.get(frame.name)!, indices.get(target)!))
+        }
+        continue
+      }
+      frames.pop()
+      const name = frame.name
+      if (lowlinks.get(name) === indices.get(name)) {
+        // Pop the SCC. If it has more than one member, or it's a
+        // single member with a self-loop, mark as cyclic.
+        const scc: string[] = []
+        let w: string
+        do {
+          w = stack.pop() as string
+          onStack.delete(w)
+          scc.push(w)
+        } while (w !== name)
+        const isCycle =
+          scc.length > 1 ||
+          (scc.length === 1 && leadingRefs(byName.get(scc[0])!).includes(scc[0]))
+        if (isCycle) for (const n of scc) cyclic.add(n)
+      }
+      // What the recursive call did on return: carry the child's lowlink
+      // up to the parent that pushed it.
+      const parent = frames[frames.length - 1]
+      if (parent) {
+        lowlinks.set(parent.name,
+          Math.min(lowlinks.get(parent.name)!, lowlinks.get(name)!))
+      }
     }
   }
 
@@ -1311,21 +1336,37 @@ function topoOrderForPaull(prods: Production[]): Production[] {
   const colour = new Map<string, number>() // 0 unseen, 1 in-progress, 2 done
   const order: Production[] = []
 
-  function visit(name: string) {
-    const c = colour.get(name) ?? 0
-    if (c !== 0) return // already seen or on the current path
-    colour.set(name, 1)
-    const p = byName.get(name)
-    if (p) {
+  // Depth first, on a stack of its own: the graph is as deep as the
+  // grammar's author made it, and a chain of rules each led by the next
+  // overflowed a walk that recursed once per rule. `exit` is what the
+  // recursive walk did after its children returned, so the post-order is
+  // unchanged.
+  function visit(root: string) {
+    const steps: { name: string; exit: boolean }[] = [{ name: root, exit: false }]
+    while (steps.length > 0) {
+      const { name, exit } = steps.pop()!
+      const p = byName.get(name)
+      if (exit) {
+        colour.set(name, 2)
+        order.push(p!)
+        continue
+      }
+      if ((colour.get(name) ?? 0) !== 0) continue // seen, or on the path
+      colour.set(name, 1)
+      if (null == p) {
+        colour.set(name, 2)
+        continue
+      }
+      steps.push({ name, exit: true })
+      const targets: string[] = []
       for (const alt of p.alts) {
         if (alt.length > 0 && alt[0].kind === 'ref' && byName.has(alt[0].name)) {
-          visit(alt[0].name)
+          targets.push(alt[0].name)
         }
       }
-      colour.set(name, 2)
-      order.push(p)
-    } else {
-      colour.set(name, 2)
+      for (let t = targets.length - 1; t >= 0; t--) {
+        steps.push({ name: targets[t], exit: false })
+      }
     }
   }
 
@@ -1382,34 +1423,48 @@ function hasLeadingRefTo(prod: Production, name: string): boolean {
 const MAX_LEFT_RECURSION_EXPANSION = 512
 
 
-// The most element occurrences Paull's substitution may ADD to the whole
-// grammar before left-recursion elimination refuses it.
+// What Paull's substitution may ADD to the whole grammar, counted in
+// elements and alternatives, before left-recursion elimination refuses it.
 //
-// Substituting `source` into `target` replaces each alternative of `target`
-// that begins with `source` by one alternative per alternative of
-// `source`, a_1 … a_m, each followed by the replaced alternative's tail.
-// That adds, per alternative replaced,
+// An element counts 1 and everything nested in it, all the way down: 1 for
+// each alternative of a group and the deep sizes of the elements in it, and
+// the deep size of the inner element of an option or a repetition. That is
+// its deep size. An alternative counts the same way: 1 for itself and the
+// deep size of each of its elements. Substituting `source` into `target`
+// replaces each alternative of `target` that begins with `source` by one
+// alternative per alternative of `source`, a_1 … a_m, each followed by the
+// replaced alternative's tail. What the new alternatives cost, less what
+// the one they replace cost, is
 //
-//   Σ|a_i| + (m − 1)·|tail| − 1
+//   Σᵢ (1 + deep|aᵢ| + deep|tail|) − (1 + 1 + deep|tail|)
+//     = (m − 1)·(1 + deep|tail|) + Σ deep|aᵢ| − 1
 //
-// occurrences, floored at zero, and this bound holds their sum over every
-// substitution in the grammar. MAX_LEFT_RECURSION_EXPANSION bounds the
-// alternatives one rule gains; this bounds what the alternatives hold. A
-// chain of n rules, each one alternative that begins with the next
+// floored at zero, and this bound holds the sum over every substitution in
+// the grammar. MAX_LEFT_RECURSION_EXPANSION bounds the alternatives one rule
+// gains; this bounds what all of them hold. Counting deep sizes and every
+// alternative, a group's as well, is what keeps a copy from looking free: a
+// tail holding a group of a thousand elements, or of a thousand empty
+// alternatives, is copied once per alternative of the source; a
+// one-alternative source holding a group writes the group into every rule
+// that begins with it; and a source of empty alternatives writes an
+// alternative each. Each of those is written out again by desugaring and in
+// the emitted grammar.
+//
+// A chain of n rules, each one alternative that begins with the next
 // (`r0 = r1 "x0"`, `r1 = r2 "x1"`, …), gains no alternatives at all, but
 // ends with every rule holding the rest of the chain: (n − 2)(n − 1)/2
-// occurrences added, and an emitted grammar as large. A host's deadline
-// bounds the time that costs, not the memory, and at n = 5,000 the three
-// runtimes held 300 MB to 1.2 GB compiling it.
+// added, and an emitted grammar as large. A host's deadline bounds the
+// time that costs, not the memory, and at n = 5,000 the three runtimes
+// held 300 MB to 1.2 GB compiling it.
 //
 // Measured over the grammars MAX_LEFT_RECURSION_EXPANSION was measured
-// over, 1,171 of them: no grammar gains more than 1,636 occurrences
-// (dhall.abnf, which does not compile within abnf's budget for another
-// reason), and none that compiles more than 956 (proto's grammar, without
-// `tokenClasses`). This bound leaves twenty times the room dhall.abnf
-// needs, and refuses the chain from n = 258 on, before the substitution
-// that would pass it allocates.
-const MAX_LEFT_RECURSION_ELEMENTS = 32768
+// over, 1,171 of them: no grammar adds more than 6,615 (dhall.abnf, which
+// does not compile within abnf's budget for another reason), and none that
+// compiles more than 2,600 (proto's grammar, without `tokenClasses`). This
+// bound leaves nearly twenty times the room dhall.abnf needs, and refuses
+// the chain from n = 514 on, before the substitution that would pass it
+// allocates.
+const MAX_LEFT_RECURSION_ELEMENTS = 131072
 
 
 // Charge a substitution of `source` into `target` against what `target`
@@ -1440,37 +1495,71 @@ function chargeSubstitution(
 }
 
 
-// Charge a substitution of `source` into `target` against the element
-// occurrences the whole grammar may gain (MAX_LEFT_RECURSION_ELEMENTS),
-// BEFORE it is made, and return the new total. `added` is what the
-// substitutions so far have added; each alternative replaced adds
-// Σ|a_i| + (m − 1)·|tail| − 1, floored at zero.
+// The deep size of a run of elements: each element counts 1 and
+// everything nested in it, all the way down: 1 for each alternative of a
+// group and the deep sizes of the elements in it, and the deep size of the
+// inner element of an option or a repetition. Walked with a stack of its
+// own, since the passes before this one can nest elements deeper than the
+// grammar did, and given up as soon as the count reaches `cap`, which it
+// then returns: a caller asks only whether a size passes what is left of
+// the bound, so a walk never costs more than that.
+function deepSize(elements: Element[], cap: number): number {
+  const stack: Element[] = [...elements]
+  let size = 0
+  while (stack.length > 0) {
+    const el = stack.pop() as Element
+    size += 'group' === el.kind ? 1 + el.alts.length : 1
+    if (size >= cap) return cap
+    if ('opt' === el.kind || 'star' === el.kind ||
+        'plus' === el.kind || 'rep' === el.kind) {
+      stack.push(el.inner)
+    } else if ('group' === el.kind) {
+      for (const alt of el.alts) for (const inner of alt) stack.push(inner)
+    }
+  }
+  return size
+}
+
+
+// Charge a substitution of `source` into `target` against what the whole
+// grammar may gain (MAX_LEFT_RECURSION_ELEMENTS), BEFORE it is made, and
+// return the new total. `added` is what the substitutions so far have
+// added; each alternative replaced adds
+// (m − 1)·(1 + deep|tail|) + Σ deep|aᵢ| − 1, floored at zero.
 function chargeElements(
   target: Production,
   source: Production,
   added: number,
 ): number {
-  let held = 0
-  for (const alt of source.alts) held += alt.length
-  const m = source.alts.length
-  let led = 0
-  let gain = 0
-  for (const alt of target.alts) {
-    if (alt.length > 0 && alt[0].kind === 'ref' && alt[0].name === source.name) {
-      led++
-      const tail = alt.length - 1
-      // What the new alternatives hold, less what the one they replace held.
-      gain += Math.max(held + m * tail - (1 + tail), 0)
-    }
-  }
-  if (gain > MAX_LEFT_RECURSION_ELEMENTS - added) {
+  const remaining = MAX_LEFT_RECURSION_ELEMENTS - added
+  const led = target.alts.filter((alt) =>
+    alt.length > 0 && alt[0].kind === 'ref' && alt[0].name === source.name)
+  const refuse = (): never => {
     throw new EmitError(
       `${diagName()}: rule '${target.name}' exceeds the left-recursion ` +
       `element limit of ${MAX_LEFT_RECURSION_ELEMENTS} elements while ` +
-      `inlining '${source.name}', which begins ${led} of its alternatives ` +
-      `and would add ${gain} elements to the ${added} already added to the ` +
-      `grammar. Factor '${source.name}' out of the alternatives it begins.`,
+      `inlining '${source.name}', which begins ${led.length} of its ` +
+      `alternatives and would add more than ${remaining} elements to the ` +
+      `${added} already added to the grammar. Factor '${source.name}' out ` +
+      `of the alternatives it begins.`,
       { rule: target.name, sp: target.sp })
+  }
+  const m = source.alts.length
+  // Each alternative replaced adds at least `held - 1`, so a source whose
+  // alternatives hold more than `remaining + 1` is refused before a tail is
+  // read.
+  const held = deepSize(source.alts.flat(), remaining + 2)
+  if (led.length > 0 && held > remaining + 1) refuse()
+  let gain = 0
+  for (const alt of led) {
+    // A tail is copied once per alternative of the source after the first,
+    // so it counts only when there are several, and then adds at least its
+    // own size.
+    const tail = m > 1 ? deepSize(alt.slice(1), remaining - gain + 2) : 0
+    // What the new alternatives cost, m·(1 + tail) + held, less what the
+    // one they replace cost, 1 + 1 + tail.
+    gain += Math.max(m * (1 + tail) + held - (2 + tail), 0)
+    if (gain > remaining) refuse()
   }
   return added + gain
 }

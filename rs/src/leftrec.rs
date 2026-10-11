@@ -382,8 +382,10 @@ fn expand_nullable_left_prefixes(
 /// does, where [`emit_grammar_spec`](crate::emit_grammar_spec) shares one
 /// element between every sequence that holds it. Substitution can repeat
 /// a sequence in every rule it begins: a chain of n rules, each one
-/// alternative that begins with the next, comes back holding about n²/2
-/// elements, 12.5 million for n = 5,000.
+/// alternative that begins with the next, would come back holding about
+/// n²/2 elements, so the pass refuses a grammar it would add more than
+/// [`MAX_LEFT_RECURSION_ELEMENTS`](crate::MAX_LEFT_RECURSION_ELEMENTS) to,
+/// the chain from n = 514 on, before it copies them.
 pub fn eliminate_left_recursion(grammar: &ir::Grammar) -> Result<ir::Grammar, EmitError> {
     eliminate_left_recursion_keeping(&Grammar::from_ir(grammar), &IndexSet::new())
         .map(|eliminated| eliminated.into_grammar().into_ir())
@@ -401,8 +403,9 @@ pub(crate) fn eliminate_left_recursion_keeping(
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
-    // The element occurrences substitution has added to the grammar so far,
-    // held to MAX_LEFT_RECURSION_ELEMENTS before each substitution is made.
+    // What substitution has added to the grammar so far, in elements and
+    // alternatives, held to MAX_LEFT_RECURSION_ELEMENTS before each
+    // substitution is made.
     let mut added = 0usize;
 
     let copies: Vec<Production> = grammar
@@ -784,55 +787,104 @@ fn charge_substitution(
     }
 }
 
-/// Charge a substitution of `source` into `target` against the element
-/// occurrences the whole grammar may gain ([`MAX_LEFT_RECURSION_ELEMENTS`]),
-/// BEFORE it is made, and return the new total; `added` is what the
-/// substitutions so far have added. Each of the alternatives of `target`
-/// that begin with `source` is replaced by one alternative per alternative
-/// of `source`, `a_1 … a_m`, each followed by the replaced alternative's
-/// tail: it adds `Σ|a_i| + (m − 1)·|tail| − 1` occurrences, floored at
-/// zero. Mirrors `chargeElements` in `ts/src/compiler.ts`.
+/// The deep size of a run of elements: each element counts 1 and
+/// everything nested in it, all the way down: 1 for each alternative of a
+/// group and the deep sizes of the elements in it, and the deep size of the
+/// inner element of an option or a repetition. Walked with a stack of its
+/// own, since the passes before this one can nest elements deeper than the
+/// grammar did, and given up as soon as the count reaches `cap`, which it
+/// then returns: a caller asks only whether a size passes what is left of
+/// the bound, so a walk never costs more than that.
+fn deep_size<'a>(elements: impl IntoIterator<Item = &'a Element>, cap: usize) -> usize {
+    let mut stack: Vec<&Element> = elements.into_iter().collect();
+    let mut size = 0usize;
+    while let Some(el) = stack.pop() {
+        size = size.saturating_add(match &el.kind {
+            Kind::Group { alts } => 1 + alts.len(),
+            _ => 1,
+        });
+        if size >= cap {
+            return cap;
+        }
+        match &el.kind {
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => stack.push(inner),
+            Kind::Group { alts } => stack.extend(alts.iter().flatten()),
+            _ => {}
+        }
+    }
+    size
+}
+
+/// Charge a substitution of `source` into `target` against what the whole
+/// grammar may gain ([`MAX_LEFT_RECURSION_ELEMENTS`]), BEFORE it is made,
+/// and return the new total; `added` is what the substitutions so far have
+/// added. An alternative costs 1 for itself and the deep size of each of
+/// its elements ([`deep_size`]). Each alternative of `target` that begins
+/// with `source` is replaced by one alternative per alternative of
+/// `source`, `a_1 … a_m`, each followed by the replaced alternative's tail,
+/// which adds `(m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1`, floored at zero.
+/// Mirrors `chargeElements` in `ts/src/compiler.ts`.
 fn charge_elements(
     target: &Production,
     source: &Production,
     added: usize,
 ) -> Result<usize, EmitError> {
+    let remaining = MAX_LEFT_RECURSION_ELEMENTS - added;
+    let led_alts: Vec<&Sequence> = target
+        .alts
+        .iter()
+        .filter(|alt| alt.first().is_some_and(|el| el.is_ref_to(&source.name)))
+        .collect();
+    let refuse = || {
+        Err(EmitError::at(
+            format!(
+                "{}: rule '{}' exceeds the left-recursion element limit of {} elements while \
+                 inlining '{}', which begins {} of its alternatives and would add more than {} \
+                 elements to the {} already added to the grammar. Factor '{}' out of the \
+                 alternatives it begins.",
+                diag_name(),
+                target.name,
+                MAX_LEFT_RECURSION_ELEMENTS,
+                source.name,
+                led_alts.len(),
+                remaining,
+                added,
+                source.name
+            ),
+            &target.name,
+            target.sp,
+        ))
+    };
     let m = source.alts.len();
-    let held: usize = source.alts.iter().map(Vec::len).sum();
-    let mut led = 0usize;
+    // Each alternative replaced adds at least `held - 1`, so a source whose
+    // alternatives hold more than `remaining + 1` is refused before a tail is
+    // read.
+    let held = deep_size(source.alts.iter().flatten().map(|el| &**el), remaining + 2);
+    if !led_alts.is_empty() && held > remaining + 1 {
+        return refuse();
+    }
     let mut gain = 0usize;
-    for alt in &target.alts {
-        if !alt.first().is_some_and(|el| el.is_ref_to(&source.name)) {
-            continue;
+    for alt in &led_alts {
+        // A tail is copied once per alternative of the source after the
+        // first, so it counts only when there are several, and then adds at
+        // least its own size.
+        let tail = if m > 1 {
+            deep_size(alt[1..].iter().map(|el| &**el), remaining - gain + 2)
+        } else {
+            0
+        };
+        // What the new alternatives cost, `m·(1 + tail) + held`, less what
+        // the one they replace cost, `1 + 1 + tail`.
+        let written = m.saturating_mul(1 + tail).saturating_add(held);
+        gain = gain.saturating_add(written.saturating_sub(2 + tail));
+        if gain > remaining {
+            return refuse();
         }
-        led += 1;
-        let tail = alt.len() - 1;
-        // What the new alternatives hold, less what the one they replace
-        // held: `held + m·|tail|` against `1 + |tail|`.
-        let written = held.saturating_add(m.saturating_mul(tail));
-        gain = gain.saturating_add(written.saturating_sub(1 + tail));
     }
-    if gain <= MAX_LEFT_RECURSION_ELEMENTS.saturating_sub(added) {
-        return Ok(added + gain);
-    }
-    Err(EmitError::at(
-        format!(
-            "{}: rule '{}' exceeds the left-recursion element limit of {} elements while \
-             inlining '{}', which begins {} of its alternatives and would add {} elements to \
-             the {} already added to the grammar. Factor '{}' out of the alternatives it \
-             begins.",
-            diag_name(),
-            target.name,
-            MAX_LEFT_RECURSION_ELEMENTS,
-            source.name,
-            led,
-            gain,
-            added,
-            source.name
-        ),
-        &target.name,
-        target.sp,
-    ))
+    Ok(added + gain)
 }
 
 /// For every alternative of `target` that begins with a ref to `source`,

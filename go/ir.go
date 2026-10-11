@@ -164,22 +164,26 @@ const MaxRepeatExpansion = 8192
 // records the measurement.
 const MaxLeftRecursionExpansion = 512
 
-// MaxLeftRecursionElements is the most element occurrences Paull's
-// substitution may add to the whole grammar before left-recursion
-// elimination refuses it. Substituting a rule into an alternative that
-// begins with it replaces that alternative by one per alternative of the
-// rule, a_1 … a_m, each followed by the replaced alternative's tail. That
-// adds Σ|a_i| + (m − 1)·|tail| − 1 occurrences per alternative replaced,
-// floored at zero, and this bound holds their sum over every substitution
-// in the grammar. MaxLeftRecursionExpansion bounds the alternatives one rule
-// gains; this bounds what they hold. A chain of n rules, each one
+// MaxLeftRecursionElements is what Paull's substitution may add to the
+// whole grammar, counted in elements and alternatives, before left-recursion
+// elimination refuses it. An element counts 1 and everything nested in it,
+// all the way down: 1 for each alternative of a group and the deep sizes of
+// the elements in it, and the deep size of the inner element of an option or
+// a repetition. That is its deep size. An alternative counts the same way: 1
+// for itself and the deep size of each of its elements. Substituting a rule
+// into an alternative that begins with it replaces that alternative by one
+// per alternative of the rule, a_1 … a_m, each followed by the replaced
+// alternative's tail. That adds (m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1,
+// floored at zero, and this bound holds the sum over every substitution in
+// the grammar. MaxLeftRecursionExpansion bounds the alternatives one rule
+// gains; this bounds what all of them hold. A chain of n rules, each one
 // alternative that begins with the next, gains no alternatives at all, but
 // ends with every rule holding the rest of the chain: (n − 2)(n − 1)/2
-// occurrences added, and an emitted grammar as large. No grammar in the
-// downstream corpora gains more than 1,636 (dhall.abnf), and none that
-// compiles more than 956; the chain is refused from n = 258 on.
-// MAX_LEFT_RECURSION_ELEMENTS in ts/src/compiler.ts records the measurement.
-const MaxLeftRecursionElements = 32768
+// added. No grammar in the downstream corpora adds more than 6,615
+// (dhall.abnf), and none that compiles more than 2,600; the chain is refused
+// from n = 514 on. MAX_LEFT_RECURSION_ELEMENTS in ts/src/compiler.ts records
+// the measurement.
+const MaxLeftRecursionElements = 131072
 
 type Sequence []*Element
 
@@ -810,41 +814,50 @@ const srcField = "src"
 func reachesAnnotated(
 	el *Element, byName map[string]*Production, seen map[string]bool,
 ) string {
-	switch el.Kind {
-	case KindRef:
-		target, ok := byName[el.Name]
-		if !ok {
-			return ""
+	// Depth first and in the order the elements are written, on a stack of
+	// its own: the references are the grammar author's, and a chain of them
+	// as long as the grammar would take a walk that recursed per rule as
+	// deep. A hit with an empty name counts as none, as it always has here.
+	stack := []*Element{el}
+	push := func(alts []Sequence) {
+		inner := []*Element{}
+		for _, alt := range alts {
+			inner = append(inner, alt...)
 		}
-		if target.Value != nil {
-			return target.Name
+		for i := len(inner) - 1; i >= 0; i-- {
+			stack = append(stack, inner[i])
 		}
-		if seen[target.Name] {
-			return ""
+	}
+	for len(stack) > 0 {
+		e := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if e == nil {
+			continue
 		}
-		seen[target.Name] = true
-		for _, alt := range target.Alts {
-			for _, inner := range alt {
-				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
-					return hit
-				}
+		switch e.Kind {
+		case KindRef:
+			target, ok := byName[e.Name]
+			if !ok {
+				continue
 			}
-		}
-		return ""
-	case KindOpt, KindStar, KindPlus, KindRep:
-		if el.Inner == nil {
-			return ""
-		}
-		return reachesAnnotated(el.Inner, byName, seen)
-	case KindGroup:
-		for _, alt := range el.Alts {
-			for _, inner := range alt {
-				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
-					return hit
+			if target.Value != nil {
+				if target.Name != "" {
+					return target.Name
 				}
+				continue
 			}
+			if seen[target.Name] {
+				continue
+			}
+			seen[target.Name] = true
+			push(target.Alts)
+		case KindOpt, KindStar, KindPlus, KindRep:
+			if e.Inner != nil {
+				stack = append(stack, e.Inner)
+			}
+		case KindGroup:
+			push(e.Alts)
 		}
-		return ""
 	}
 	return ""
 }

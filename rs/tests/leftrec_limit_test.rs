@@ -2,13 +2,14 @@
 
 // What one rule may gain from Paull's substitution is bounded
 // (`MAX_LEFT_RECURSION_EXPANSION`), and so is what the whole grammar may gain
-// in element occurrences (`MAX_LEFT_RECURSION_ELEMENTS`). Each bound refuses
-// the grammar before the substitution that would pass it is made. Mirrors
-// ts/test/leftrec-limit.test.js; every count below is exact. The refusals of
-// the twenty-rule cycle and of the shortest chain the element bound refuses
-// are also shared fixtures, tests/oracle/ir-leftrec-limit.json and
-// tests/oracle/ir-leftrec-elements.json, graded byte for byte by the oracle
-// test.
+// in elements and alternatives (`MAX_LEFT_RECURSION_ELEMENTS`). Each bound
+// refuses the grammar before the substitution that would pass it is made.
+// Mirrors ts/test/leftrec-limit.test.js; every count below is exact. The
+// refusals of the twenty-rule cycle, of the shortest chain the element bound
+// refuses and of the four other shapes it counts (a group in a tail, a group
+// of empty alternatives in a tail, a group in the inlined rule, the
+// alternatives the inlined rule writes) are also shared fixtures,
+// tests/oracle/ir-leftrec-*.json, graded byte for byte by the oracle test.
 
 mod common;
 
@@ -202,8 +203,8 @@ fn chain(n: usize) -> Grammar {
     Grammar::new(prods)
 }
 
-/// top = s "x1" … "x(tail)", for each name in `tops`; s = m single
-/// literals. Inlining s into one of them adds m + (m − 1)·tail − 1.
+/// top = s "x0" … "x(tail - 1)", for each name in `tops`; s = m single
+/// literals. Inlining s into one of them adds (m − 1)·(1 + tail) + m − 1.
 fn fan(tops: &[&str], m: usize, tail: usize) -> Grammar {
     let mut prods: Vec<Production> = tops
         .iter()
@@ -217,18 +218,28 @@ fn fan(tops: &[&str], m: usize, tail: usize) -> Grammar {
     Grammar::new(prods)
 }
 
-fn elements(rule: &str, source: &str, led: usize, gain: usize, added: usize) -> String {
+/// A group holding one alternative of k single literals.
+fn group_of(k: usize) -> tabnas_bnf::Element {
+    tabnas_bnf::Element::group(vec![(0..k).map(|i| sens_term(&format!("g{i}"))).collect()])
+}
+
+/// A group of k empty alternatives.
+fn empty_group(k: usize) -> tabnas_bnf::Element {
+    tabnas_bnf::Element::group((0..k).map(|_| vec![]).collect())
+}
+
+fn elements(rule: &str, source: &str, led: usize, remaining: usize, added: usize) -> String {
     format!(
-        "cyc: rule '{rule}' exceeds the left-recursion element limit of 32768 elements while \
-         inlining '{source}', which begins {led} of its alternatives and would add {gain} \
-         elements to the {added} already added to the grammar. Factor '{source}' out of the \
-         alternatives it begins."
+        "cyc: rule '{rule}' exceeds the left-recursion element limit of 131072 elements while \
+         inlining '{source}', which begins {led} of its alternatives and would add more than \
+         {remaining} elements to the {added} already added to the grammar. Factor '{source}' \
+         out of the alternatives it begins."
     )
 }
 
 #[test]
-fn the_element_limit_is_32768_occurrences() {
-    assert_eq!(MAX_LEFT_RECURSION_ELEMENTS, 32768);
+fn the_element_limit_is_131072() {
+    assert_eq!(MAX_LEFT_RECURSION_ELEMENTS, 131072);
 }
 
 #[test]
@@ -238,9 +249,9 @@ fn refuses_a_chain_of_five_thousand_rules_within_a_second() {
     let elapsed = start.elapsed();
     // The last rule is lifted into a token, and r(4998 - g) inlines
     // r(4999 - g) with g + 1 elements, adding g. The substitutions add
-    // 1 + 2 + … + 255 = 32640, and the one adding 256 passes the limit.
-    assert_eq!(err.message, elements("r4742", "r4743", 1, 256, 32640));
-    assert_eq!(err.rule.as_deref(), Some("r4742"));
+    // 1 + 2 + … + 511 = 130816, and the one adding 512 passes the limit.
+    assert_eq!(err.message, elements("r4486", "r4487", 1, 256, 130816));
+    assert_eq!(err.rule.as_deref(), Some("r4486"));
     assert!(
         elapsed < Duration::from_secs(1),
         "refused after {elapsed:?}"
@@ -252,59 +263,150 @@ fn refuses_the_chain_in_the_standalone_pass_as_well() {
     // Nothing is lifted here, and r4998 inlines "end" one for one, adding
     // nothing. The prefix is whatever the last emit on this thread set.
     let err = eliminate_left_recursion(&chain(5000)).expect_err("the chain was eliminated");
-    let want = elements("r4742", "r4743", 1, 256, 32640);
+    let want = elements("r4486", "r4487", 1, 256, 130816);
     assert!(err.message.ends_with(&want["cyc".len()..]), "{err}");
 }
 
 #[test]
+fn refuses_a_chain_of_a_hundred_thousand_rules_on_either_path_without_running_out_of_stack() {
+    // Every walk that runs before the bound has a stack of its own, so the
+    // chain is the bound's to refuse, on the 2 MB stack of a test thread too.
+    let grammar = chain(100_000);
+    let start = Instant::now();
+    let err = emit(&grammar).expect_err("the chain compiled");
+    assert_eq!(err.message, elements("r99486", "r99487", 1, 256, 130816));
+    let err = eliminate_left_recursion(&grammar).expect_err("the chain was eliminated");
+    let want = elements("r99486", "r99487", 1, 256, 130816);
+    assert!(err.message.ends_with(&want["cyc".len()..]), "{err}");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "refused after {elapsed:?}"
+    );
+}
+
+#[test]
 fn admits_the_longest_chain_the_element_limit_allows() {
-    // n = 257 adds 1 + 2 + … + 255 = 32640; n = 258 would add 256 more.
-    let spec = emit(&chain(257)).expect("n = 257 is within the limit");
+    // n = 513 adds 1 + 2 + … + 511 = 130816; n = 514 would add 512 more.
+    let spec = emit(&chain(513)).expect("n = 513 is within the limit");
     let r0 = spec.rule["r0"].as_ref().expect("r0 is emitted");
     let s = r0.open[0].s().expect("r0 matches tokens");
-    assert_eq!(s.split(' ').count(), 257);
-    let err = emit(&chain(258)).expect_err("n = 258 compiled");
-    assert_eq!(err.message, elements("r0", "r1", 1, 256, 32640));
+    assert_eq!(s.split(' ').count(), 513);
+    let err = emit(&chain(514)).expect_err("n = 514 compiled");
+    assert_eq!(err.message, elements("r0", "r1", 1, 256, 130816));
 }
 
 #[test]
 fn counts_a_tail_once_per_alternative_of_the_rule_inlined_before_it() {
-    // 65 + 64 × 511 − 1 = 32768 fills the limit; a tail of 512 adds 32832.
-    let at = eliminate_left_recursion(&fan(&["top"], 65, 511)).expect("a gain of 32768");
-    assert_eq!(at.productions[0].alts.len(), 65);
-    let err = emit(&fan(&["top"], 65, 512)).expect_err("a gain of 32832 compiled");
-    assert_eq!(err.message, elements("top", "s", 1, 32832, 0));
+    // 128 × (1 + 1022) + 129 − 1 = 131072 fills the limit; a tail of 1023
+    // adds 131200.
+    let at = eliminate_left_recursion(&fan(&["top"], 129, 1022)).expect("a gain of 131072");
+    assert_eq!(at.productions[0].alts.len(), 129);
+    let err = emit(&fan(&["top"], 129, 1023)).expect_err("a gain of 131200 compiled");
+    assert_eq!(err.message, elements("top", "s", 1, 131072, 0));
+}
+
+#[test]
+fn counts_everything_a_group_in_a_tail_holds() {
+    // The tail is one element, a group whose one alternative holds k
+    // literals, so it counts 1 + 1 + k:
+    // 512 × (1 + 2 + 252) + 513 − 1 = 131072, and a group of 253 adds 131584.
+    let tail_group = |k: usize| {
+        let mut grammar = fan(&["top"], 513, 0);
+        grammar.productions[0].alts[0].push(group_of(k));
+        grammar
+    };
+    let at = eliminate_left_recursion(&tail_group(252)).expect("a gain of 131072");
+    assert_eq!(at.productions[0].alts.len(), 513);
+    let err = emit(&tail_group(253)).expect_err("a gain of 131584 compiled");
+    assert_eq!(err.message, elements("top", "s", 1, 131072, 0));
+}
+
+#[test]
+fn counts_each_alternative_of_a_group_in_a_tail_empty_or_not() {
+    // The tail is a group of k empty alternatives, so it counts 1 + k:
+    // 512 × (1 + 1 + 253) + 513 − 1 = 131072, and 254 of them add 131584.
+    let tail_group = |k: usize| {
+        let mut grammar = fan(&["top"], 513, 0);
+        grammar.productions[0].alts[0].push(empty_group(k));
+        grammar
+    };
+    let at = eliminate_left_recursion(&tail_group(253)).expect("a gain of 131072");
+    assert_eq!(at.productions[0].alts.len(), 513);
+    let err = emit(&tail_group(254)).expect_err("a gain of 131584 compiled");
+    assert_eq!(err.message, elements("top", "s", 1, 131072, 0));
+}
+
+#[test]
+fn counts_everything_a_group_in_the_inlined_rule_holds() {
+    // s is one alternative holding a group of 500, which counts 502: each
+    // rule that begins with it adds 501, so 261 fit and the 262nd passes the
+    // limit.
+    let grammar = |n: usize| {
+        let mut prods: Vec<Production> = (0..n)
+            .map(|i| prod(&format!("t{i}"), vec![vec![reference("s"), sens_term("x")]]))
+            .collect();
+        prods.push(prod("s", vec![vec![group_of(500)]]));
+        Grammar::new(prods)
+    };
+    eliminate_left_recursion(&grammar(261)).expect("a gain of 130761");
+    let err = emit(&grammar(262)).expect_err("a gain of 131262 compiled");
+    assert_eq!(err.message, elements("t261", "s", 1, 311, 130761));
+}
+
+#[test]
+fn counts_each_alternative_the_inlined_rule_writes() {
+    // s is 513 empty alternatives: each rule that begins with it gains 512
+    // of them, within the alternative limit, and adds 511 to the grammar,
+    // so 256 fit and the 257th passes the limit.
+    let grammar = |n: usize| {
+        let mut prods: Vec<Production> = (0..n)
+            .map(|i| {
+                prod(
+                    &format!("t{i}"),
+                    vec![vec![reference("s")], vec![sens_term("x")]],
+                )
+            })
+            .collect();
+        prods.push(prod("s", (0..513).map(|_| vec![]).collect()));
+        Grammar::new(prods)
+    };
+    let at = eliminate_left_recursion(&grammar(256)).expect("a gain of 130816");
+    assert_eq!(at.productions[0].alts.len(), 514);
+    let err = emit(&grammar(257)).expect_err("a gain of 131327 compiled");
+    assert_eq!(err.message, elements("t256", "s", 1, 256, 130816));
 }
 
 #[test]
 fn sums_every_substitution_in_the_grammar() {
-    // Each rule adds 65 + 64 × 255 − 1 = 16384: two fill the limit.
-    eliminate_left_recursion(&fan(&["t1", "t2"], 65, 255)).expect("a gain of 32768");
-    let err = emit(&fan(&["t1", "t2", "t3"], 65, 255)).expect_err("a gain of 49152 compiled");
-    assert_eq!(err.message, elements("t3", "s", 1, 16384, 32768));
+    // Each rule adds 128 × (1 + 400) + 129 − 1 = 51456: two fit, and the
+    // third passes the limit.
+    eliminate_left_recursion(&fan(&["t1", "t2"], 129, 400)).expect("a gain of 102912");
+    let err = emit(&fan(&["t1", "t2", "t3"], 129, 400)).expect_err("a gain of 154368 compiled");
+    assert_eq!(err.message, elements("t3", "s", 1, 28160, 102912));
 }
 
 #[test]
-fn floors_at_zero_what_an_alternative_replaced_by_fewer_elements_adds() {
+fn floors_at_zero_what_an_alternative_replaced_by_less_adds() {
     // Inlining e, one empty alternative, first takes an element out of each
-    // of 100 alternatives. That frees nothing: s still adds 32832.
-    let mut grammar = fan(&["top"], 65, 512);
+    // of 100 alternatives. That frees nothing: s still adds 131200.
+    let mut grammar = fan(&["top"], 129, 1023);
     let lead: Vec<Vec<_>> = (0..100)
         .map(|i| vec![reference("e"), sens_term(&format!("y{i}"))])
         .collect();
     grammar.productions[0].alts.splice(0..0, lead);
     grammar.productions.push(prod("e", vec![vec![]]));
     let err = emit(&grammar).expect_err("the empty alternatives paid for s");
-    assert_eq!(err.message, elements("top", "s", 1, 32832, 0));
+    assert_eq!(err.message, elements("top", "s", 1, 131072, 0));
 }
 
 #[test]
 fn charges_no_elements_for_a_token_class_which_is_inlined_as_its_token() {
-    // Inlined member by member, s would add 32832.
-    let err = emit(&fan(&["top"], 65, 512)).expect_err("the class was inlined member by member");
-    assert_eq!(err.message, elements("top", "s", 1, 32832, 0));
+    // Inlined member by member, s would add 131200.
+    let err = emit(&fan(&["top"], 129, 1023)).expect_err("the class was inlined member by member");
+    assert_eq!(err.message, elements("top", "s", 1, 131072, 0));
     let spec = emit_grammar_spec(
-        &fan(&["top"], 65, 512),
+        &fan(&["top"], 129, 1023),
         &ConvertOptions::tag("cyc").token_classes(true),
     )
     .expect("a token class adds no elements");
@@ -314,5 +416,5 @@ fn charges_no_elements_for_a_token_class_which_is_inlined_as_its_token() {
         .and_then(|sets| sets.get("s"))
         .and_then(Value::as_array)
         .map(Vec::len);
-    assert_eq!(members, Some(65));
+    assert_eq!(members, Some(129));
 }

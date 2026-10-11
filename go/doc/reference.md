@@ -250,19 +250,24 @@ names the rule and the rule it was substituting, before making the
 alternatives. Factoring the leading reference out of the alternatives
 it begins keeps a grammar under it.
 
-### `const MaxLeftRecursionElements = 32768`
+### `const MaxLeftRecursionElements = 131072`
 
-The most element occurrences the left-recursion pass may add to the
-whole grammar when it substitutes the rules that lead alternatives.
-Substituting a rule with the alternatives `a_1 … a_m` into an
-alternative that begins with it adds `Σ|a_i| + (m − 1)·|tail| − 1`
-occurrences, floored at zero, and the bound holds their sum over every
-substitution. A chain of rules, each one alternative that begins with
-the next, gains no alternatives but copies the rest of the chain into
-every rule, so what it adds grows with the square of its length: the
-bound refuses such a chain from 258 rules on. Past the bound,
-`EmitGrammarSpec` returns an `*EmitError` that names the rule and the
-rule it was substituting, before making the alternatives.
+What the left-recursion pass may add to the whole grammar when it
+substitutes the rules that lead alternatives, counted in elements and
+alternatives. An element's deep size is 1 and everything nested in it,
+all the way down: 1 for each alternative of a group and the deep sizes
+of the elements in it, and the deep size of the inner element of an
+option or a repetition. An alternative counts the same way: 1 and the
+deep size of each of its elements. Substituting a rule with the
+alternatives `a_1 … a_m` into an alternative that begins with it adds
+`(m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1`, floored at zero, and the
+bound holds the sum over every substitution in the grammar. A chain of
+rules, each one alternative that begins with the next, gains no
+alternatives but copies the rest of the chain into every rule, so what
+it adds grows with the square of its length: the bound refuses such a
+chain from 514 rules on. Past the bound, `EmitGrammarSpec` returns an
+`*EmitError` that names the rule and the rule it was substituting,
+before making the alternatives.
 
 ## Semantic actions
 

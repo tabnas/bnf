@@ -2,8 +2,8 @@
 
 // What one rule may gain from Paull's substitution is bounded
 // (MAX_LEFT_RECURSION_EXPANSION), and so is what the whole grammar may gain
-// in element occurrences (MAX_LEFT_RECURSION_ELEMENTS). Each bound refuses
-// the grammar before the substitution that would pass it is made.
+// in elements and alternatives (MAX_LEFT_RECURSION_ELEMENTS). Each bound
+// refuses the grammar before the substitution that would pass it is made.
 //
 // A cycle of k rules, each with two alternatives led by the next one,
 // doubles at every substitution: without the first bound, k = 20 exhausted
@@ -158,8 +158,8 @@ const chain = (n) => {
   return { productions }
 }
 
-// top = s "x1" … "x(tail)", for each name in `tops`; s = m single
-// literals. Inlining s into one of them adds m + (m − 1)·tail − 1.
+// top = s "x0" … "x(tail - 1)", for each name in `tops`; s = m single
+// literals. Inlining s into one of them adds (m − 1)·(1 + tail) + m − 1.
 const fan = (tops, m, tail) => ({
   productions: [
     ...tops.map((name) => ({
@@ -170,15 +170,28 @@ const fan = (tops, m, tail) => ({
   ],
 })
 
-const elements = (rule, source, led, gain, added) =>
-  `cyc: rule '${rule}' exceeds the left-recursion element limit of 32768 ` +
+// A group holding one alternative of k single literals.
+const groupOf = (k) => ({
+  kind: 'group',
+  alts: [Array.from({ length: k }, (_, i) => lit('g' + i))],
+})
+
+// A group of k empty alternatives.
+const emptyGroup = (k) => ({
+  kind: 'group',
+  alts: Array.from({ length: k }, () => []),
+})
+
+const elements = (rule, source, led, remaining, added) =>
+  `cyc: rule '${rule}' exceeds the left-recursion element limit of 131072 ` +
   `elements while inlining '${source}', which begins ${led} of its ` +
-  `alternatives and would add ${gain} elements to the ${added} already ` +
-  `added to the grammar. Factor '${source}' out of the alternatives it begins.`
+  `alternatives and would add more than ${remaining} elements to the ` +
+  `${added} already added to the grammar. Factor '${source}' out of the ` +
+  `alternatives it begins.`
 
 describe('left-recursion element limit', () => {
-  it('is 32768 element occurrences', () => {
-    assert.equal(MAX_LEFT_RECURSION_ELEMENTS, 32768)
+  it('is 131072', () => {
+    assert.equal(MAX_LEFT_RECURSION_ELEMENTS, 131072)
   })
 
   it('refuses a chain of five thousand rules within a second', () => {
@@ -189,9 +202,9 @@ describe('left-recursion element limit', () => {
         assert.ok(error instanceof EmitError)
         // The last rule is lifted into a token, and r(4998 - g) inlines
         // r(4999 - g) with g + 1 elements, adding g. The substitutions add
-        // 1 + 2 + … + 255 = 32640, and the one adding 256 passes the limit.
-        assert.equal(error.message, elements('r4742', 'r4743', 1, 256, 32640))
-        assert.equal(error.rule, 'r4742')
+        // 1 + 2 + … + 511 = 130816, and the one adding 512 passes the limit.
+        assert.equal(error.message, elements('r4486', 'r4487', 1, 256, 130816))
+        assert.equal(error.rule, 'r4486')
         return true
       },
     )
@@ -202,62 +215,150 @@ describe('left-recursion element limit', () => {
   it('refuses the chain in the standalone pass as well', () => {
     // Nothing is lifted here, and r4998 inlines "end" one for one, adding
     // nothing. The prefix is whatever the last emit set.
-    const want = elements('r4742', 'r4743', 1, 256, 32640).slice('cyc'.length)
+    const want = elements('r4486', 'r4487', 1, 256, 130816).slice('cyc'.length)
     assert.throws(
       () => eliminateLeftRecursion(chain(5000)),
       (error) => error instanceof EmitError && error.message.endsWith(want),
     )
   })
 
-  it('admits the longest chain the limit allows', () => {
-    // n = 257 adds 1 + 2 + … + 255 = 32640; n = 258 would add 256 more.
-    const spec = emitGrammarSpec(chain(257), { tag: 'cyc' })
-    assert.equal(spec.rule.r0.open[0].s.split(' ').length, 257)
+  it('refuses a chain of a hundred thousand rules on either path, not the stack', () => {
+    // Every walk that runs before the bound has a stack of its own, so the
+    // chain is the bound's to refuse.
+    const g = chain(100000)
+    const t0 = process.hrtime.bigint()
     assert.throws(
-      () => emitGrammarSpec(chain(258), { tag: 'cyc' }),
-      { message: elements('r0', 'r1', 1, 256, 32640) },
+      () => emitGrammarSpec(g, { tag: 'cyc' }),
+      { message: elements('r99486', 'r99487', 1, 256, 130816) },
+    )
+    const want = elements('r99486', 'r99487', 1, 256, 130816).slice('cyc'.length)
+    assert.throws(
+      () => eliminateLeftRecursion(g),
+      (error) => error instanceof EmitError && error.message.endsWith(want),
+    )
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6
+    assert.ok(ms < 10000, `refused after ${ms.toFixed(0)} ms`)
+  })
+
+  it('admits the longest chain the limit allows', () => {
+    // n = 513 adds 1 + 2 + … + 511 = 130816; n = 514 would add 512 more.
+    const spec = emitGrammarSpec(chain(513), { tag: 'cyc' })
+    assert.equal(spec.rule.r0.open[0].s.split(' ').length, 513)
+    assert.throws(
+      () => emitGrammarSpec(chain(514), { tag: 'cyc' }),
+      { message: elements('r0', 'r1', 1, 256, 130816) },
     )
   })
 
   it('counts a tail once per alternative of the rule inlined before it', () => {
-    // 65 + 64 × 511 − 1 = 32768 fills the limit; a tail of 512 adds 32832.
-    const at = eliminateLeftRecursion(fan(['top'], 65, 511))
-    assert.equal(at.productions[0].alts.length, 65)
+    // 128 × (1 + 1022) + 129 − 1 = 131072 fills the limit; a tail of 1023
+    // adds 131200.
+    const at = eliminateLeftRecursion(fan(['top'], 129, 1022))
+    assert.equal(at.productions[0].alts.length, 129)
     assert.throws(
-      () => emitGrammarSpec(fan(['top'], 65, 512), { tag: 'cyc' }),
-      { message: elements('top', 's', 1, 32832, 0) },
+      () => emitGrammarSpec(fan(['top'], 129, 1023), { tag: 'cyc' }),
+      { message: elements('top', 's', 1, 131072, 0) },
+    )
+  })
+
+  it('counts everything a group in a tail holds', () => {
+    // The tail is one element, a group whose one alternative holds k
+    // literals, so it counts 1 + 1 + k:
+    // 512 × (1 + 2 + 252) + 513 − 1 = 131072, and a group of 253 adds 131584.
+    const tailGroup = (k) => {
+      const g = fan(['top'], 513, 0)
+      g.productions[0].alts[0].push(groupOf(k))
+      return g
+    }
+    const at = eliminateLeftRecursion(tailGroup(252))
+    assert.equal(at.productions[0].alts.length, 513)
+    assert.throws(
+      () => emitGrammarSpec(tailGroup(253), { tag: 'cyc' }),
+      { message: elements('top', 's', 1, 131072, 0) },
+    )
+  })
+
+  it('counts each alternative of a group in a tail, empty or not', () => {
+    // The tail is a group of k empty alternatives, so it counts 1 + k:
+    // 512 × (1 + 1 + 253) + 513 − 1 = 131072, and 254 of them add 131584.
+    const tailGroup = (k) => {
+      const g = fan(['top'], 513, 0)
+      g.productions[0].alts[0].push(emptyGroup(k))
+      return g
+    }
+    const at = eliminateLeftRecursion(tailGroup(253))
+    assert.equal(at.productions[0].alts.length, 513)
+    assert.throws(
+      () => emitGrammarSpec(tailGroup(254), { tag: 'cyc' }),
+      { message: elements('top', 's', 1, 131072, 0) },
+    )
+  })
+
+  it('counts everything a group in the inlined rule holds', () => {
+    // s is one alternative holding a group of 500, which counts 502: each
+    // rule that begins with it adds 501, so 261 fit and the 262nd passes the
+    // limit.
+    const g = (n) => ({
+      productions: [
+        ...Array.from({ length: n }, (_, i) => ({ name: 't' + i, alts: [[ref('s'), lit('x')]] })),
+        { name: 's', alts: [[groupOf(500)]] },
+      ],
+    })
+    eliminateLeftRecursion(g(261))
+    assert.throws(
+      () => emitGrammarSpec(g(262), { tag: 'cyc' }),
+      { message: elements('t261', 's', 1, 311, 130761) },
+    )
+  })
+
+  it('counts each alternative the inlined rule writes', () => {
+    // s is 513 empty alternatives: each rule that begins with it gains 512
+    // of them, within the alternative limit, and adds 511 to the grammar,
+    // so 256 fit and the 257th passes the limit.
+    const g = (n) => ({
+      productions: [
+        ...Array.from({ length: n }, (_, i) => ({ name: 't' + i, alts: [[ref('s')], [lit('x')]] })),
+        { name: 's', alts: Array.from({ length: 513 }, () => []) },
+      ],
+    })
+    const at = eliminateLeftRecursion(g(256))
+    assert.equal(at.productions[0].alts.length, 514)
+    assert.throws(
+      () => emitGrammarSpec(g(257), { tag: 'cyc' }),
+      { message: elements('t256', 's', 1, 256, 130816) },
     )
   })
 
   it('sums every substitution in the grammar', () => {
-    // Each rule adds 65 + 64 × 255 − 1 = 16384: two fill the limit.
-    eliminateLeftRecursion(fan(['t1', 't2'], 65, 255))
+    // Each rule adds 128 × (1 + 400) + 129 − 1 = 51456: two fit, and the
+    // third passes the limit.
+    eliminateLeftRecursion(fan(['t1', 't2'], 129, 400))
     assert.throws(
-      () => emitGrammarSpec(fan(['t1', 't2', 't3'], 65, 255), { tag: 'cyc' }),
-      { message: elements('t3', 's', 1, 16384, 32768) },
+      () => emitGrammarSpec(fan(['t1', 't2', 't3'], 129, 400), { tag: 'cyc' }),
+      { message: elements('t3', 's', 1, 28160, 102912) },
     )
   })
 
-  it('floors at zero what an alternative replaced by fewer elements adds', () => {
+  it('floors at zero what an alternative replaced by less adds', () => {
     // Inlining e, one empty alternative, first takes an element out of each
-    // of 100 alternatives. That frees nothing: s still adds 32832.
-    const g = fan(['top'], 65, 512)
+    // of 100 alternatives. That frees nothing: s still adds 131200.
+    const g = fan(['top'], 129, 1023)
     g.productions[0].alts.unshift(
       ...Array.from({ length: 100 }, (_, i) => [ref('e'), lit('y' + i)]))
     g.productions.push({ name: 'e', alts: [[]] })
     assert.throws(
       () => emitGrammarSpec(g, { tag: 'cyc' }),
-      { message: elements('top', 's', 1, 32832, 0) },
+      { message: elements('top', 's', 1, 131072, 0) },
     )
   })
 
   it('charges nothing for a token class, which is inlined as its token', () => {
-    // Inlined member by member, s would add 32832.
+    // Inlined member by member, s would add 131200.
     assert.throws(
-      () => emitGrammarSpec(fan(['top'], 65, 512), { tag: 'cyc' }),
-      { message: elements('top', 's', 1, 32832, 0) },
+      () => emitGrammarSpec(fan(['top'], 129, 1023), { tag: 'cyc' }),
+      { message: elements('top', 's', 1, 131072, 0) },
     )
-    const spec = emitGrammarSpec(fan(['top'], 65, 512), { tag: 'cyc', tokenClasses: true })
-    assert.equal(spec.options.tokenSet.s.length, 65)
+    const spec = emitGrammarSpec(fan(['top'], 129, 1023), { tag: 'cyc', tokenClasses: true })
+    assert.equal(spec.options.tokenSet.s.length, 129)
   })
 })

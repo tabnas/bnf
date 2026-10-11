@@ -31,7 +31,7 @@ this crate.
 | `tests/doc_examples_test.rs` | `go/doc_examples_test.go`: the claims the crate documentation makes |
 | `tests/divergence_test.rs` | the executable register for the Rust entries in [`../DIVERGENCE.md`](../DIVERGENCE.md): one test per recorded difference, so a repaired entry has to lose its test as well as its section |
 | `tests/leftrec_limit_test.rs` | `go/leftrec_limit_test.go` and `ts/test/leftrec-limit.test.js`: the left-recursion expansion and element limits |
-| `tests/leftrec_chain_test.rs` | no twin: what the compiler holds for the longest chain of leading references the element limit admits, 257 rules, counted by the test binary's own allocator, which refuses any allocation that would take the total to one owned element per occurrence |
+| `tests/leftrec_chain_test.rs` | no twin: what the compiler holds for the longest chain of leading references the element limit admits, 513 rules, counted by the test binary's own allocator, which refuses any allocation that would take the total to one owned element per occurrence |
 | `tests/version_test.rs` | the version sites must agree |
 | `README.md` | the crate front page; its `rust` fences run as doctests |
 
@@ -115,8 +115,13 @@ refusals are shared by all three runtimes: `ts/test/oracle-refusal.test.js`
 holds the canonical compiler to each refusal it recorded, and
 `go/oracle_refusal_test.go` grades the Go port against them the same way.
 `ir-leftrec-limit` is the cycle of twenty rules that the left-recursion
-expansion limit refuses, and `ir-leftrec-elements` the chain of 258 rules
-that the element limit refuses.
+expansion limit refuses, and the five `ir-leftrec-elements-*` fixtures are
+the shapes the element limit refuses: the chain of 514 rules (`-chain`), a
+group in a tail, copied once per alternative of the rule inlined before it
+(`-tail-group`), a group of empty alternatives there
+(`-tail-group-alternatives`), a group in the inlined rule, written into
+every rule it begins (`-source-group`), and an inlined rule of empty
+alternatives (`-empty-alternatives`).
 
 ## Untrusted IR, and where the stack still runs out
 
@@ -124,11 +129,13 @@ that the element limit refuses.
 and refuses past `MAX_ELEMENT_DEPTH` (exported, defined in `src/ir.rs`),
 because the
 passes are recursive and a Rust stack that runs out aborts the process
-rather than unwinding. The walks over the REFERENCE graph (Tarjan's
-components and Paull's ordering in `src/leftrec.rs`) carry their own
-explicit stack for the same reason: a chain of a few thousand rules
-overflowed them when they recursed. Keep both properties when editing
-either file.
+rather than unwinding. The walks over the REFERENCE graph that run before
+the left-recursion bounds (Tarjan's components and Paull's ordering in
+`src/leftrec.rs`, and `reaches_annotated` in `src/annotate.rs`) carry
+their own explicit stack for the same reason: a chain of a few thousand
+rules overflowed them when they recursed, and a chain of 100,000 now
+reaches the element limit and is refused there, on a test thread's 2 MB
+stack too. Keep both properties when editing these files.
 
 What is left, and is the caller's: DROPPING a deeply nested `Element`
 recurses through the `Box` chain, so a tree the compiler refused still
@@ -144,13 +151,13 @@ its helpers are allocated. `MAX_LEFT_RECURSION_EXPANSION` holds the
 alternatives one rule may gain from the left-recursion substitution, so a
 cycle of rules whose alternatives lead with the next one is refused before
 it multiplies; without it, twenty such rules exhausted memory and aborted
-the process. `MAX_LEFT_RECURSION_ELEMENTS` holds the element occurrences
-the substitution may add to the whole grammar, so a chain of rules of one
-alternative each, led by the next one, is refused from 258 rules on before
-it copies the rest of the chain into every rule; without it, 5,000 such
-rules held hundreds of megabytes in each runtime, and a host's deadline
-bounds the time that takes, not the memory. All three refuse with the rule
-named.
+the process. `MAX_LEFT_RECURSION_ELEMENTS` holds what the substitution may
+add to the whole grammar, counting every element at any depth and every
+alternative, a group's as well, so a chain of rules of one alternative
+each, led by the next one, is refused from 514 rules on before it copies
+the rest of the chain into every rule; without it, 5,000 such rules held
+hundreds of megabytes in each runtime, and a host's deadline bounds the
+time that takes, not the memory. All three refuse with the rule named.
 
 ## Elements are shared, as TypeScript and Go share them
 
@@ -178,7 +185,7 @@ same way. A chain of n single-alternative rules, each beginning with the
 next, holds about n²/2 element occurrences after the substitution, and its
 emitted spec is as large; with owned copies, and before the element limit,
 the compiler held 1.7 GB for n = 2,000, and 6 GB was not enough for
-n = 5,000. The limit now refuses the chain from n = 258 on, and for the
+n = 5,000. The limit now refuses the chain from n = 514 on, and for the
 longest chain it admits the compiler holds a pointer or two per
 occurrence; `tests/leftrec_chain_test.rs` holds it there.
 

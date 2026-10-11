@@ -12,8 +12,8 @@ import (
 
 // What one rule may gain from Paull's substitution is bounded
 // (MaxLeftRecursionExpansion), and so is what the whole grammar may gain in
-// element occurrences (MaxLeftRecursionElements). Each bound refuses the
-// grammar before the substitution that would pass it is made. Mirrors
+// elements and alternatives (MaxLeftRecursionElements). Each bound refuses
+// the grammar before the substitution that would pass it is made. Mirrors
 // ts/test/leftrec-limit.test.js; every count below is exact.
 
 func lrLit(s string) *Element {
@@ -212,8 +212,8 @@ func lrChain(n int) *Grammar {
 	return g
 }
 
-// lrFan is top = s "x1" … "x(tail)", for each name in tops; s = m single
-// literals. Inlining s into one of them adds m + (m − 1)·tail − 1.
+// lrFan is top = s "x0" … "x(tail-1)", for each name in tops; s = m single
+// literals. Inlining s into one of them adds (m − 1)·(1 + tail) + m − 1.
 func lrFan(tops []string, m, tail int) *Grammar {
 	g := &Grammar{}
 	for _, name := range tops {
@@ -227,16 +227,41 @@ func lrFan(tops []string, m, tail int) *Grammar {
 	return g
 }
 
-func lrElements(rule, source string, led, gain, added int) string {
-	return fmt.Sprintf("cyc: rule '%s' exceeds the left-recursion element limit of 32768 "+
-		"elements while inlining '%s', which begins %d of its alternatives and would add %d "+
-		"elements to the %d already added to the grammar. Factor '%s' out of the "+
-		"alternatives it begins.",
-		rule, source, led, gain, added, source)
+// lrGroupOf is a group holding one alternative of k single literals.
+func lrGroupOf(k int) *Element {
+	alt := Sequence{}
+	for i := 0; i < k; i++ {
+		alt = append(alt, lrLit(fmt.Sprintf("g%d", i)))
+	}
+	return &Element{Kind: KindGroup, Alts: []Sequence{alt}}
 }
 
-func TestLeftRecursionElementLimitIs32768(t *testing.T) {
-	if MaxLeftRecursionElements != 32768 {
+// lrEmptyGroup is a group of k empty alternatives.
+func lrEmptyGroup(k int) *Element {
+	alts := []Sequence{}
+	for i := 0; i < k; i++ {
+		alts = append(alts, Sequence{})
+	}
+	return &Element{Kind: KindGroup, Alts: alts}
+}
+
+func lrElements(rule, source string, led, remaining, added int) string {
+	return fmt.Sprintf("cyc: rule '%s' exceeds the left-recursion element limit of 131072 "+
+		"elements while inlining '%s', which begins %d of its alternatives and would add more "+
+		"than %d elements to the %d already added to the grammar. Factor '%s' out of the "+
+		"alternatives it begins.",
+		rule, source, led, remaining, added, source)
+}
+
+func lrRefusedWith(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil || err.Error() != want {
+		t.Fatalf("error:\n got  %v\n want %s", err, want)
+	}
+}
+
+func TestLeftRecursionElementLimitIs131072(t *testing.T) {
+	if MaxLeftRecursionElements != 131072 {
 		t.Fatalf("MaxLeftRecursionElements = %d", MaxLeftRecursionElements)
 	}
 }
@@ -251,11 +276,9 @@ func TestLeftRecursionElementsRefuseFiveThousandRuleChainWithinASecond(t *testin
 	}
 	// The last rule is lifted into a token, and r(4998 - g) inlines
 	// r(4999 - g) with g + 1 elements, adding g. The substitutions add
-	// 1 + 2 + … + 255 = 32640, and the one adding 256 passes the limit.
-	if want := lrElements("r4742", "r4743", 1, 256, 32640); ee.Message != want {
-		t.Fatalf("message:\n got  %s\n want %s", ee.Message, want)
-	}
-	if ee.Rule != "r4742" {
+	// 1 + 2 + … + 511 = 130816, and the one adding 512 passes the limit.
+	lrRefusedWith(t, err, lrElements("r4486", "r4487", 1, 256, 130816))
+	if ee.Rule != "r4486" {
 		t.Fatalf("rule %q", ee.Rule)
 	}
 	if elapsed > time.Second {
@@ -267,79 +290,168 @@ func TestLeftRecursionElementsRefuseInTheStandalonePass(t *testing.T) {
 	// Nothing is lifted here, and r4998 inlines "end" one for one, adding
 	// nothing. The prefix is whatever the last emit set.
 	_, refused := lrEliminate(lrChain(5000))
-	want := strings.TrimPrefix(lrElements("r4742", "r4743", 1, 256, 32640), "cyc")
+	want := strings.TrimPrefix(lrElements("r4486", "r4487", 1, 256, 130816), "cyc")
 	if refused == nil || !strings.HasSuffix(refused.Message, want) {
 		t.Fatalf("refused = %v", refused)
 	}
 }
 
+func TestLeftRecursionElementsRefuseAHundredThousandRuleChainOnEitherPath(t *testing.T) {
+	// Every walk that runs before the bound has a stack of its own, so the
+	// chain is the bound's to refuse.
+	g := lrChain(100000)
+	start := time.Now()
+	lrRefusedWith(t, lrEmit(t, g, &ConvertOptions{Tag: "cyc"}),
+		lrElements("r99486", "r99487", 1, 256, 130816))
+	_, refused := lrEliminate(g)
+	want := strings.TrimPrefix(lrElements("r99486", "r99487", 1, 256, 130816), "cyc")
+	if refused == nil || !strings.HasSuffix(refused.Message, want) {
+		t.Fatalf("refused = %v", refused)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("refused after %v", elapsed)
+	}
+}
+
 func TestLeftRecursionElementsAdmitTheLongestChainTheLimitAllows(t *testing.T) {
-	// n = 257 adds 1 + 2 + … + 255 = 32640; n = 258 would add 256 more.
-	spec, err := EmitGrammarSpec(lrChain(257), &ConvertOptions{Tag: "cyc"})
+	// n = 513 adds 1 + 2 + … + 511 = 130816; n = 514 would add 512 more.
+	spec, err := EmitGrammarSpec(lrChain(513), &ConvertOptions{Tag: "cyc"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s, _ := altListOf(spec.Rule["r0"].Open)[0].S.(string)
-	if n := len(strings.Split(s, " ")); n != 257 {
+	if n := len(strings.Split(s, " ")); n != 513 {
 		t.Fatalf("r0 matches %d tokens", n)
 	}
-	err = lrEmit(t, lrChain(258), &ConvertOptions{Tag: "cyc"})
-	if err == nil || err.Error() != lrElements("r0", "r1", 1, 256, 32640) {
-		t.Fatalf("error = %v", err)
-	}
+	lrRefusedWith(t, lrEmit(t, lrChain(514), &ConvertOptions{Tag: "cyc"}),
+		lrElements("r0", "r1", 1, 256, 130816))
 }
 
 func TestLeftRecursionElementsCountATailOncePerSourceAlternative(t *testing.T) {
-	// 65 + 64 × 511 − 1 = 32768 fills the limit; a tail of 512 adds 32832.
-	out, refused := lrEliminate(lrFan([]string{"top"}, 65, 511))
-	if refused != nil || len(out.Productions[0].Alts) != 65 {
+	// 128 × (1 + 1022) + 129 − 1 = 131072 fills the limit; a tail of 1023
+	// adds 131200.
+	out, refused := lrEliminate(lrFan([]string{"top"}, 129, 1022))
+	if refused != nil || len(out.Productions[0].Alts) != 129 {
 		t.Fatalf("refused %v", refused)
 	}
-	err := lrEmit(t, lrFan([]string{"top"}, 65, 512), &ConvertOptions{Tag: "cyc"})
-	if err == nil || err.Error() != lrElements("top", "s", 1, 32832, 0) {
-		t.Fatalf("error = %v", err)
+	lrRefusedWith(t, lrEmit(t, lrFan([]string{"top"}, 129, 1023), &ConvertOptions{Tag: "cyc"}),
+		lrElements("top", "s", 1, 131072, 0))
+}
+
+func TestLeftRecursionElementsCountAGroupInATail(t *testing.T) {
+	// The tail is one element, a group whose one alternative holds k
+	// literals, so it counts 1 + 1 + k:
+	// 512 × (1 + 2 + 252) + 513 − 1 = 131072, and a group of 253 adds 131584.
+	tailGroup := func(k int) *Grammar {
+		g := lrFan([]string{"top"}, 513, 0)
+		g.Productions[0].Alts[0] = append(g.Productions[0].Alts[0], lrGroupOf(k))
+		return g
 	}
+	out, refused := lrEliminate(tailGroup(252))
+	if refused != nil || len(out.Productions[0].Alts) != 513 {
+		t.Fatalf("refused %v", refused)
+	}
+	lrRefusedWith(t, lrEmit(t, tailGroup(253), &ConvertOptions{Tag: "cyc"}),
+		lrElements("top", "s", 1, 131072, 0))
+}
+
+func TestLeftRecursionElementsCountEachAlternativeOfAGroupInATail(t *testing.T) {
+	// The tail is a group of k empty alternatives, so it counts 1 + k:
+	// 512 × (1 + 1 + 253) + 513 − 1 = 131072, and 254 of them add 131584.
+	tailGroup := func(k int) *Grammar {
+		g := lrFan([]string{"top"}, 513, 0)
+		g.Productions[0].Alts[0] = append(g.Productions[0].Alts[0], lrEmptyGroup(k))
+		return g
+	}
+	out, refused := lrEliminate(tailGroup(253))
+	if refused != nil || len(out.Productions[0].Alts) != 513 {
+		t.Fatalf("refused %v", refused)
+	}
+	lrRefusedWith(t, lrEmit(t, tailGroup(254), &ConvertOptions{Tag: "cyc"}),
+		lrElements("top", "s", 1, 131072, 0))
+}
+
+func TestLeftRecursionElementsCountAGroupInTheInlinedRule(t *testing.T) {
+	// s is one alternative holding a group of 500, which counts 502: each
+	// rule that begins with it adds 501, so 261 fit and the 262nd passes the
+	// limit.
+	g := func(n int) *Grammar {
+		out := &Grammar{}
+		for i := 0; i < n; i++ {
+			out.Productions = append(out.Productions, &Production{
+				Name: fmt.Sprintf("t%d", i), Alts: []Sequence{{lrRef("s"), lrLit("x")}}})
+		}
+		out.Productions = append(out.Productions,
+			&Production{Name: "s", Alts: []Sequence{{lrGroupOf(500)}}})
+		return out
+	}
+	if _, refused := lrEliminate(g(261)); refused != nil {
+		t.Fatal(refused)
+	}
+	lrRefusedWith(t, lrEmit(t, g(262), &ConvertOptions{Tag: "cyc"}),
+		lrElements("t261", "s", 1, 311, 130761))
+}
+
+func TestLeftRecursionElementsCountEachAlternativeTheInlinedRuleWrites(t *testing.T) {
+	// s is 513 empty alternatives: each rule that begins with it gains 512
+	// of them, within the alternative limit, and adds 511 to the grammar, so
+	// 256 fit and the 257th passes the limit.
+	g := func(n int) *Grammar {
+		out := &Grammar{}
+		for i := 0; i < n; i++ {
+			out.Productions = append(out.Productions, &Production{
+				Name: fmt.Sprintf("t%d", i), Alts: []Sequence{{lrRef("s")}, {lrLit("x")}}})
+		}
+		s := &Production{Name: "s"}
+		for i := 0; i < 513; i++ {
+			s.Alts = append(s.Alts, Sequence{})
+		}
+		out.Productions = append(out.Productions, s)
+		return out
+	}
+	out, refused := lrEliminate(g(256))
+	if refused != nil || len(out.Productions[0].Alts) != 514 {
+		t.Fatalf("refused %v", refused)
+	}
+	lrRefusedWith(t, lrEmit(t, g(257), &ConvertOptions{Tag: "cyc"}),
+		lrElements("t256", "s", 1, 256, 130816))
 }
 
 func TestLeftRecursionElementsSumEverySubstitutionInTheGrammar(t *testing.T) {
-	// Each rule adds 65 + 64 × 255 − 1 = 16384: two fill the limit.
-	if _, refused := lrEliminate(lrFan([]string{"t1", "t2"}, 65, 255)); refused != nil {
+	// Each rule adds 128 × (1 + 400) + 129 − 1 = 51456: two fit, and the
+	// third passes the limit.
+	if _, refused := lrEliminate(lrFan([]string{"t1", "t2"}, 129, 400)); refused != nil {
 		t.Fatal(refused)
 	}
-	err := lrEmit(t, lrFan([]string{"t1", "t2", "t3"}, 65, 255), &ConvertOptions{Tag: "cyc"})
-	if err == nil || err.Error() != lrElements("t3", "s", 1, 16384, 32768) {
-		t.Fatalf("error = %v", err)
-	}
+	lrRefusedWith(t,
+		lrEmit(t, lrFan([]string{"t1", "t2", "t3"}, 129, 400), &ConvertOptions{Tag: "cyc"}),
+		lrElements("t3", "s", 1, 28160, 102912))
 }
 
 func TestLeftRecursionElementsFloorWhatAShorterReplacementAdds(t *testing.T) {
 	// Inlining e, one empty alternative, first takes an element out of each
-	// of 100 alternatives. That frees nothing: s still adds 32832.
-	g := lrFan([]string{"top"}, 65, 512)
+	// of 100 alternatives. That frees nothing: s still adds 131200.
+	g := lrFan([]string{"top"}, 129, 1023)
 	lead := []Sequence{}
 	for i := 0; i < 100; i++ {
 		lead = append(lead, Sequence{lrRef("e"), lrLit(fmt.Sprintf("y%d", i))})
 	}
 	g.Productions[0].Alts = append(lead, g.Productions[0].Alts...)
 	g.Productions = append(g.Productions, &Production{Name: "e", Alts: []Sequence{{}}})
-	err := lrEmit(t, g, &ConvertOptions{Tag: "cyc"})
-	if err == nil || err.Error() != lrElements("top", "s", 1, 32832, 0) {
-		t.Fatalf("error = %v", err)
-	}
+	lrRefusedWith(t, lrEmit(t, g, &ConvertOptions{Tag: "cyc"}),
+		lrElements("top", "s", 1, 131072, 0))
 }
 
 func TestLeftRecursionElementsChargeNothingForATokenClass(t *testing.T) {
-	// Inlined member by member, s would add 32832.
-	err := lrEmit(t, lrFan([]string{"top"}, 65, 512), &ConvertOptions{Tag: "cyc"})
-	if err == nil || err.Error() != lrElements("top", "s", 1, 32832, 0) {
-		t.Fatalf("error = %v", err)
-	}
-	spec, err := EmitGrammarSpec(lrFan([]string{"top"}, 65, 512),
+	// Inlined member by member, s would add 131200.
+	lrRefusedWith(t, lrEmit(t, lrFan([]string{"top"}, 129, 1023), &ConvertOptions{Tag: "cyc"}),
+		lrElements("top", "s", 1, 131072, 0))
+	spec, err := EmitGrammarSpec(lrFan([]string{"top"}, 129, 1023),
 		&ConvertOptions{Tag: "cyc", TokenClasses: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Options.TokenSet["s"]) != 65 {
+	if len(spec.Options.TokenSet["s"]) != 129 {
 		t.Fatalf("token sets: %v", spec.Options.TokenSet)
 	}
 }
