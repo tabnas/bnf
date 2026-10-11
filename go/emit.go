@@ -568,6 +568,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	} else {
 		diagPrefix = "bnf"
 	}
+	// What this compile writes, against MaxEmitUnits.
+	budget := newEmitBudget()
 	// Work on a copy: resolveProseTerminals, liftLiteralTokens and
 	// normalizeBuiltinTokens all rewrite the grammar in place, so emitting
 	// twice from one ParseAbnf result would otherwise give two different
@@ -655,7 +657,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	}
 
 	grammar = eliminateLeftRecursionKeeping(grammar, classNames)
-	grammar = rewriteProbeDispatches(grammar)
+	grammar = rewriteProbeDispatches(grammar, budget)
 	// Left factoring runs after the probe rewriter (so `[X D] Y`
 	// patterns are recognised in their original alternatives) and
 	// before tail-repeat detection and desugaring.
@@ -803,6 +805,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		// the difference, and names derived from it do not move.
 		mine := classes.coverage[key]
 		var members []string
+		// Each member is charged as it is listed (MaxEmitUnits).
+		budget.begin("the character class /"+el.Pattern+"/", "", el.Sp, emitStepTokenSet)
 		for _, span := range classes.atoms {
 			covered := false
 			for _, r := range mine {
@@ -836,6 +840,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				emit(atom, pattern, flags)
 				classes.atomTokens[spanKey] = atom
 			}
+			budget.charge(1)
 			members = append(members, atom)
 		}
 
@@ -929,6 +934,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			continue
 		}
 		members := []string{}
+		budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.Sp, emitStepTokenClass)
 		for _, alt := range prod.Alts {
 			tok := tokenForTerminal(alt[0], literals, regexTokens)
 			dup := false
@@ -939,6 +945,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				}
 			}
 			if !dup {
+				budget.charge(1)
 				members = append(members, tok)
 			}
 		}
@@ -976,7 +983,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		cc.classHeads[t] = true
 	}
 
-	firstSets, nullable := computeFirstSets(grammar, literals, regexTokens, cc.classSets)
+	firstSets, nullable := computeFirstSets(grammar, literals, regexTokens, cc.classSets, budget)
 	// Settle the contested left-recursion tail loops flagged during
 	// elimination, now that FIRST sets can say whether the competition is
 	// real. Runs on the desugared grammar because the loop is a helper
@@ -986,9 +993,9 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// its terminating alternative's token column; FOLLOW₂ decides a
 	// repetition whose repeated class COVERS one of them. See follow.go.
 	followSets := computeFollowSets(
-		grammar, literals, regexTokens, firstSets, nullable, start)
+		grammar, literals, regexTokens, firstSets, nullable, start, budget)
 	followPairs := computeFollowPairs(
-		grammar, literals, regexTokens, firstSets, nullable, followSets)
+		grammar, literals, regexTokens, firstSets, nullable, followSets, budget)
 	refs := newRefRegistry()
 	refs.useBuiltins = opts.Builtins
 	refs.emitMarks = opts.Marks
@@ -1013,18 +1020,21 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		if prov != nil && originOf(prod) != prod.Name {
 			prov[prod.Name] = originOf(prod)
 		}
+		// A refusal names the rule the author wrote.
+		budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.Sp, emitStepAlternates)
 		if prod.ProbeHelper != nil {
-			emitProbeHelper(prod, tag, ruleSpec, literals, regexTokens)
+			emitProbeHelper(prod, tag, ruleSpec, literals, regexTokens, budget)
 			continue
 		}
 		if prod.ProbeDisp != nil {
-			emitProbeDispatch(prod, tag, ruleSpec, refs, literals, regexTokens, opts.Builtins)
+			emitProbeDispatch(prod, tag, ruleSpec, refs, literals, regexTokens, opts.Builtins,
+				budget)
 			continue
 		}
 		if err := emitProduction(prod, grammar, literals, regexTokens, knownRules,
 			tag, ruleSpec, firstSets, nullable, refs,
 			followSets, followPairs, cc, valuePlan.plan, arrayHelpers,
-			valueRules, prov); err != nil {
+			valueRules, prov, budget); err != nil {
 			return nil, err
 		}
 	}
@@ -1058,10 +1068,11 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// End of source: the one anchor every grammar has, and the last
 	// resort for a parse that cannot resynchronise anywhere else.
 	bubbleClose["g"] = syncG(tag, "end")
-	ruleSpec[startWrapper] = &tabnas.GrammarRuleSpec{
+	budget.begin(ruleSubject(start), start, nil, emitStepAlternates)
+	commitRule(ruleSpec, startWrapper, &tabnas.GrammarRuleSpec{
 		Open:  []*tabnas.GrammarAltSpec{mapToAlt(map[string]any{"p": start, "g": tag})},
 		Close: []*tabnas.GrammarAltSpec{mapToAlt(bubbleClose)},
-	}
+	}, budget, 0)
 
 	opt := &tabnas.Options{
 		Fixed: &tabnas.FixedOptions{Token: fixedTokens},
@@ -1116,9 +1127,16 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	if clearAll {
 		spec.Clear = true
 	}
-	for _, name := range removeNames {
-		ruleSpec[name] = nil
-		fixedTokens["#"+name] = nil
+	// Each name writes two entries, a rule and a fixed token, and each is
+	// charged before it is written (MaxEmitUnits).
+	if len(removeNames) > 0 {
+		budget.begin(removalSubject(len(removeNames)), "", nil, emitStepRemove)
+		for _, name := range removeNames {
+			budget.charge(1)
+			ruleSpec[name] = nil
+			budget.charge(1)
+			fixedTokens["#"+name] = nil
+		}
 	}
 	return spec, nil
 }
@@ -1553,7 +1571,8 @@ func captureChildFields(refs *refRegistry, ruleName, nodeKind string) map[string
 // The same shape a hand-written tabnas grammar uses for `X = a [ b X ]`.
 // Mirrors the TS emitTailRepeat; the alignment TSVs pin the shape.
 func emitTailRepeat(prod *Production, literals, regexTokens map[string]string,
-	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry) {
+	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
+	budget *emitBudget) {
 
 	prodKind := prod.kind()
 	prefixAlt := prod.Alts[0]
@@ -1600,10 +1619,10 @@ func emitTailRepeat(prod *Production, literals, regexTokens map[string]string,
 		end["m"] = "_"
 	}
 
-	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
+	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 		Open:  []*tabnas.GrammarAltSpec{mapToAlt(open)},
 		Close: []*tabnas.GrammarAltSpec{mapToAlt(repeat), mapToAlt(end)},
-	}
+	}, budget, 0)
 }
 
 // planArrayHelpers names the generated helpers that stand inside an
@@ -1722,11 +1741,20 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	// own), nest whole (@push$), or resolve to its matched text
 	// (@push$ {src})?
 	arrayHelpers, valueRules map[string]bool,
-	prov map[string]string) error {
+	prov map[string]string, budget *emitBudget) error {
 
 	// This rule stands inside an `; @array`: it inherits that array from
 	// its parent and pushes into it, instead of building a node.
 	arrayElem := arrayHelpers[prod.Name]
+
+	// Every alternate this rule's own open list will hold is charged as it
+	// is made (MaxEmitUnits), and pre is their sum; the rule's commit
+	// charges the rest of what it holds.
+	pre := 0
+	made := func(o map[string]any) map[string]any {
+		pre += chargeAlt(budget, o)
+		return o
+	}
 
 	// The token names that came from character classes, for
 	// altHeadSharesToken: only between two of these does character
@@ -1785,7 +1813,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		// got past — the repeated part references this rule, which builds a
 		// value, so the part cannot be taken as source text. Keeping a
 		// second copy would have been a branch no input can enter.
-		emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
+		emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs, budget)
 		return nil
 	}
 
@@ -1881,12 +1909,16 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 					// degenerate) so the ordering has lookahead to work
 					// with.
 					var paths [][]string
+					// What altPrefixes returns stays held until the entries
+					// made from it are written (MaxEmitUnits).
+					peekBase := budget.held
 					if altHeadContested(alt, ordered, literals, regexTokens,
 						firstSets, nullable, cc) ||
 						contestedByFollow(prod, alt, literals, regexTokens,
 							firstSets, nullable, followSets, cc) {
 						pfx := [][]string{}
-						for _, p := range altPrefixes(alt, grammar, literals, regexTokens, lookaheadKSpan, cc.classSets) {
+						for _, p := range altPrefixes(alt, grammar, literals, regexTokens, lookaheadKSpan,
+							cc.classSets, budget) {
 							if len(p) > 0 {
 								pfx = append(pfx, p)
 							}
@@ -1908,8 +1940,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 							if mark != "" {
 								o["m"] = mark
 							}
-							entries = append(entries, dispatchEntry{o: o, alt: alt})
+							entries = append(entries, dispatchEntry{o: made(o), alt: alt})
 						}
+						budget.restore(peekBase)
 						continue
 					}
 
@@ -1933,8 +1966,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 						if mark != "" {
 							o["m"] = mark
 						}
-						entries = append(entries, dispatchEntry{o: debtGuard(o), alt: alt})
+						entries = append(entries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
 					}
+					budget.restore(peekBase)
 					continue
 				}
 			}
@@ -1970,11 +2004,11 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 					g := copyMap(o)
 					g["s"] = tok
 					g["b"] = 1
-					entries = append(entries, dispatchEntry{o: g})
+					entries = append(entries, dispatchEntry{o: made(g)})
 				}
 				// Contested repetitions additionally get FOLLOW₂ guards,
 				// at the FRONT so they outrank the continue alternatives.
-				guards := pairExitGuards(prod, o, followPairs, firstSets, cc)
+				guards := pairExitGuards(prod, o, followPairs, firstSets, cc, made)
 				front := make([]dispatchEntry, 0, len(guards)+len(entries))
 				for _, g := range guards {
 					front = append(front, dispatchEntry{o: g})
@@ -2010,7 +2044,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 						g := copyMap(o)
 						g["s"] = strings.Join(append(append([]string{}, seg.terms...), tok), " ")
 						g["b"] = 1
-						entries = append(entries, dispatchEntry{o: g, alt: alt})
+						entries = append(entries, dispatchEntry{o: made(g), alt: alt})
 					}
 					continue
 				}
@@ -2020,12 +2054,12 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			if len(alt) > 0 {
 				srcAlt = alt
 			}
-			entries = append(entries, dispatchEntry{o: o, alt: srcAlt})
+			entries = append(entries, dispatchEntry{o: made(o), alt: srcAlt})
 		}
 
 		specificityPermute(entries, cc, grammar)
 		opens := reorderKeywordShadow(prod, entries, grammar,
-			literals, regexTokens, followSets, cc)
+			literals, regexTokens, followSets, cc, budget, made)
 		// A loop has no close: every alternative either re-enters it by
 		// replacement or ends it, and nothing it did is left to capture.
 		if loopItem != nil {
@@ -2035,7 +2069,8 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				}
 			}
 			opens = append([]map[string]any{loopEntry()}, opens...)
-			ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
+			commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)},
+				budget, pre)
 			return nil
 		}
 		rs := &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
@@ -2073,7 +2108,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				rs.Close = mapsToAlts(closes)
 			}
 		}
-		ruleSpec[prod.Name] = rs
+		commitRule(ruleSpec, prod.Name, rs, budget, pre)
 		return nil
 	}
 
@@ -2082,7 +2117,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		return emitChainArray(prod.Name, prod.Alts[0], literals, regexTokens, tag,
 			ruleSpec, refs, prodKind, prov, originOf(prod),
 			prod.Value, valuePlan[originOf(prod)], prod.Sp,
-			arrayHelpers, valueRules, arrayElem)
+			arrayHelpers, valueRules, arrayElem, budget)
 	}
 
 	// A value annotation names one member per pushing segment, which only
@@ -2136,8 +2171,11 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		}
 	}
 	const lookaheadK = 4
+	// What dispatchPrefixes returns stays held until every entry made from it
+	// is written (MaxEmitUnits).
+	dispatchBase := budget.held
 	dispatch := dispatchPrefixes(prod.Alts, grammar, literals, regexTokens, lookaheadK,
-		cc.headsContest, exitPaths, cc.classSets)
+		cc.headsContest, exitPaths, cc.classSets, budget)
 
 	for i, alt := range prod.Alts {
 		implName := fmt.Sprintf("%s$alt%d", prod.Name, i)
@@ -2163,10 +2201,10 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		// iteration: see emitRepeatLoop.
 		if loopItem != nil {
 			emitRepeatLoop(prod, implName, loopItem, tag, ruleSpec, refs, prov,
-				arrayElem, arrayHelpers, valueRules)
+				arrayElem, arrayHelpers, valueRules, budget)
 		} else if err := emitChainArray(implName, alt, literals, regexTokens, tag, ruleSpec,
 			refs, "helper", prov, originOf(prod), nil, nil, nil,
-			arrayHelpers, valueRules, arrayElem); err != nil {
+			arrayHelpers, valueRules, arrayElem, budget); err != nil {
 			return err
 		}
 
@@ -2219,7 +2257,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if mark != "" {
 					o["m"] = mark
 				}
-				dispatchEntries = append(dispatchEntries, dispatchEntry{o: debtGuard(o), alt: alt})
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
 			}
 		} else {
 			firstTokens := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
@@ -2239,10 +2277,11 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if mark != "" {
 					o["m"] = mark
 				}
-				dispatchEntries = append(dispatchEntries, dispatchEntry{o: debtGuard(o), alt: alt})
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
 			}
 		}
 	}
+	budget.restore(dispatchBase)
 
 	// Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
 	// first (naming the follow token is what makes the lexer offer it at
@@ -2256,14 +2295,14 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			if n.mark != "" {
 				o["m"] = n.mark
 			}
-			dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
+			dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o)})
 		}
 		o := map[string]any{"p": n.implName, "g": tag}
 		merge(o, copyMap(n.fields))
 		if n.mark != "" {
 			o["m"] = n.mark
 		}
-		dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
+		dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o)})
 	}
 
 	if emptyAltSeen {
@@ -2284,21 +2323,21 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				g := copyMap(o)
 				g["s"] = tok
 				g["b"] = 1
-				dispatchEntries = append(dispatchEntries, dispatchEntry{o: g})
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(g)})
 			}
-			guards := pairExitGuards(prod, o, followPairs, firstSets, cc)
+			guards := pairExitGuards(prod, o, followPairs, firstSets, cc, made)
 			front := make([]dispatchEntry, 0, len(guards)+len(dispatchEntries))
 			for _, g := range guards {
 				front = append(front, dispatchEntry{o: g})
 			}
 			dispatchEntries = append(front, dispatchEntries...)
 		}
-		dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
+		dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o)})
 	}
 
 	specificityPermute(dispatchEntries, cc, grammar)
 	dispOpens := reorderKeywordShadow(prod, dispatchEntries, grammar,
-		literals, regexTokens, followSets, cc)
+		literals, regexTokens, followSets, cc, budget, made)
 	// The impl rule this dispatches to inherits the array and fills it
 	// directly, so the dispatcher allocates nothing and captures nothing.
 	if arrayElem {
@@ -2310,9 +2349,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	// capture, because the iteration captures its own item. So it has no
 	// close, and registers no capture for one.
 	if loopItem != nil {
-		ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
+		commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 			Open: mapsToAlts(append([]map[string]any{loopEntry()}, dispOpens...)),
-		}
+		}, budget, pre)
 		return nil
 	}
 	dispClose := captureChildFields(refs, prod.Name, prodKind)
@@ -2323,10 +2362,10 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	if arrayElem {
 		useValueActions(dispClose, nil, nil)
 	}
-	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
+	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 		Open:  mapsToAlts(dispOpens),
 		Close: mapsToAlts([]map[string]any{dispClose}),
-	}
+	}, budget, pre)
 	return nil
 }
 
@@ -2360,7 +2399,8 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 // Mirrors the TS `emitRepeatLoop`.
 func emitRepeatLoop(loop *Production, name string, item *Element, tag string,
 	ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
-	prov map[string]string, arrayElem bool, arrayHelpers, valueRules map[string]bool) {
+	prov map[string]string, arrayElem bool, arrayHelpers, valueRules map[string]bool,
+	budget *emitBudget) {
 
 	if item.Kind != KindRef {
 		panic(fmt.Sprintf(diagName()+": internal — repeat loop '%s' dispatches a "+
@@ -2383,13 +2423,13 @@ func emitRepeatLoop(loop *Production, name string, item *Element, tag string,
 		}
 		pushElement(back, elem, valueRules)
 	}
-	ruleSpec[name] = &tabnas.GrammarRuleSpec{
+	commitRule(ruleSpec, name, &tabnas.GrammarRuleSpec{
 		Open:  []*tabnas.GrammarAltSpec{mapToAlt(take)},
 		Close: []*tabnas.GrammarAltSpec{mapToAlt(back)},
-	}
-	ruleSpec[step] = &tabnas.GrammarRuleSpec{
+	}, budget, 0)
+	commitRule(ruleSpec, step, &tabnas.GrammarRuleSpec{
 		Open: []*tabnas.GrammarAltSpec{mapToAlt(map[string]any{"r": loop.Name, "g": tag})},
-	}
+	}, budget, 0)
 }
 
 // loopItemOf is the item a repeat loop repeats: its alternatives are
@@ -2438,9 +2478,9 @@ func emitChain(headName string, alt Sequence, literals, regexTokens map[string]s
 	// rule was lifted to a token), so they are as much the author's
 	// business as the planner's — and were the only annotation refusals
 	// left that could not say where.
-	value *ValueAnnotation, nested []bool, sp *SrcSpan) error {
+	value *ValueAnnotation, nested []bool, sp *SrcSpan, budget *emitBudget) error {
 	return emitChainArray(headName, alt, literals, regexTokens, tag, ruleSpec,
-		refs, headKind, prov, origin, value, nested, sp, nil, nil, false)
+		refs, headKind, prov, origin, value, nested, sp, nil, nil, false, budget)
 }
 
 // emitChainArray is emitChain plus the array-collection arguments.
@@ -2451,7 +2491,7 @@ func emitChainArray(headName string, alt Sequence, literals, regexTokens map[str
 	tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec, refs *refRegistry,
 	headKind string, prov map[string]string, origin string,
 	value *ValueAnnotation, nested []bool, sp *SrcSpan,
-	arrayHelpers, valueRules map[string]bool, arrayElem bool) error {
+	arrayHelpers, valueRules map[string]bool, arrayElem bool, budget *emitBudget) error {
 
 	segs := segmentize(alt, literals, regexTokens)
 	chainName := func(i int) string {
@@ -2699,7 +2739,7 @@ func emitChainArray(headName string, alt Sequence, literals, regexTokens map[str
 		if closeMaps != nil {
 			rs.Close = mapsToAlts(closeMaps)
 		}
-		ruleSpec[name] = rs
+		commitRule(ruleSpec, name, rs, budget, 0)
 	}
 	return nil
 }

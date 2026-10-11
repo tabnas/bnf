@@ -54,8 +54,15 @@ func TestOracleRefusalsMatchTypeScript(t *testing.T) {
 	}
 }
 
+// asSlice is v as a JSON array, or nil when it is absent.
+func asSlice(v any) []any {
+	s, _ := v.([]any)
+	return s
+}
+
 // oracleGrammar reads a fixture's IR, the JSON of the canonical compiler's
-// Grammar (a repetition's `max: Infinity` written as null).
+// Grammar (a repetition's `max: Infinity` written as null), with its
+// <remove> list.
 func oracleGrammar(t *testing.T, ir map[string]any) *Grammar {
 	t.Helper()
 	str := func(m map[string]any, k string) string { s, _ := m[k].(string); return s }
@@ -114,6 +121,10 @@ func oracleGrammar(t *testing.T, ir map[string]any) *Grammar {
 		return el
 	}
 	g := &Grammar{}
+	for _, name := range asSlice(ir["remove"]) {
+		g.Remove = append(g.Remove, name.(string))
+	}
+	g.ClearAll, _ = ir["clearAll"].(bool)
 	for _, p := range ir["productions"].([]any) {
 		m := p.(map[string]any)
 		known(m, "name alts sp nodeKind origin value")

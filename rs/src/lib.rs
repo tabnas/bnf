@@ -39,6 +39,7 @@
 
 mod analysis;
 mod annotate;
+mod budget;
 mod desugar;
 mod emit;
 mod factor;
@@ -63,6 +64,7 @@ mod readme_examples {}
 /// `const VERSION` in `go/bnf.go`.
 pub const VERSION: &str = "0.1.29";
 
+pub use budget::MAX_EMIT_UNITS;
 pub use emit::emit_grammar_spec;
 pub use ir::{
     builtin_token, diag_name, escape_regexp, is_effectively_case_sensitive, is_prose_name,

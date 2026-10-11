@@ -20,6 +20,7 @@ use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::budget::{probe_rule_units, EmitBudget, STEP_PROBE};
 use crate::ir::{
     diag_name, regex_key, term_key_of, AmbiguityReport, Element, EmitError, Kind,
     ProbeDispatchSpec, ProbeHelperSpec,
@@ -118,7 +119,10 @@ fn collect_seq_vocab_elements(seq: &[Rc<Element>], grammar: &Grammar) -> IndexMa
 /// where the pattern is easy to recognise, and runs before token
 /// allocation: probe metadata stores elements, and the emitter resolves
 /// them to token names at emit time.
-pub(crate) fn rewrite_probe_dispatches(grammar: &Grammar) -> Result<Grammar, EmitError> {
+pub(crate) fn rewrite_probe_dispatches(
+    grammar: &Grammar,
+    budget: &EmitBudget,
+) -> Result<Grammar, EmitError> {
     let mut reports: Vec<AmbiguityReport> = grammar.ambiguities.clone();
     let mut extra: Vec<Production> = Vec::new();
     let mut used: IndexSet<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
@@ -168,12 +172,26 @@ pub(crate) fn rewrite_probe_dispatches(grammar: &Grammar) -> Result<Grammar, Emi
 
                 // Joint vocab: union of everything the probe might need
                 // to consume, minus the disambiguator so the probe stops
-                // on it and the peek works.
+                // on it and the peek works. The list is charged before it
+                // is made (`MAX_EMIT_UNITS`), with the rule it becomes: an
+                // entry for each token either side reaches, less the
+                // disambiguator, and that rule's alternates, three units
+                // for each token (`probe_rule_units`).
+                let d_key = vocab_key(&disambiguator);
+                let mut listed =
+                    x_vocab.len() + y_vocab.keys().filter(|k| !x_vocab.contains_key(*k)).count();
+                if let Some(d) = &d_key {
+                    if x_vocab.contains_key(d) || y_vocab.contains_key(d) {
+                        listed -= 1;
+                    }
+                }
+                budget.begin_rule(origin_of(prod), prod.sp, &STEP_PROBE);
+                budget.charge(listed + probe_rule_units(listed))?;
                 let mut vocab: IndexMap<String, Element> = x_vocab;
                 for (k, v) in y_vocab {
                     vocab.entry(k).or_insert(v);
                 }
-                if let Some(d_key) = vocab_key(&disambiguator) {
+                if let Some(d_key) = d_key {
                     vocab.shift_remove(&d_key);
                 }
 

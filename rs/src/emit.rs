@@ -15,7 +15,7 @@
 //! compiler's object literal writes it, because the serialised text is
 //! compared byte for byte against TypeScript's.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
@@ -27,6 +27,10 @@ use crate::analysis::{
     FirstSets, FollowPairs, FollowSets, Nullable, Tokens,
 };
 use crate::annotate::{plan_array_helpers, plan_value_annotations};
+use crate::budget::{
+    alt_units, memo_limit, probe_rule_units, rule_units, EmitBudget, Subject, STEP_ALTERNATES,
+    STEP_REMOVE, STEP_TOKEN_CLASS, STEP_TOKEN_SET,
+};
 use crate::desugar::desugar;
 use crate::factor::{left_factor, seq_token_span, LOOKAHEAD_K};
 use crate::ir::{
@@ -323,6 +327,8 @@ impl ContestCtx {
         if let Some(hit) = self.overlap_cache.borrow().get(&key) {
             return *hit;
         }
+        // Kept only while the memo has room (`MAX_MEMO_ENTRIES`).
+        let keep = self.overlap_cache.borrow().len() < memo_limit();
         let ma = self.class_members.get(a);
         let mb = self.class_members.get(b);
         let out = if ma.is_some() || mb.is_some() {
@@ -345,7 +351,12 @@ impl ContestCtx {
                 _ => false,
             }
         };
-        self.overlap_cache.borrow_mut().insert(key, out);
+        // A provisional answer that is not kept goes again.
+        if keep {
+            self.overlap_cache.borrow_mut().insert(key, out);
+        } else {
+            self.overlap_cache.borrow_mut().shift_remove(&key);
+        }
         out
     }
 
@@ -376,6 +387,8 @@ impl ContestCtx {
         if let Some(hit) = self.contest_cache.borrow().get(&key) {
             return *hit;
         }
+        // Kept only while the memo has room (`MAX_MEMO_ENTRIES`).
+        let keep = self.contest_cache.borrow().len() < memo_limit();
         let ma = self.token_sets.get(a.trim_start_matches('#'));
         let mb = self.token_sets.get(b.trim_start_matches('#'));
         let la = self.literal_by_token.get(a);
@@ -422,7 +435,12 @@ impl ContestCtx {
                 || self.engine_token_meets(a, b)
                 || self.engine_token_meets(b, a)
         };
-        self.contest_cache.borrow_mut().insert(key, out);
+        // A provisional answer that is not kept goes again.
+        if keep {
+            self.contest_cache.borrow_mut().insert(key, out);
+        } else {
+            self.contest_cache.borrow_mut().shift_remove(&key);
+        }
         out
     }
 
@@ -667,6 +685,11 @@ struct Emitter<'a> {
     literal_heads: IndexSet<String>,
     /// The token names a character class can be, collected once likewise.
     class_heads: IndexSet<String>,
+    /// What this compile writes, against `MAX_EMIT_UNITS`.
+    budget: EmitBudget,
+    /// What the alternates of the rule `emit_production` is building have
+    /// been charged as they were made; its commit charges the rest.
+    pre: Cell<usize>,
 }
 
 /// Compile a grammar IR into a tabnas `GrammarSpec`.
@@ -682,6 +705,9 @@ pub fn emit_grammar_spec(
     // package. Set BEFORE any pass that can raise one.
     let tag = opts.tag.clone().unwrap_or_else(|| "bnf".to_string());
     set_diag_name(&tag);
+
+    // What this compile writes, against `MAX_EMIT_UNITS`.
+    let budget = EmitBudget::new();
 
     // Before the grammar is even copied: copying it recurses through the
     // element tree too, so the shape has to be refused first.
@@ -748,7 +774,7 @@ pub fn emit_grammar_spec(
     drop(grammar);
     eliminated.validate_repetitions()?;
     let grammar = eliminated.into_grammar();
-    let next = rewrite_probe_dispatches(&grammar)?;
+    let next = rewrite_probe_dispatches(&grammar, &budget)?;
     drop(grammar);
     // Left factoring runs after the probe rewriter and before
     // tail-repeat detection and desugaring.
@@ -866,6 +892,8 @@ pub fn emit_grammar_spec(
                         &mut set_ranges,
                         &mut match_tokens,
                         &mut used_names,
+                        el.sp,
+                        &budget,
                     )?;
                 }
             }
@@ -904,9 +932,11 @@ pub fn emit_grammar_spec(
             continue;
         };
         let mut members: Vec<String> = Vec::new();
+        budget.begin_rule(origin_of(prod), prod.sp, &STEP_TOKEN_CLASS);
         for alt in &prod.alts {
             let tok = tokens.name(&alt[0]);
             if !members.contains(&tok) {
+                budget.charge(1)?;
                 members.push(tok);
             }
         }
@@ -933,10 +963,18 @@ pub fn emit_grammar_spec(
     }
     contest.token_sets = token_sets.clone();
 
-    let (first_sets, nullable) = compute_first_sets(&grammar, &tokens, &contest.class_sets);
-    let follow_sets = compute_follow_sets(&grammar, &tokens, &first_sets, &nullable, &start);
-    let follow_pairs =
-        compute_follow_pairs(&grammar, &tokens, &first_sets, &nullable, &follow_sets);
+    let (first_sets, nullable) =
+        compute_first_sets(&grammar, &tokens, &contest.class_sets, &budget)?;
+    let follow_sets =
+        compute_follow_sets(&grammar, &tokens, &first_sets, &nullable, &start, &budget)?;
+    let follow_pairs = compute_follow_pairs(
+        &grammar,
+        &tokens,
+        &first_sets,
+        &nullable,
+        &follow_sets,
+        &budget,
+    )?;
 
     // Settle the contested left-recursion tail loops flagged during
     // elimination, now that FIRST sets can say whether the competition
@@ -983,6 +1021,8 @@ pub fn emit_grammar_spec(
         rule_spec: IndexMap::new(),
         literal_heads,
         class_heads,
+        budget,
+        pre: Cell::new(0),
     };
 
     let grammar_ref: &Grammar = emitter.grammar;
@@ -992,8 +1032,12 @@ pub fn emit_grammar_spec(
         if origin_of(prod) != prod.name {
             emitter.record_prov(&prod.name, origin_of(prod));
         }
+        // A refusal names the rule the author wrote.
+        emitter
+            .budget
+            .begin_rule(origin_of(prod), prod.sp, &STEP_ALTERNATES);
         if prod.probe_helper.is_some() {
-            emitter.emit_probe_helper(prod);
+            emitter.emit_probe_helper(prod)?;
             continue;
         }
         if prod.probe_dispatch.is_some() {
@@ -1029,13 +1073,15 @@ pub fn emit_grammar_spec(
     close.set("s", "#ZZ");
     emitter.refs.bubble(&mut close);
     close.set("g", sync_g(&tag, "end"));
-    emitter.rule_spec.insert(
-        start_wrapper.clone(),
-        Some(RuleSpec {
+    emitter.budget.begin_rule(&start, None, &STEP_ALTERNATES);
+    emitter.commit_rule(
+        &start_wrapper,
+        RuleSpec {
             open: vec![open],
             close: Some(vec![close]),
-        }),
-    );
+        },
+        0,
+    )?;
 
     let mut options: Map<String, Value> = Map::new();
     let mut fixed_map = Map::new();
@@ -1066,6 +1112,7 @@ pub fn emit_grammar_spec(
         refs,
         prov,
         mut rule_spec,
+        budget,
         ..
     } = emitter;
 
@@ -1098,8 +1145,15 @@ pub fn emit_grammar_spec(
     if clear_all {
         spec.clear = true;
     }
+    // Each name writes two entries, a rule and a fixed token, and each is
+    // charged before it is written (`MAX_EMIT_UNITS`).
+    if !remove_names.is_empty() {
+        budget.begin(Subject::Removals(remove_names.len()), None, &STEP_REMOVE);
+    }
     for name in &remove_names {
+        budget.charge(1)?;
         rule_spec.insert(name.clone(), None);
+        budget.charge(1)?;
         if let Some(Value::Object(fixed)) = spec.options.get_mut("fixed") {
             if let Some(Value::Object(token)) = fixed.get_mut("token") {
                 token.insert(format!("#{name}"), Value::Null);
@@ -1232,6 +1286,9 @@ fn emit_class_token(
     set_ranges: &mut IndexMap<String, Vec<CharRange>>,
     match_tokens: &mut IndexMap<String, MatchToken>,
     used_names: &mut IndexSet<String>,
+    // Where the class was written, for a refusal.
+    sp: Option<SrcSpan>,
+    budget: &EmitBudget,
 ) -> Result<(), EmitError> {
     // A class fires at ANY lookahead position, not only at the slots the
     // current rule's collated token column names, which is what makes
@@ -1262,6 +1319,8 @@ fn emit_class_token(
     let code_points = flags.contains(['u', 'v']);
     let mine = classes.coverage[key].clone();
     let mut members: Vec<String> = Vec::new();
+    // Each member is charged as it is listed (`MAX_EMIT_UNITS`).
+    budget.begin(Subject::Class(pattern.to_string()), sp, &STEP_TOKEN_SET);
     let atoms = classes.atoms.clone();
     for span in atoms {
         if !mine.iter().any(|&(a, b)| a <= span.0 && span.1 <= b) {
@@ -1284,6 +1343,7 @@ fn emit_class_token(
                 atom
             }
         };
+        budget.charge(1)?;
         members.push(atom);
     }
 
@@ -1457,6 +1517,32 @@ impl Emitter<'_> {
         }
     }
 
+    /// Charge an alternate of the rule `emit_production` is building as it
+    /// is made (`MAX_EMIT_UNITS`), adding it to what that rule's commit
+    /// will count as charged already.
+    fn made(&self, o: AltSpec) -> Result<AltSpec, EmitError> {
+        let n = alt_units(&o);
+        self.budget.charge(n)?;
+        self.pre.set(self.pre.get() + n);
+        Ok(o)
+    }
+
+    /// Write a rule into the compiled grammar, charging what it holds
+    /// beyond the `pre` units already charged for its alternates as they
+    /// were made.
+    fn commit_rule(&mut self, name: &str, rs: RuleSpec, pre: usize) -> Result<(), EmitError> {
+        let units = rule_units(&rs);
+        assert!(
+            units >= pre,
+            "{}: internal — rule '{name}' holds {units} units, fewer than the {pre} \
+             charged for its alternates",
+            diag_name()
+        );
+        self.budget.charge(units - pre)?;
+        self.rule_spec.insert(name.to_string(), Some(rs));
+        Ok(())
+    }
+
     /// `{ g, s?, p?, n?, a, k? }`: the alternate for one segment.
     fn segment_to_alt(
         &mut self,
@@ -1522,7 +1608,7 @@ impl Emitter<'_> {
     /// A self-looping rule that matches any one of the vocab tokens and
     /// restarts; a final empty-alt fallback ensures the rule NEVER
     /// fails, the property the probe pattern relies on.
-    fn emit_probe_helper(&mut self, prod: &Production) {
+    fn emit_probe_helper(&mut self, prod: &Production) -> Result<(), EmitError> {
         let elems = &prod
             .probe_helper
             .as_ref()
@@ -1540,13 +1626,15 @@ impl Emitter<'_> {
         }
         // Empty fallback: pops without consuming anything. Must be last.
         opens.push(AltSpec::with_tag(&self.tag));
-        self.rule_spec.insert(
-            prod.name.clone(),
-            Some(RuleSpec {
+        // Charged with the list it is made from (`rewrite_probe_dispatches`).
+        self.commit_rule(
+            &prod.name,
+            RuleSpec {
                 open: opens,
                 close: None,
-            }),
-        );
+            },
+            probe_rule_units(elems.len()),
+        )
     }
 
     /// The three-phase retry pattern: mark and probe on phase 0, decide
@@ -1592,14 +1680,14 @@ impl Emitter<'_> {
             close0.set("a", "@probeDecide$");
             close0.set("r", prod.name.as_str());
             close0.set("g", tag.as_str());
-            self.rule_spec.insert(
-                prod.name.clone(),
-                Some(RuleSpec {
+            return self.commit_rule(
+                &prod.name,
+                RuleSpec {
                     open: vec![open0, open1, open2],
                     close: Some(vec![close0, bubble]),
-                }),
+                },
+                0,
             );
-            return Ok(());
         }
 
         let init_mark = self.refs.register(RefAction::ProbeInit);
@@ -1632,20 +1720,20 @@ impl Emitter<'_> {
         close0.set("a", decide);
         close0.set("r", prod.name.as_str());
         close0.set("g", tag.as_str());
-        self.rule_spec.insert(
-            prod.name.clone(),
-            Some(RuleSpec {
+        self.commit_rule(
+            &prod.name,
+            RuleSpec {
                 open: vec![open0, open1, open2],
                 close: Some(vec![close0, bubble]),
-            }),
-        );
-        Ok(())
+            },
+            0,
+        )
     }
 
     /// A production marked by the tail-repeat rewrite: the same shape a
     /// hand-written tabnas grammar uses for `X = a [ b X ]`. Every
     /// iteration folds itself into the parent.
-    fn emit_tail_repeat(&mut self, prod: &Production) {
+    fn emit_tail_repeat(&mut self, prod: &Production) -> Result<(), EmitError> {
         let prod_kind = prod.node_kind;
         let prefix_alt = &prod.alts[0];
         let sep = &prod.tail_repeat.as_ref().expect("tail repeat").sep;
@@ -1690,13 +1778,14 @@ impl Emitter<'_> {
             end.m = Some("_".into());
         }
 
-        self.rule_spec.insert(
-            prod.name.clone(),
-            Some(RuleSpec {
+        self.commit_rule(
+            &prod.name,
+            RuleSpec {
                 open: vec![open],
                 close: Some(vec![repeat, end]),
-            }),
-        );
+            },
+            0,
+        )
     }
 
     /// FOLLOW₂ exit guards for a CONTESTED repetition, one whose repeated
@@ -1704,15 +1793,21 @@ impl Emitter<'_> {
     /// 2-token guard writes the decision down: exit exactly when the
     /// follow token is followed by something only the exit path can
     /// accept.
-    fn pair_exit_guards(&self, prod: &Production, base: &AltSpec) -> Vec<AltSpec> {
+    ///
+    /// Each guard is charged as it is made (`MAX_EMIT_UNITS`).
+    fn pair_exit_guards(
+        &self,
+        prod: &Production,
+        base: &AltSpec,
+    ) -> Result<Vec<AltSpec>, EmitError> {
         if !prod.repeat_helper {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let Some(pairs) = self.follow_pairs.get(&prod.name) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         if pairs.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let empty = IndexSet::new();
         let cont_first = self.first_sets.get(&prod.name).unwrap_or(&empty);
@@ -1736,16 +1831,17 @@ impl Emitter<'_> {
                 if !seen.insert(s.clone()) {
                     continue;
                 }
-                out.push(peek_copy(base, s, 2));
+                out.push(self.made(peek_copy(base, s, 2))?);
             }
         }
-        out
+        Ok(out)
     }
 
     /// The 2-token guards for one literal-headed dispatch entry: the
     /// keyword plus a token only the keyword alternative can follow it
     /// with. `None` when no guard can be justified, and then no
-    /// reordering happens either.
+    /// reordering happens either. The paths it enumerates are held while
+    /// it runs (`MAX_EMIT_UNITS`), and each guard is charged as it is made.
     fn synth_keyword_guards(
         &self,
         prod: &Production,
@@ -1753,7 +1849,9 @@ impl Emitter<'_> {
         alt: &[Rc<Element>],
         f: &str,
         consumed: i64,
-    ) -> Option<Vec<AltSpec>> {
+    ) -> Result<Option<Vec<AltSpec>>, EmitError> {
+        // The paths are held until they have been read (`MAX_EMIT_UNITS`).
+        let base = self.budget.held();
         let paths = alt_prefixes_raw(
             alt,
             self.grammar,
@@ -1762,34 +1860,46 @@ impl Emitter<'_> {
             &IndexSet::new(),
             None,
             Some(&self.contest.class_sets),
-        );
+            &self.budget,
+        )?;
         let mut seconds: IndexSet<String> = IndexSet::new();
+        let mut known = true;
         for p in &paths {
-            if p.tokens.first().map(String::as_str) != Some(f) {
+            if p.tokens.first().map(|t| &**t) != Some(f) {
                 continue;
             }
             if p.tokens.len() >= 2 {
-                seconds.insert(p.tokens[1].clone());
+                seconds.insert(p.tokens[1].to_string());
                 continue;
             }
             // The literal can end the alternative: the second token is
             // whatever may follow the production. An unknown FOLLOW means
             // no guard.
-            let fol = self.follow_sets.get(&prod.name)?;
-            if fol.is_empty() {
-                return None;
+            match self.follow_sets.get(&prod.name) {
+                Some(fol) if !fol.is_empty() => seconds.extend(fol.iter().cloned()),
+                _ => {
+                    known = false;
+                    break;
+                }
             }
-            seconds.extend(fol.iter().cloned());
+        }
+        drop(paths);
+        self.budget.restore(base);
+        if !known {
+            return Ok(None);
         }
         if seconds.is_empty() || seconds.len() > 16 {
-            return None;
+            return Ok(None);
         }
-        Some(
-            seconds
-                .iter()
-                .map(|u| peek_copy(o, format!("{f} {u}"), (2 - consumed).max(0) as usize))
-                .collect(),
-        )
+        let mut guards = Vec::with_capacity(seconds.len());
+        for u in &seconds {
+            guards.push(self.made(peek_copy(
+                o,
+                format!("{f} {u}"),
+                (2 - consumed).max(0) as usize,
+            ))?);
+        }
+        Ok(Some(guards))
     }
 
     /// Keyword-shadow reordering. Every literal-headed dispatch entry
@@ -1797,7 +1907,11 @@ impl Emitter<'_> {
     /// of the first contesting class entry, while its 1-token original
     /// drops behind the class entries so it can no longer steal; entries
     /// that already carry multi-token prefixes simply move ahead.
-    fn reorder_keyword_shadow(&self, prod: &Production, entries: &[Entry]) -> Vec<Placed> {
+    fn reorder_keyword_shadow(
+        &self,
+        prod: &Production,
+        entries: &[Entry],
+    ) -> Result<Vec<Placed>, EmitError> {
         // A token class's set is a literal head here (`literal_heads`):
         // its members are literals and engine tokens, never a character
         // class (`token_class_names`), and with the option off those
@@ -1835,7 +1949,7 @@ impl Emitter<'_> {
             class_ranges.push(r);
         }
         if class_idx.is_empty() {
-            return entries
+            return Ok(entries
                 .iter()
                 .enumerate()
                 .map(|(i, e)| Placed {
@@ -1843,7 +1957,7 @@ impl Emitter<'_> {
                     rank: i as f64,
                     seq: i,
                 })
-                .collect();
+                .collect());
         }
 
         let mut placed: Vec<Placed> = Vec::new();
@@ -1854,8 +1968,11 @@ impl Emitter<'_> {
         };
 
         // Which class entries a given literal head contests, decided once
-        // per distinct head token.
+        // per distinct head token. It keeps no more answers than the memo
+        // limit (`MAX_MEMO_ENTRIES`), and a head past it is answered as it
+        // comes.
         let mut contests_by_head: IndexMap<String, Vec<bool>> = IndexMap::new();
+        let mut kept = 0usize;
 
         for (i, e) in entries.iter().enumerate() {
             let f = heads[i].as_deref();
@@ -1869,14 +1986,23 @@ impl Emitter<'_> {
             let mut last_c: Option<usize> = None;
             if let (Some(fr), Some(_)) = (&fr, &e.alt) {
                 let f = f.expect("a literal head is present");
-                let hits = contests_by_head.entry(f.to_string()).or_insert_with(|| {
-                    class_ranges
-                        .iter()
-                        .map(|cr| char_ranges_overlap(fr, cr))
-                        .collect()
-                });
+                if !contests_by_head.contains_key(f) && kept + class_idx.len() <= memo_limit() {
+                    contests_by_head.insert(
+                        f.to_string(),
+                        class_ranges
+                            .iter()
+                            .map(|cr| char_ranges_overlap(fr, cr))
+                            .collect(),
+                    );
+                    kept += class_idx.len();
+                }
+                let hits = contests_by_head.get(f);
                 for (k, c) in class_idx.iter().enumerate() {
-                    if !hits[k] {
+                    let hit = match hits {
+                        Some(hits) => hits[k],
+                        None => char_ranges_overlap(fr, &class_ranges[k]),
+                    };
+                    if !hit {
                         continue;
                     }
                     // Same descent target either way: order is moot.
@@ -1912,7 +2038,7 @@ impl Emitter<'_> {
                     e.alt.as_deref().expect("checked above"),
                     f.expect("checked above"),
                     consumed,
-                )
+                )?
             } else {
                 None
             };
@@ -1932,7 +2058,7 @@ impl Emitter<'_> {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.seq.cmp(&b.seq))
         });
-        placed
+        Ok(placed)
     }
 
     /// Specificity ordering among contested class heads: among entries
@@ -2125,13 +2251,16 @@ impl Emitter<'_> {
         // node.
         let array_elem = self.array_helpers.contains(&prod.name);
         let tag = self.tag.clone();
+        // Every alternate this rule's own open list will hold is charged
+        // as it is made (`made`); the rule's commit charges the rest.
+        self.pre.set(0);
 
         for alt in &prod.alts {
             self.validate_refs(alt, &prod.name)?;
         }
 
         if prod.tail_repeat.is_some() {
-            self.emit_tail_repeat(prod);
+            self.emit_tail_repeat(prod)?;
             return Ok(());
         }
 
@@ -2200,6 +2329,9 @@ impl Emitter<'_> {
                         // deduped; bail to the 1-token peek if the fan-out
                         // is degenerate).
                         let mut paths: Option<Vec<Vec<String>>> = None;
+                        // What `alt_prefixes` returns stays held until the
+                        // entries made from it are written (`MAX_EMIT_UNITS`).
+                        let peek_base = self.budget.held();
                         if self.alt_head_contested(idx, &ordered)
                             || self.contested_by_follow(prod, alt)
                         {
@@ -2209,7 +2341,8 @@ impl Emitter<'_> {
                                 &self.tokens,
                                 LOOKAHEAD_K,
                                 Some(&self.contest.class_sets),
-                            )
+                                &self.budget,
+                            )?
                             .into_iter()
                             .filter(|p| !p.is_empty())
                             .collect();
@@ -2220,7 +2353,17 @@ impl Emitter<'_> {
                         // `{ s, b, p, n?, a, k?, g }`, with the same
                         // suffix-debt bookkeeping `segment_to_alt` carries.
                         let debt = seg.debt.as_ref().map(debt_to_n);
-                        let mut push_entry = |s: String, b: usize| {
+                        let peeks: Vec<(String, usize)> = match paths {
+                            Some(paths) => paths
+                                .into_iter()
+                                .map(|p| {
+                                    let b = p.len();
+                                    (p.join(" "), b)
+                                })
+                                .collect(),
+                            None => first_tokens.iter().map(|tok| (tok.clone(), 1)).collect(),
+                        };
+                        for (s, b) in peeks {
                             let mut o = AltSpec::new();
                             o.set("s", s);
                             o.set("b", b);
@@ -2232,22 +2375,11 @@ impl Emitter<'_> {
                             o.set("g", tag.as_str());
                             o.m = mark.clone();
                             entries.push(Entry {
-                                o,
+                                o: self.made(o)?,
                                 alt: Some(alt.clone()),
                             });
-                        };
-                        match paths {
-                            Some(paths) => {
-                                for p in paths {
-                                    push_entry(p.join(" "), p.len());
-                                }
-                            }
-                            None => {
-                                for tok in &first_tokens {
-                                    push_entry(tok.clone(), 1);
-                                }
-                            }
                         }
+                        self.budget.restore(peek_base);
                         continue;
                     }
                 }
@@ -2293,7 +2425,7 @@ impl Emitter<'_> {
                         .unwrap_or_default();
                     for tok in fol {
                         entries.push(Entry {
-                            o: peek_copy(&o, tok, 1),
+                            o: self.made(peek_copy(&o, tok, 1))?,
                             alt: None,
                         });
                     }
@@ -2301,7 +2433,7 @@ impl Emitter<'_> {
                     // guards, at the FRONT so they outrank the continue
                     // alternatives.
                     let guards: Vec<Entry> = self
-                        .pair_exit_guards(prod, &o)
+                        .pair_exit_guards(prod, &o)?
                         .into_iter()
                         .map(|g| Entry { o: g, alt: None })
                         .collect();
@@ -2334,7 +2466,7 @@ impl Emitter<'_> {
                             let mut terms = seg.terms.clone();
                             terms.push(tok);
                             entries.push(Entry {
-                                o: peek_copy(&o, terms.join(" "), 1),
+                                o: self.made(peek_copy(&o, terms.join(" "), 1))?,
                                 alt: Some(alt.clone()),
                             });
                         }
@@ -2343,7 +2475,7 @@ impl Emitter<'_> {
                 }
 
                 entries.push(Entry {
-                    o,
+                    o: self.made(o)?,
                     alt: if alt.is_empty() {
                         None
                     } else {
@@ -2354,7 +2486,7 @@ impl Emitter<'_> {
 
             Self::apply_debt_guard(prod, &mut entries);
             self.specificity_permute(&mut entries);
-            let placed = self.reorder_keyword_shadow(prod, &entries);
+            let placed = self.reorder_keyword_shadow(prod, &entries)?;
 
             // A loop has no close: the entry goes first, and the
             // continue alternative re-enters the loop itself. Inside an
@@ -2372,14 +2504,15 @@ impl Emitter<'_> {
                     opens.push(o);
                 }
                 opens.insert(0, self.loop_entry(prod, array_elem));
-                self.rule_spec.insert(
-                    prod.name.clone(),
-                    Some(RuleSpec {
+                let pre = self.pre.get();
+                return self.commit_rule(
+                    &prod.name,
+                    RuleSpec {
                         open: opens,
                         close: None,
-                    }),
+                    },
+                    pre,
                 );
-                return Ok(());
             }
 
             // If any alt has a push, the close state must capture the
@@ -2418,9 +2551,8 @@ impl Emitter<'_> {
                     }
                 }
             }
-            self.rule_spec
-                .insert(prod.name.clone(), Some(RuleSpec { open: opens, close }));
-            return Ok(());
+            let pre = self.pre.get();
+            return self.commit_rule(&prod.name, RuleSpec { open: opens, close }, pre);
         }
 
         if prod.alts.len() == 1 {
@@ -2492,6 +2624,9 @@ impl Emitter<'_> {
                 }
             }
         }
+        // What `dispatch_prefixes` returns stays held until every entry made
+        // from it is written (`MAX_EMIT_UNITS`).
+        let dispatch_base = self.budget.held();
         let dispatch = {
             let contest = &self.contest;
             dispatch_prefixes(
@@ -2502,7 +2637,8 @@ impl Emitter<'_> {
                 &|a, b| contest.heads_contest(a, b),
                 &exit_paths,
                 &contest.class_sets,
-            )
+                &self.budget,
+            )?
         };
 
         for (i, alt) in prod.alts.iter().enumerate() {
@@ -2573,7 +2709,7 @@ impl Emitter<'_> {
             }
             let usable: Vec<Vec<String>> = dispatch[i].prefixes.clone();
             // `{ s, b, p, a, k?, g }`, or `{ s, b, r, g }` for a loop.
-            let mut push_entry = |s: String, b: usize| {
+            let entry = |s: String, b: usize| {
                 let mut o = AltSpec::new();
                 o.set("s", s);
                 o.set("b", b);
@@ -2581,14 +2717,14 @@ impl Emitter<'_> {
                 o.assign_from(&init_dispatch_fields);
                 o.set("g", tag.as_str());
                 o.m = mark.clone();
-                dispatch_entries.push(Entry {
-                    o,
-                    alt: Some(alt.clone()),
-                });
+                o
             };
             if !usable.is_empty() {
                 for p in usable {
-                    push_entry(p.join(" "), p.len());
+                    dispatch_entries.push(Entry {
+                        o: self.made(entry(p.join(" "), p.len()))?,
+                        alt: Some(alt.clone()),
+                    });
                 }
             } else {
                 let Some(first_tokens) =
@@ -2607,10 +2743,15 @@ impl Emitter<'_> {
                     ));
                 };
                 for tok in &first_tokens {
-                    push_entry(tok.clone(), 1);
+                    dispatch_entries.push(Entry {
+                        o: self.made(entry(tok.clone(), 1))?,
+                        alt: Some(alt.clone()),
+                    });
                 }
             }
         }
+        drop(dispatch);
+        self.budget.restore(dispatch_base);
 
         // Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
         // first, then one unguarded fallback that pushes the impl with
@@ -2629,14 +2770,20 @@ impl Emitter<'_> {
                 o.assign_from(fields);
                 o.set("g", tag.as_str());
                 o.m = mark.clone();
-                dispatch_entries.push(Entry { o, alt: None });
+                dispatch_entries.push(Entry {
+                    o: self.made(o)?,
+                    alt: None,
+                });
             }
             let mut o = AltSpec::new();
             o.set("p", impl_name.as_str());
             o.assign_from(fields);
             o.set("g", tag.as_str());
             o.m = mark.clone();
-            dispatch_entries.push(Entry { o, alt: None });
+            dispatch_entries.push(Entry {
+                o: self.made(o)?,
+                alt: None,
+            });
         }
 
         if empty_alt_seen {
@@ -2655,18 +2802,21 @@ impl Emitter<'_> {
             if prod.repeat_helper {
                 for tok in &fol {
                     dispatch_entries.push(Entry {
-                        o: peek_copy(&o, tok.clone(), 1),
+                        o: self.made(peek_copy(&o, tok.clone(), 1))?,
                         alt: None,
                     });
                 }
                 let guards: Vec<Entry> = self
-                    .pair_exit_guards(prod, &o)
+                    .pair_exit_guards(prod, &o)?
                     .into_iter()
                     .map(|g| Entry { o: g, alt: None })
                     .collect();
                 dispatch_entries.splice(0..0, guards);
             }
-            dispatch_entries.push(Entry { o, alt: None });
+            dispatch_entries.push(Entry {
+                o: self.made(o)?,
+                alt: None,
+            });
         }
 
         // The impl rule this dispatches to inherits the array and fills
@@ -2679,7 +2829,7 @@ impl Emitter<'_> {
         Self::apply_debt_guard(prod, &mut dispatch_entries);
         self.specificity_permute(&mut dispatch_entries);
         let mut opens: Vec<AltSpec> = self
-            .reorder_keyword_shadow(prod, &dispatch_entries)
+            .reorder_keyword_shadow(prod, &dispatch_entries)?
             .into_iter()
             .map(|p| p.o)
             .collect();
@@ -2688,14 +2838,15 @@ impl Emitter<'_> {
         // no close, and registers no capture for one.
         if loop_item.is_some() {
             opens.insert(0, self.loop_entry(prod, array_elem));
-            self.rule_spec.insert(
-                prod.name.clone(),
-                Some(RuleSpec {
+            let pre = self.pre.get();
+            return self.commit_rule(
+                &prod.name,
+                RuleSpec {
                     open: opens,
                     close: None,
-                }),
+                },
+                pre,
             );
-            return Ok(());
         }
         // Merge the chosen impl's result up into the dispatcher's node,
         // tagged with the user rule name.
@@ -2706,14 +2857,15 @@ impl Emitter<'_> {
         if array_elem {
             use_value_actions(&mut disp_close, &[], None);
         }
-        self.rule_spec.insert(
-            prod.name.clone(),
-            Some(RuleSpec {
+        let pre = self.pre.get();
+        self.commit_rule(
+            &prod.name,
+            RuleSpec {
                 open: opens,
                 close: Some(vec![disp_close]),
-            }),
-        );
-        Ok(())
+            },
+            pre,
+        )
     }
 
     /// A repeat loop's entry, its first open alternative:
@@ -2805,24 +2957,25 @@ impl Emitter<'_> {
             };
             push_element(&mut back, elem, &self.value_rules);
         }
-        self.rule_spec.insert(
-            name.to_string(),
-            Some(RuleSpec {
+        self.commit_rule(
+            name,
+            RuleSpec {
                 open: vec![take],
                 close: Some(vec![back]),
-            }),
-        );
+            },
+            0,
+        )?;
         let mut again = AltSpec::new();
         again.set("r", lp.name.as_str());
         again.set("g", tag.as_str());
-        self.rule_spec.insert(
-            step,
-            Some(RuleSpec {
+        self.commit_rule(
+            &step,
+            RuleSpec {
                 open: vec![again],
                 close: None,
-            }),
-        );
-        Ok(())
+            },
+            0,
+        )
     }
 
     /// Emit a (possibly single-step) chain of rules for one alt under the
@@ -3052,13 +3205,14 @@ impl Emitter<'_> {
                     }
                 }
             }
-            self.rule_spec.insert(
-                name,
-                Some(RuleSpec {
+            self.commit_rule(
+                &name,
+                RuleSpec {
                     open: vec![head_alt],
                     close,
-                }),
-            );
+                },
+                0,
+            )?;
         }
         Ok(())
     }
@@ -3135,7 +3289,7 @@ mod tests {
         let out = eliminate_left_recursion_keeping(&out, &IndexSet::new())
             .expect("left recursion")
             .into_grammar();
-        let out = rewrite_probe_dispatches(&out).expect("probe");
+        let out = rewrite_probe_dispatches(&out, &EmitBudget::new()).expect("probe");
         let out = left_factor(&out).expect("factor");
         let out = rewrite_tail_repeats(out, start);
         let out = desugar(&out);
@@ -3171,5 +3325,71 @@ mod tests {
         for p in &g.productions {
             assert_eq!(p.sp, Some(want[p.name.as_str()]));
         }
+    }
+
+    // The memos of token pairs keep no more than `MAX_MEMO_ENTRIES`, and
+    // past it a pair is answered without being kept, which changes no
+    // answer: each spec below is the same with the limit lifted and with a
+    // memo that keeps nothing. Mirrors ts/test/emit-limit.test.js.
+    fn pure_text(g: &ir::Grammar) -> String {
+        let opts = ConvertOptions {
+            builtins: true,
+            ..ConvertOptions::tag("x")
+        };
+        let spec = emit_grammar_spec(g, &opts).expect("the grammar compiles");
+        let pure = crate::spec::to_pure_spec(&spec).expect("a pure spec");
+        crate::spec::to_jsonic(
+            &pure,
+            crate::spec::JsonicOptions {
+                strict: true,
+                indent: None,
+            },
+        )
+    }
+
+    fn same_under_any_memo_limit(g: &ir::Grammar) {
+        let kept = pure_text(g);
+        let was = crate::budget::set_memo_limit(usize::MAX);
+        let unlimited = pure_text(g);
+        crate::budget::set_memo_limit(0);
+        let none = pure_text(g);
+        crate::budget::set_memo_limit(was);
+        assert!(unlimited == kept, "the spec differs with no limit");
+        assert!(none == kept, "the spec differs keeping nothing");
+    }
+
+    fn sens(lit: &str) -> Element {
+        Element::term_cs(lit, true)
+    }
+
+    #[test]
+    fn the_memo_limit_changes_no_output_when_a_rule_asks_more_pairs_than_it_keeps() {
+        // A rule of 400 two-segment alternatives with distinct heads goes to
+        // the dispatcher, whose contested-head scan asks 79,800 pairs, past
+        // the 65,536 kept.
+        let a = ir::Production::new(
+            "A",
+            (0..400)
+                .map(|i| vec![sens(&format!("k{i:06}")), reference("B"), sens("e")])
+                .collect(),
+        );
+        let b = ir::Production::new("B", vec![vec![sens("b")], vec![sens("c")]]);
+        same_under_any_memo_limit(&ir::Grammar::new(vec![a, b]));
+    }
+
+    #[test]
+    fn the_memo_limit_changes_no_output_when_the_keyword_shadow_ordering_passes_it() {
+        // 300 literal heads against 300 class heads, every pair overlapping:
+        // 90,000 answers.
+        let mut alts: Vec<ir::Sequence> = (0..300)
+            .map(|i| vec![sens(&format!("a{i}")), reference("B")])
+            .collect();
+        alts.extend((0..300u32).map(|i| {
+            let pattern = format!("[a-{}]", char::from_u32(0x101 + i).expect("a code point"));
+            vec![Element::regex(pattern, "u"), reference("B")]
+        }));
+        let a = ir::Production::new("A", alts);
+        let b = ir::Production::new("B", vec![vec![sens("b")]]);
+        same_under_any_memo_limit(&ir::Grammar::new(vec![a, b]));
     }
 }

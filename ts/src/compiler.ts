@@ -2697,7 +2697,7 @@ function mapsOverlap<K, V>(a: Map<K, V>, b: Map<K, V>): boolean {
 // where the pattern is easy to recognise. Runs BEFORE token
 // allocation; probe metadata stores AbnfElements, and the emitter
 // resolves them to token names at emit time.
-function rewriteProbeDispatches(grammar: Grammar): Grammar {
+function rewriteProbeDispatches(grammar: Grammar, budget: EmitBudget): Grammar {
   const reports: AmbiguityReport[] = grammar.ambiguities ?? []
   const extra: Production[] = []
   const used = new Set<string>(grammar.productions.map((p) => p.name))
@@ -2740,12 +2740,22 @@ function rewriteProbeDispatches(grammar: Grammar): Grammar {
         // Joint vocab: union of everything the probe might need to
         // consume. Includes the disambiguator, which we then remove so
         // the probe stops on it and the peek works.
-        const vocab = new Map<string, Element>([...xVocab, ...yVocab])
         const d = info.disambiguator
         const dKey = d.kind === 'term' ? termKey(d)
           : d.kind === 'regex' ? regexKey(d)
           : d.kind === 'token' ? d.name
           : null
+        // The list is charged before it is made (MAX_EMIT_UNITS), with the
+        // rule it becomes: an entry for each token either side reaches,
+        // less the disambiguator, and that rule's alternates, three units
+        // for each token (probeRuleUnits).
+        let listed = xVocab.size
+        for (const k of yVocab.keys()) if (!xVocab.has(k)) listed++
+        if (dKey && (xVocab.has(dKey) || yVocab.has(dKey))) listed--
+        budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.sp,
+          EMIT_STEPS.probe)
+        budget.charge(listed + probeRuleUnits(listed))
+        const vocab = new Map<string, Element>([...xVocab, ...yVocab])
         if (dKey) vocab.delete(dKey)
 
         const dispatchName = freshName(`${prod.name}$pd${i}`)
@@ -2860,6 +2870,7 @@ function emitProbeHelper(
   ruleSpec: NonNullable<GrammarSpec['rule']>,
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
+  budget: EmitBudget,
 ): void {
   const elems = prod.probeHelper!.vocabElements
   const opens: any[] = []
@@ -2873,7 +2884,17 @@ function emitProbeHelper(
   }
   // Empty fallback — pops without consuming anything. Must be last.
   opens.push({ g: tag })
-  ruleSpec[prod.name] = { open: opens }
+  // Charged with the list it is made from (rewriteProbeDispatches).
+  commitRule(ruleSpec, prod.name, { open: opens }, budget,
+    probeRuleUnits(elems.length))
+}
+
+
+// The units of the rule a probe helper listing `n` tokens becomes
+// (MAX_EMIT_UNITS): 1 for the rule, an alternate of 3 for each token, and
+// the fallback alternate of 1.
+function probeRuleUnits(n: number): number {
+  return 3 * n + 2
 }
 
 
@@ -2888,6 +2909,7 @@ function emitProbeDispatch(
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
   useBuiltins: boolean,
+  budget: EmitBudget,
 ): void {
   const { probeRule, disambiguator, withBranch, noBranch } =
     prod.probeDispatch!
@@ -2916,7 +2938,7 @@ function emitProbeDispatch(
     // Function-free dispatcher: control logic is engine `$`-builtins,
     // the disambiguator token rides in `k` config. See
     // docs/design/alt-action-refs.md §6.3.
-    ruleSpec[prod.name] = {
+    commitRule(ruleSpec, prod.name, {
       open: [
         { c: '@probePhase0$', a: '@probeInit$', p: probeRule,
           k: { pd_d: disambiguatorToken }, g: tag } as any,
@@ -2927,7 +2949,7 @@ function emitProbeDispatch(
         { c: '@probePhase0$', a: '@probeDecide$', r: prod.name, g: tag } as any,
         { ...bubbleFields, g: tag },
       ],
-    }
+    }, budget)
     return
   }
 
@@ -2945,7 +2967,7 @@ function emitProbeDispatch(
     r.k.pd_phase = matched ? 1 : 2
   })
 
-  ruleSpec[prod.name] = {
+  commitRule(ruleSpec, prod.name, {
     open: [
       // Phase 0 — first pass: mark and probe.
       {
@@ -2978,7 +3000,7 @@ function emitProbeDispatch(
       // Phase 1 / 2 close: lift the committed child's node up.
       { ...bubbleFields, g: tag },
     ],
-  }
+  }, budget)
 }
 
 
@@ -4460,6 +4482,268 @@ function tokensIn(alt: Sequence, out: Set<string>): void {
 }
 
 
+// The emit limit: what compiling one grammar may write, counted in units.
+//
+// The compiled grammar holds rules, and each rule holds alternates. A rule
+// counts 1. An alternate counts 1, plus 1 for each token its `s` names, plus
+// 1 for the rule it names in `p` or `r`. A token set counts 1 for each of
+// its members, and each name a grammar removes (`<remove>`) counts 2, for
+// the rule and the fixed token it writes in their place. Three tables the
+// emitter builds on the way count an entry a unit as well: the tokens each
+// probe helper lists (rewriteProbeDispatches), the tokens in each rule's
+// FIRST and FOLLOW sets, and the pairs of tokens in each rule's FOLLOW₂ set.
+// A grammar of R rules and A alternates that name N tokens and rules in all,
+// with M token-set members, D removed names, P probe entries, F FIRST and L
+// FOLLOW entries and L₂ FOLLOW₂ pairs, writes
+//
+//   written = R + A + N + M + 2·D + P + F + L + L₂
+//
+// units. Each one is charged at the point it is generated, before the
+// allocation that would hold it, so a grammar that would pass the limit is
+// refused before the step that would pass it allocates. A probe helper's
+// rule is charged with its list, since the list fixes it: an entry and an
+// alternate of 3 for each token, and 2 for the rule and its fallback.
+//
+// One thing more is counted while it lasts: the token paths a choice
+// enumerates to tell its alternatives apart (altPrefixesRaw). While one
+// alternative's enumeration runs, every path it makes counts 1 plus 1 for
+// each token it holds, at every level of the enumeration; once it returns,
+// only the paths it returned stay counted, and once the choice is decided,
+// only the prefixes it dispatches on, until they have been written as its
+// alternates. Written and held together never pass the limit:
+//
+//   written + held ≤ MAX_EMIT_UNITS
+//
+// Without the bound, what the emitter writes grows faster than the grammar.
+// P optional prefixes over a vocabulary of V tokens write about 4·P·V units:
+// P = V = 1,000 turned a 400 KB grammar into a 45 MB spec. A choice whose
+// alternatives begin with runs of optional elements enumerates a polynomial
+// of degree up to four in their number: 30 alternatives of up to 30 options,
+// a 37 KB grammar, took 11 to 19 seconds and 0.6 to 1.3 GB in each runtime,
+// and 40 of 40 did not finish in a minute. FOLLOW₂ holds up to a pair of
+// tokens per rule for every two tokens of the grammar, and C character
+// classes nested inside one another write C(C + 1)/2 token-set members.
+//
+// Measured over the 1,171 grammars the abnf, ebnf and gbnf suites, this
+// repository's own and the fleet's grammars (proto, semver and aless's
+// fixtures) compile, with tokenClasses on and off, no grammar writes more
+// than 329,213 units (proto's, without tokenClasses), ten times under
+// the limit, and none holds more than 504,759 written and held at once
+// (RFC 4291's IPv6address, in the IPv6, URI and jid grammars), seven times
+// under it, but for two that the limit refuses: email.abnf and dhall.abnf,
+// from abnf's conformance corpus, neither of which finished before within
+// the 256 MB and 60 seconds abnf gives a grammar. An optimised build of each
+// runtime refuses 1,000 probes over 1,000 tokens in 0.2 to 0.45 seconds,
+// and 40 alternatives of up to 40 options in 0.45 to 0.8, where they were
+// measured.
+//
+// The limit bounds what is written and held, not the time spent deciding
+// under it. In an optimised build, refusing email.abnf takes 6 to 9 seconds
+// and dhall.abnf 17 to 38, most of it in the choices made before the one
+// refused: the passes of computeFollowSets for email, and for dhall the
+// depth scan of dispatchPrefixes, which compares every contested path with
+// every rival's.
+const MAX_EMIT_UNITS = 3500000
+
+
+// What a step of the emitter was doing, for a refusal's wording: the clause
+// after "while", and what the author can do about it.
+type EmitStep = { doing: string; advice: string }
+
+const EMIT_STEPS = {
+  probe: {
+    doing: 'writing the probe for one of its optional prefixes',
+    advice: 'Write that optional prefix and what follows it as two ' +
+      'alternatives, one with the prefix and one without.',
+  },
+  tokenSet: {
+    doing: 'listing the members of its token set',
+    advice: 'Write fewer character classes that overlap it.',
+  },
+  tokenClass: {
+    doing: 'listing the members of its token class',
+    advice: 'Give it fewer alternatives.',
+  },
+  first: {
+    doing: 'collecting the tokens it can begin with',
+    advice: 'Reduce the tokens it can begin with.',
+  },
+  follow: {
+    doing: 'collecting the tokens that can follow it',
+    advice: 'Reduce the tokens that can follow it.',
+  },
+  pairs: {
+    doing: 'collecting the pairs of tokens that can follow it',
+    advice: 'Reduce the tokens that can follow it.',
+  },
+  alternates: {
+    doing: 'writing its alternates',
+    advice: 'Factor what its alternatives share into rules of their own.',
+  },
+  lookahead: {
+    doing: 'enumerating the token sequences that tell its alternatives apart',
+    advice: 'Give its alternatives first tokens that tell them apart, or ' +
+      'factor what they begin with into a rule of its own.',
+  },
+  remove: {
+    doing: 'writing the rules and tokens it removes',
+    advice: 'Remove fewer names.',
+  },
+} as const
+
+
+// What one compile has written, and what the decision under way holds,
+// against MAX_EMIT_UNITS. A refusal names the step under way, and counts
+// from what had been written when that step began.
+class EmitBudget {
+  written = 0
+  held = 0
+  private subject = ''
+  private rule?: string
+  private sp?: SrcSpan
+  private step: EmitStep = EMIT_STEPS.alternates
+  private start = 0
+
+  // Begin a step. `subject` is what a refusal names (`rule 'x'`), `rule`
+  // and `sp` what it carries.
+  begin(subject: string, rule: string | undefined, sp: SrcSpan | undefined,
+    step: EmitStep): void {
+    this.subject = subject
+    this.rule = rule
+    this.sp = sp
+    this.step = step
+    this.start = this.written
+  }
+
+  // Charge `n` units the compiled grammar will hold, before they are made.
+  charge(n: number): void {
+    if (n > MAX_EMIT_UNITS - this.written - this.held) this.refuse(false)
+    this.written += n
+  }
+
+  // Hold `n` units of the decision under way, before they are made.
+  hold(n: number): void {
+    if (n > MAX_EMIT_UNITS - this.written - this.held) this.refuse(true)
+    this.held += n
+  }
+
+  // One alternative's enumeration has returned `paths`, having begun
+  // with `base` held: from now on only the paths it returned are held.
+  // Each of them was held as it was made, so this never holds more.
+  settle(base: number, paths: PrefixPath[]): void {
+    let n = 0
+    for (const p of paths) n += 1 + p.tokens.length
+    this.held = base + n
+  }
+
+  // A decision that began with `base` held has made what it returns, `n`
+  // units: from now on that alone stays held, until its caller has used it.
+  keep(base: number, n: number): void {
+    this.held = base + n
+  }
+
+  // What a decision returned has been used: the budget holds again what it
+  // held before the decision began.
+  restore(base: number): void {
+    this.held = base
+  }
+
+  private refuse(holding: boolean): never {
+    const step = holding ? EMIT_STEPS.lookahead : this.step
+    const room = MAX_EMIT_UNITS - this.start
+    throw new EmitError(
+      `${diagName()}: ${this.subject} exceeds the emit limit of ` +
+      `${MAX_EMIT_UNITS} units while ${step.doing}, which would ` +
+      (holding
+        ? `hold more than ${room} units on top of the ${this.start} already `
+        : `add more than ${room} units to the ${this.start} already `) +
+      `written. ${step.advice}`,
+      { rule: this.rule, sp: this.sp })
+  }
+}
+
+
+// What a refusal names for a rule.
+function ruleSubject(name: string): string {
+  return `rule '${name}'`
+}
+
+
+// The units an alternate holds (MAX_EMIT_UNITS): 1, 1 for each token its
+// `s` names, and 1 for the rule it names in `p` or `r`.
+function altUnits(o: any): number {
+  let n = 1
+  const s = o.s
+  if ('string' === typeof s && 0 < s.length) {
+    n++
+    for (let i = 0; i < s.length; i++) if (32 === s.charCodeAt(i)) n++
+  }
+  if (null != o.p) n++
+  if (null != o.r) n++
+  return n
+}
+
+
+// The units a rule holds: 1, and its alternates'.
+function ruleUnits(rs: any): number {
+  let n = 1
+  for (const o of rs.open ?? []) n += altUnits(o)
+  for (const o of rs.close ?? []) n += altUnits(o)
+  return n
+}
+
+
+// Charge an alternate the compiled grammar will hold, and return its units.
+function chargeAlt(budget: EmitBudget, o: any): number {
+  const n = altUnits(o)
+  budget.charge(n)
+  return n
+}
+
+
+// Write a rule into the compiled grammar, charging what it holds beyond the
+// `pre` units already charged for its alternates as they were made.
+function commitRule(
+  ruleSpec: NonNullable<GrammarSpec['rule']>,
+  name: string,
+  rs: any,
+  budget: EmitBudget,
+  pre = 0,
+): void {
+  const units = ruleUnits(rs)
+  if (units < pre) {
+    throw new Error(
+      `${diagName()}: internal — rule '${name}' holds ${units} units, ` +
+      `fewer than the ${pre} charged for its alternates`)
+  }
+  budget.charge(units - pre)
+  ruleSpec[name] = rs
+}
+
+
+// The most answers a memo of token pairs keeps: headsContest's and
+// tokensOverlap's, each over a whole compile, and the keyword-shadow
+// ordering's within one rule. A memo only saves asking again, so past the
+// limit a pair is answered and not kept, which changes no answer and so no
+// output. Without it, the contested-head scan of a rule with thousands of
+// alternatives asks every pair of their heads and keeps every answer: 4,000
+// alternatives with distinct heads kept eight million, a gigabyte in
+// TypeScript. Measured over the grammars MAX_EMIT_UNITS was measured over,
+// no grammar keeps more than 988.
+const MAX_MEMO_ENTRIES = 65536
+
+// The limit in force, MAX_MEMO_ENTRIES but for the tests, which lift it to
+// show that it changes no output.
+let memoLimit = MAX_MEMO_ENTRIES
+
+// Set the memo limit, returning the one it replaces. For the tests alone.
+function setMemoLimit(n: number): number {
+  const was = memoLimit
+  memoLimit = n
+  return was
+}
+
+
 function emitGrammarSpec(
   grammar: Grammar,
   opts?: ConvertOptions,
@@ -4479,6 +4763,9 @@ function emitGrammarSpec(
   // in the process, or the `'bnf'` default on the first.
   const tag = opts?.tag ?? 'bnf'
   _diagName = tag
+
+  // What this compile writes, against MAX_EMIT_UNITS.
+  const budget = new EmitBudget()
 
   // Before ANY rewrite: annotations describe the grammar the AUTHOR
   // wrote, and the passes below are what make that shape unrecoverable.
@@ -4530,7 +4817,7 @@ function emitGrammarSpec(
   // into probe-dispatch helpers; finally flatten any EBNF sugar
   // (`?`, `*`, `+`, grouping) into plain ABNF.
   grammar = eliminateLeftRecursionKeeping(grammar, classNames)
-  grammar = rewriteProbeDispatches(grammar)
+  grammar = rewriteProbeDispatches(grammar, budget)
   // Left factoring runs after the probe rewriter (so `[X D] Y`
   // patterns are recognised in their original alternatives) and
   // before tail-repeat detection and desugaring.
@@ -4624,7 +4911,7 @@ function emitGrammarSpec(
         // the literal.
         emitClassToken(
           el, key, classes, regexTokens, tokenSets, setRanges, matchTokens,
-          usedNames)
+          usedNames, budget)
       }
     }
   }
@@ -4695,12 +4982,17 @@ function emitGrammarSpec(
     const name = classSets.get(prod.name)
     if (null == name) continue
     const members: string[] = []
+    budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.sp,
+      EMIT_STEPS.tokenClass)
     for (const alt of prod.alts) {
       const el = alt[0]
       const tok = 'term' === el.kind
         ? literals.get(termKey(el)) as string
         : (el as { name: string }).name
-      if (!members.includes(tok)) members.push(tok)
+      if (!members.includes(tok)) {
+        budget.charge(1)
+        members.push(tok)
+      }
     }
     tokenSets[name.replace(/^#/, '')] = members
     classMembers.set(name, members)
@@ -4729,6 +5021,8 @@ function emitGrammarSpec(
     let out = false
     const ma = classMembers.get(a)
     const mb = classMembers.get(b)
+    // Kept only while the memo has room (MAX_MEMO_ENTRIES).
+    const keep = overlapCache.size < memoLimit
     if (null != ma || null != mb) {
       // A token class meets what any member meets, the same token
       // included; coverage alone would miss an engine token in it.
@@ -4747,16 +5041,18 @@ function emitGrammarSpec(
       const rb = tokenRangesOf(b)
       out = null != ra && null != rb && charRangesOverlap(ra, rb)
     }
-    overlapCache.set(key, out)
+    // A provisional answer that is not kept goes again.
+    if (keep) overlapCache.set(key, out)
+    else overlapCache.delete(key)
     return out
   }
 
   const { firstSets, nullable } = computeFirstSets(
-    grammar, literals, regexTokens, classSets)
+    grammar, literals, regexTokens, classSets, budget)
   const followSets = computeFollowSets(
-    grammar, literals, regexTokens, firstSets, nullable, start)
+    grammar, literals, regexTokens, firstSets, nullable, start, budget)
   const followPairs = computeFollowPairs(
-    grammar, literals, regexTokens, firstSets, nullable, followSets)
+    grammar, literals, regexTokens, firstSets, nullable, followSets, budget)
 
   // Can the lexer hand the same input to two dispatch heads, so that a
   // choice between them on one token is no choice? The same token can;
@@ -4859,6 +5155,8 @@ function emitGrammarSpec(
     const key = a < b ? a + '\u0000' + b : b + '\u0000' + a
     const hit = contestCache.get(key)
     if (undefined !== hit) return hit
+    // Kept only while the memo has room (MAX_MEMO_ENTRIES).
+    const keep = contestCache.size < memoLimit
     let out = false
     const ma = tokenSets[a.replace(/^#/, '')]
     const mb = tokenSets[b.replace(/^#/, '')]
@@ -4898,7 +5196,9 @@ function emitGrammarSpec(
       out = !regexHeadIsExact(a) || !regexHeadIsExact(b) || tokensOverlap(a, b) ||
         engineTokenMeets(a, b) || engineTokenMeets(b, a)
     }
-    contestCache.set(key, out)
+    // A provisional answer that is not kept goes again.
+    if (keep) contestCache.set(key, out)
+    else contestCache.delete(key)
     return out
   }
 
@@ -4941,13 +5241,17 @@ function emitGrammarSpec(
     if (null != prov && originOf(prod) !== prod.name) {
       prov.set(prod.name, originOf(prod))
     }
+    // A refusal names the rule the author wrote.
+    budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.sp,
+      EMIT_STEPS.alternates)
     if (prod.probeHelper) {
-      emitProbeHelper(prod, tag, ruleSpec, literals, regexTokens)
+      emitProbeHelper(prod, tag, ruleSpec, literals, regexTokens, budget)
       continue
     }
     if (prod.probeDispatch) {
       emitProbeDispatch(
-        prod, tag, ruleSpec, refs, literals, regexTokens, !!opts?.builtins)
+        prod, tag, ruleSpec, refs, literals, regexTokens, !!opts?.builtins,
+        budget)
       continue
     }
     // Standard path: a (possibly single-segment) set of alternatives
@@ -4957,7 +5261,7 @@ function emitGrammarSpec(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
       tokensOverlap, headsContest, classSets, classMembers, heads, valuePlan,
-      arrayHelpers, valueRules, prov,
+      arrayHelpers, valueRules, budget, prov,
     )
   }
 
@@ -4982,7 +5286,8 @@ function emitGrammarSpec(
   // named after: a rule stack reading `__start__` helps nobody.
   if (null != prov) prov.set(startWrapper, start)
 
-  ruleSpec[startWrapper] = {
+  budget.begin(ruleSubject(start), start, undefined, EMIT_STEPS.alternates)
+  commitRule(ruleSpec, startWrapper, {
     open: [{
       p: start,
       g: tag,
@@ -5002,7 +5307,7 @@ function emitGrammarSpec(
       // resort for a parse that cannot resynchronise anywhere else.
       g: syncG(tag, 'end'),
     }],
-  }
+  }, budget)
 
   const options: any = {
     fixed: { token: fixedTokens },
@@ -5049,8 +5354,15 @@ function emitGrammarSpec(
     spec.clear = true
   }
   if (0 < removeNames.length) {
+    // Each name writes two entries, a rule and a fixed token, and each is
+    // charged before it is written (MAX_EMIT_UNITS).
+    const n = removeNames.length
+    budget.begin(`the removal list of ${n} name${1 === n ? '' : 's'}`,
+      undefined, undefined, EMIT_STEPS.remove)
     for (const name of removeNames) {
+      budget.charge(1)
       ;(spec.rule as any)[name] = null
+      budget.charge(1)
       options.fixed.token['#' + name] = null
     }
   }
@@ -5371,6 +5683,7 @@ function emitTailRepeat(
   tag: string,
   ruleSpec: NonNullable<GrammarSpec['rule']>,
   refs: RefRegistry,
+  budget: EmitBudget,
 ) {
   const prodKind = prod.nodeKind ?? 'user'
   const prefixAlt = prod.alts[0]
@@ -5409,7 +5722,8 @@ function emitTailRepeat(
   }
   if (marks) end.m = '_'
 
-  ruleSpec[prod.name] = { open: [open], close: [repeat, end] }
+  commitRule(ruleSpec, prod.name, { open: [open], close: [repeat, end] },
+    budget)
 }
 
 
@@ -5452,11 +5766,22 @@ function emitProduction(
   // or resolve to its matched text (`@push$ {src}`)?
   arrayHelpers: Set<string>,
   valueRules: Set<string>,
+  // What this compile writes, against MAX_EMIT_UNITS.
+  budget: EmitBudget,
   prov?: Map<string, string>,
 ) {
   // This rule stands inside an `; @array`: it inherits that array from
   // its parent and pushes into it, instead of building a node.
   const arrayElem = arrayHelpers.has(prod.name)
+
+  // Every alternate this rule's own open list will hold is charged as it
+  // is made (MAX_EMIT_UNITS), and `pre` is their sum; the rule's commit
+  // charges the rest of what it holds.
+  let pre = 0
+  const made = (o: any): any => {
+    pre += chargeAlt(budget, o)
+    return o
+  }
 
   for (const alt of prod.alts) {
     validateRefs(alt, knownRules, prod.name)
@@ -5497,7 +5822,7 @@ function emitProduction(
         const s = t + ' ' + u
         if (seen.has(s)) continue
         seen.add(s)
-        out.push({ ...baseO, s, b: 2 })
+        out.push(made({ ...baseO, s, b: 2 }))
       }
     }
     return out
@@ -5523,9 +5848,13 @@ function emitProduction(
   const synthKeywordGuards = (
     o: any, alt: Sequence, f: string, consumed: number,
   ): any[] | null => {
+    // The paths are held until they have been read (MAX_EMIT_UNITS).
+    const base = budget.held
     const paths = altPrefixesRaw(
-      alt, grammar, literals, regexTokens, 2, new Set(), undefined, classSets)
+      alt, grammar, literals, regexTokens, 2, new Set(), undefined, classSets,
+      budget)
     const seconds = new Set<string>()
+    let known = true
     for (const p of paths) {
       if (p.tokens[0] !== f) continue
       if (2 <= p.tokens.length) { seconds.add(p.tokens[1]); continue }
@@ -5534,11 +5863,14 @@ function emitProduction(
       // the production. An unknown FOLLOW means no guard — and then
       // no reordering either.
       const fol = followSets.get(prod.name)
-      if (null == fol || 0 === fol.size) return null
+      if (null == fol || 0 === fol.size) { known = false; break }
       for (const t of fol) seconds.add(t)
     }
+    budget.restore(base)
+    if (!known) return null
     if (0 === seconds.size || 16 < seconds.size) return null
-    return [...seconds].map((u) => ({ ...o, s: f + ' ' + u, b: 2 - consumed }))
+    return [...seconds].map((u) =>
+      made({ ...o, s: f + ' ' + u, b: 2 - consumed }))
   }
 
   // What a literal head covers: a literal its first character; a token
@@ -5621,6 +5953,9 @@ function emitProduction(
     // pair. A literal head is never itself a class head — the two token
     // name sets are disjoint — so `c === i` cannot arise here.
     const contestsByHead = new Map<string, Uint8Array>()
+    // The answers it keeps: no more than the memo limit
+    // (MAX_MEMO_ENTRIES), and a head past it is answered as it comes.
+    let kept = 0
 
     for (let i = 0; i < N; i++) {
       const { o, alt } = entries[i]
@@ -5632,15 +5967,18 @@ function emitProduction(
       let lastC = -1
       if (null != fr && null != alt) {
         let hits = contestsByHead.get(f as string)
-        if (undefined === hits) {
+        if (undefined === hits && kept + classIdx.length <= memoLimit) {
           hits = new Uint8Array(classIdx.length)
           for (let k = 0; k < classIdx.length; k++) {
             hits[k] = charRangesOverlap(fr, classRanges[k]) ? 1 : 0
           }
           contestsByHead.set(f as string, hits)
+          kept += classIdx.length
         }
         for (let k = 0; k < classIdx.length; k++) {
-          if (0 === hits[k]) continue
+          if (undefined !== hits
+            ? 0 === hits[k]
+            : !charRangesOverlap(fr, classRanges[k])) continue
           const c = classIdx[k]
           // Same descent target either way — order is moot.
           if (null != descentOf(o) && descentOf(entries[c].o) === descentOf(o)) {
@@ -5884,7 +6222,7 @@ function emitProduction(
     // got past — the repeated part references this rule, which builds a
     // value, so the part cannot be taken as source text. Keeping a
     // second copy would have been a branch no input can enter.
-    emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs)
+    emitTailRepeat(prod, literals, regexTokens, tag, ruleSpec, refs, budget)
     return
   }
 
@@ -5967,9 +6305,13 @@ function emitProduction(
           // peek if the fan-out is degenerate) so the specificity
           // ordering has lookahead to work with.
           let paths: string[][] | null = null
+          // What altPrefixes returns stays held until the entries made
+          // from it are written (MAX_EMIT_UNITS).
+          const peekBase = budget.held
           if (altHeadContested(alt, ordered) || contestedByFollow(alt)) {
             const pfx = altPrefixes(
-              alt, grammar, literals, regexTokens, LOOKAHEAD_K, classSets)
+              alt, grammar, literals, regexTokens, LOOKAHEAD_K, classSets,
+              budget)
               .filter((p) => 0 < p.length)
             if (0 < pfx.length && pfx.length <= 64) paths = pfx
           }
@@ -5992,7 +6334,7 @@ function emitProduction(
                 g: tag,
               }
               if (mark) o.m = mark
-              entries.push({ o, alt })
+              entries.push({ o: made(o), alt })
             }
           } else {
             for (const tok of firstTokens) {
@@ -6005,9 +6347,10 @@ function emitProduction(
                 g: tag,
               }
               if (mark) o.m = mark
-              entries.push({ o, alt })
+              entries.push({ o: made(o), alt })
             }
           }
+          budget.restore(peekBase)
           continue
         }
       }
@@ -6034,7 +6377,7 @@ function emitProduction(
       // alternative stays last as the fallback.
       if (alt.length === 0 && prod.repeatHelper) {
         for (const tok of followSets.get(prod.name) ?? []) {
-          entries.push({ o: { ...o, s: tok, b: 1 }, alt: null })
+          entries.push({ o: made({ ...o, s: tok, b: 1 }), alt: null })
         }
         // Contested repetitions additionally get FOLLOW₂ guards, at
         // the FRONT so they outrank the continue alternatives.
@@ -6066,12 +6409,14 @@ function emitProduction(
         : [...(firstSets.get(seg.ref) ?? [])]
       if (null != refPeek && 0 < refPeek.length && refPeek.length <= 64) {
         for (const tok of refPeek) {
-          entries.push({ o: { ...o, s: [...seg.terms, tok].join(' '), b: 1 }, alt })
+          entries.push({
+            o: made({ ...o, s: [...seg.terms, tok].join(' '), b: 1 }), alt,
+          })
         }
         continue
       }
 
-      entries.push({ o, alt: 0 < alt.length ? alt : null })
+      entries.push({ o: made(o), alt: 0 < alt.length ? alt : null })
     }
 
     applyDebtGuard(entries)
@@ -6089,7 +6434,7 @@ function emitProduction(
     // action is a no-op when there was no push.
     if (null != loopItem) {
       rs.open.unshift(loopEntry())
-      ruleSpec[prod.name] = rs
+      commitRule(ruleSpec, prod.name, rs, budget, pre)
       return
     }
     if (prod.alts.some((alt) => alt.some((el) => el.kind === 'ref'))) {
@@ -6112,7 +6457,7 @@ function emitProduction(
         pushElement(c, elem, valueRules)
       }
     }
-    ruleSpec[prod.name] = rs
+    commitRule(ruleSpec, prod.name, rs, budget, pre)
     return
   }
 
@@ -6120,7 +6465,7 @@ function emitProduction(
     // Single-alt, multi-segment: chain rules directly on the
     // production.
     emitChain(prod.name, prod.alts[0], literals, regexTokens, tag,
-      ruleSpec, refs, prod.nodeKind ?? 'user', prov, originOf(prod),
+      ruleSpec, refs, budget, prod.nodeKind ?? 'user', prov, originOf(prod),
       prod.value, valuePlan.get(originOf(prod)), prod.sp,
       arrayHelpers, valueRules, arrayElem)
     return
@@ -6170,9 +6515,12 @@ function emitProduction(
       for (const [t, us] of pairs) for (const u of us) exitPaths.push([t, u])
     }
   }
+  // What dispatchPrefixes returns stays held until every entry made from it
+  // is written (MAX_EMIT_UNITS).
+  const dispatchBase = budget.held
   const dispatch = dispatchPrefixes(
     prod.alts, grammar, literals, regexTokens, LOOKAHEAD_K, headsContest,
-    exitPaths, classSets)
+    exitPaths, classSets, budget)
 
   for (let i = 0; i < prod.alts.length; i++) {
     const alt = prod.alts[i]
@@ -6190,7 +6538,7 @@ function emitProduction(
     if (null != prov) prov.set(implName, originOf(prod))
     if (null != loopItem) {
       emitRepeatLoop(prod, implName, loopItem, tag, ruleSpec, refs, prov,
-        arrayElem, arrayHelpers, valueRules)
+        arrayElem, arrayHelpers, valueRules, budget)
     } else {
       // One impl rule per alternative of a multi-segment dispatch: the
       // author wrote one rule with alternatives, not N rules. Recorded
@@ -6198,7 +6546,7 @@ function emitProduction(
       // above without emitting anything — claiming a rule that does not
       // exist is worse than omitting one that does.
       emitChain(implName, alt, literals, regexTokens, tag, ruleSpec, refs,
-        'helper', prov, originOf(prod), undefined, undefined, undefined,
+        budget, 'helper', prov, originOf(prod), undefined, undefined, undefined,
         arrayHelpers, valueRules, arrayElem)
     }
 
@@ -6250,7 +6598,7 @@ function emitProduction(
           g: tag,
         }
         if (mark) o.m = mark
-        dispatchEntries.push({ o, alt })
+        dispatchEntries.push({ o: made(o), alt })
       }
     } else {
       const firstTokens = firstOfAlt(
@@ -6266,10 +6614,11 @@ function emitProduction(
           s: tok, b: 1, [via]: implName, ...initDispatchFields, g: tag,
         }
         if (mark) o.m = mark
-        dispatchEntries.push({ o, alt })
+        dispatchEntries.push({ o: made(o), alt })
       }
     }
   }
+  budget.restore(dispatchBase)
 
   // Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
   // first (they name the follow token, so the lexer offers it at this
@@ -6279,11 +6628,11 @@ function emitProduction(
     for (const tok of followSets.get(prod.name) ?? []) {
       const o: any = { s: tok, b: 1, p: n.implName, ...n.fields, g: tag }
       if (n.mark) o.m = n.mark
-      dispatchEntries.push({ o, alt: null })
+      dispatchEntries.push({ o: made(o), alt: null })
     }
     const o: any = { p: n.implName, ...n.fields, g: tag }
     if (n.mark) o.m = n.mark
-    dispatchEntries.push({ o, alt: null })
+    dispatchEntries.push({ o: made(o), alt: null })
   }
 
   if (emptyAltSeen) {
@@ -6303,14 +6652,14 @@ function emitProduction(
     // Same FOLLOW guard as the single-segment path above.
     if (prod.repeatHelper) {
       for (const tok of followSets.get(prod.name) ?? []) {
-        dispatchEntries.push({ o: { ...o, s: tok, b: 1 }, alt: null })
+        dispatchEntries.push({ o: made({ ...o, s: tok, b: 1 }), alt: null })
       }
       // Contested repetitions additionally get FOLLOW₂ guards, at the
       // FRONT so they outrank the continue alternatives.
       dispatchEntries.unshift(
         ...pairExitGuards(o).map((g: any) => ({ o: g, alt: null })))
     }
-    dispatchEntries.push({ o, alt: null })
+    dispatchEntries.push({ o: made(o), alt: null })
   }
 
   // The impl rule this dispatches to inherits the array and fills it
@@ -6325,7 +6674,8 @@ function emitProduction(
   // capture, because the iteration captures its own item. So it has no
   // close, and registers no capture for one.
   if (null != loopItem) {
-    ruleSpec[prod.name] = { open: [loopEntry(), ...open] }
+    commitRule(ruleSpec, prod.name, { open: [loopEntry(), ...open] }, budget,
+      pre)
     return
   }
   const dispClose: any = {
@@ -6338,7 +6688,7 @@ function emitProduction(
   }
   if (dispatchMarks) dispClose.m = '_'
   if (arrayElem) useValueActions(dispClose, [])
-  ruleSpec[prod.name] = { open, close: [dispClose] }
+  commitRule(ruleSpec, prod.name, { open, close: [dispClose] }, budget, pre)
 }
 
 
@@ -6380,6 +6730,7 @@ function emitRepeatLoop(
   arrayElem: boolean,
   arrayHelpers: Set<string>,
   valueRules: Set<string>,
+  budget: EmitBudget,
 ): void {
   if ('ref' !== item.kind) {
     throw new Error(
@@ -6401,8 +6752,8 @@ function emitRepeatLoop(
     pushElement(back,
       arrayHelpers.has(item.name) ? null : item.name, valueRules)
   }
-  ruleSpec[name] = { open: [take], close: [back] }
-  ruleSpec[step] = { open: [{ r: loop.name, g: tag }] }
+  commitRule(ruleSpec, name, { open: [take], close: [back] }, budget)
+  commitRule(ruleSpec, step, { open: [{ r: loop.name, g: tag }] }, budget)
 }
 
 
@@ -6497,6 +6848,7 @@ function emitChain(
   tag: string,
   ruleSpec: NonNullable<GrammarSpec['rule']>,
   refs: RefRegistry,
+  budget: EmitBudget,
   headKind: Production['nodeKind'] = 'helper',
   prov?: Map<string, string>,
   origin?: string,
@@ -6692,7 +7044,7 @@ function emitChain(
         for (const c of rs.close) useValueActions(c, [])
       }
     }
-    ruleSpec[name] = rs
+    commitRule(ruleSpec, name, rs, budget)
   }
 }
 
@@ -6708,12 +7060,19 @@ function computeFirstSets(
   // Production name -> the token set it compiles to, for the token
   // classes of `ConvertOptions.tokenClasses`: FIRST of such a production
   // is its set, one name, wherever it is referenced.
-  classSets: Map<string, string> = new Map(),
+  classSets: Map<string, string>,
+  // Each entry is charged as it is added (MAX_EMIT_UNITS).
+  budget: EmitBudget,
 ): { firstSets: Map<string, Set<string>>; nullable: Set<string> } {
   const firstSets = new Map<string, Set<string>>()
   const nullable = new Set<string>()
   for (const p of grammar.productions) {
     const set = classSets.get(p.name)
+    if (null != set) {
+      budget.begin(ruleSubject(originOf(p)), originOf(p), p.sp,
+        EMIT_STEPS.first)
+      budget.charge(1)
+    }
     firstSets.set(p.name, null == set ? new Set() : new Set([set]))
   }
 
@@ -6723,6 +7082,8 @@ function computeFirstSets(
     for (const prod of grammar.productions) {
       if (classSets.has(prod.name)) continue
       const first = firstSets.get(prod.name) as Set<string>
+      budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.sp,
+        EMIT_STEPS.first)
       for (const alt of prod.alts) {
         // Walk the alt, accumulating FIRST until a non-nullable
         // position is hit.
@@ -6735,14 +7096,22 @@ function computeFirstSets(
               : el.kind === 'token'
                 ? el.name
                 : regexTokens.get(regexKey(el)) as string
-            if (!first.has(tok)) { first.add(tok); changed = true }
+            if (!first.has(tok)) {
+              budget.charge(1)
+              first.add(tok)
+              changed = true
+            }
             altNullable = false
             break
           }
           if (el.kind === 'ref') {
             const refFirst = firstSets.get(el.name) ?? new Set<string>()
             for (const tok of refFirst) {
-              if (!first.has(tok)) { first.add(tok); changed = true }
+              if (!first.has(tok)) {
+                budget.charge(1)
+                first.add(tok)
+                changed = true
+              }
             }
             if (!nullable.has(el.name)) {
               altNullable = false
@@ -7002,11 +7371,28 @@ function computeFollowSets(
   firstSets: Map<string, Set<string>>,
   nullable: Set<string>,
   start: string,
+  // Each entry is charged as it is added (MAX_EMIT_UNITS).
+  budget: EmitBudget,
 ): Map<string, Set<string>> {
   const follow = new Map<string, Set<string>>()
-  for (const p of grammar.productions) follow.set(p.name, new Set())
+  const prods = new Map<string, Production>()
+  for (const p of grammar.productions) {
+    follow.set(p.name, new Set())
+    prods.set(p.name, p)
+  }
+  // A refusal names the rule whose set was growing.
+  const begin = (name: string) => {
+    const p = prods.get(name) as Production
+    budget.begin(ruleSubject(originOf(p)), originOf(p), p.sp,
+      EMIT_STEPS.follow)
+  }
   // End-of-source can follow the start rule.
-  follow.get(start)?.add('#ZZ')
+  const startFollow = follow.get(start)
+  if (null != startFollow) {
+    begin(start)
+    budget.charge(1)
+    startFollow.add('#ZZ')
+  }
 
   let changed = true
   while (changed) {
@@ -7019,8 +7405,13 @@ function computeFollowSets(
           if (el.kind !== 'ref') continue
           const target = follow.get(el.name)
           if (!target) continue
+          begin(el.name)
           const add = (tok: string) => {
-            if (!target.has(tok)) { target.add(tok); changed = true }
+            if (!target.has(tok)) {
+              budget.charge(1)
+              target.add(tok)
+              changed = true
+            }
           }
           const rest = firstOfSeq(
             alt.slice(i + 1), literals, regexTokens, firstSets, nullable)
@@ -7061,9 +7452,15 @@ function computeFollowPairs(
   firstSets: Map<string, Set<string>>,
   nullable: Set<string>,
   follow: Map<string, Set<string>>,
+  // Each pair is charged as it is added (MAX_EMIT_UNITS).
+  budget: EmitBudget,
 ): Map<string, Map<string, Set<string>>> {
   const pairs = new Map<string, Map<string, Set<string>>>()
-  for (const p of grammar.productions) pairs.set(p.name, new Map())
+  const prods = new Map<string, Production>()
+  for (const p of grammar.productions) {
+    pairs.set(p.name, new Map())
+    prods.set(p.name, p)
+  }
 
   const tokOf = (el: Element): string | undefined =>
     el.kind === 'term'
@@ -7083,6 +7480,7 @@ function computeFollowPairs(
       m.set(t, us)
     }
     if (us.has(u)) return false
+    budget.charge(1)
     us.add(u)
     return true
   }
@@ -7097,6 +7495,10 @@ function computeFollowPairs(
         for (let i = 0; i < alt.length; i++) {
           const el = alt[i]
           if (el.kind !== 'ref' || !pairs.has(el.name)) continue
+          // A refusal names the rule whose set was growing.
+          const target = prods.get(el.name) as Production
+          budget.begin(ruleSubject(originOf(target)), originOf(target),
+            target.sp, EMIT_STEPS.pairs)
 
           let j = i + 1
           let blocked = false
@@ -7484,6 +7886,7 @@ function emitClassToken(
   setRanges: Map<string, Array<[number, number]>>,
   matchTokens: Record<string, RegExp>,
   usedNames: Set<string>,
+  budget: EmitBudget,
 ): void {
   // A class fires at ANY lookahead position, not only at the slots the
   // current rule's collated token column names. The column is
@@ -7521,6 +7924,9 @@ function emitClassToken(
   const codePoints = /[uv]/.test(el.flags)
   const mine = classes.coverage.get(key) as Array<[number, number]>
   const members: string[] = []
+  // Each member is charged as it is listed (MAX_EMIT_UNITS).
+  budget.begin(`the character class /${el.pattern}/`, undefined, el.sp,
+    EMIT_STEPS.tokenSet)
   for (const span of classes.atoms) {
     if (!mine.some(([a, b]) => a <= span[0] && span[1] <= b)) continue
     const spanKey = span[0] + '-' + span[1]
@@ -7537,6 +7943,7 @@ function emitClassToken(
       matchTokens[atom] = eager(pattern, unicode ? 'u' : '')
       classes.atomTokens.set(spanKey, atom)
     }
+    budget.charge(1)
     members.push(atom)
   }
 
@@ -7885,79 +8292,107 @@ function altPrefixesRaw(
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
   maxK: number,
-  visited: Set<string> = new Set(),
+  visited: Set<string>,
   // Keep only the paths whose FIRST token passes. The dispatcher deepens
   // the lookahead under a contested head alone, and enumerating every
   // path to depth K only to discard the rest is the cost tabnas/bnf#71
   // measured in seconds; pruning at the head keeps the walk to the
   // paths that will be emitted.
-  headFilter?: (tok: string) => boolean,
+  headFilter: ((tok: string) => boolean) | undefined,
   // A reference to a token class is one token, its set (see
   // `ConvertOptions.tokenClasses`), rather than one path per member.
-  classSets?: Map<string, string>,
+  classSets: Map<string, string> | undefined,
+  // Each path is held as it is made, 1 and 1 for each token it holds
+  // (MAX_EMIT_UNITS), until the decision that asked is made.
+  budget: EmitBudget,
 ): PrefixPath[] {
+  budget.hold(1)
   let paths: PrefixPath[] = [{ tokens: [], done: false }]
-
-  // A path that already carries a token has had its head admitted; only
-  // a path still at length zero can be pruned by what it gains next.
-  const admit = (before: PrefixPath, tokens: string[]): boolean =>
-    null == headFilter || 0 < before.tokens.length || 0 === tokens.length ||
-    headFilter(tokens[0])
 
   for (const el of alt) {
     const next: PrefixPath[] = []
+    // Whether some path in `next` can still grow; once none can, the walk
+    // is over.
+    let open = false
+    const put = (tokens: string[], done: boolean): void => {
+      budget.hold(1 + tokens.length)
+      next.push({ tokens, done })
+      if (!done && tokens.length < maxK) open = true
+    }
+    // A path that already carries a token has had its head admitted; only
+    // a path still at length zero can be pruned by the token it gains.
+    const extend = (p: PrefixPath, tok: string): void => {
+      if (null != headFilter && 0 === p.tokens.length && !headFilter(tok)) {
+        return
+      }
+      put([...p.tokens, tok], false)
+    }
+    // What a reference contributes depends on how many tokens the path
+    // that reaches it holds, and on nothing else about that path: the
+    // window left, and whether the head filter still applies. So its
+    // alternatives are enumerated once for each such length, rather than
+    // once for every path that reaches it, which enumerated the same
+    // sub-paths again for each of thousands of paths.
+    let target: Production | null | undefined
+    let childVisited: Set<string> | undefined
+    let byLength: Map<number, PrefixPath[][]> | undefined
     for (const p of paths) {
       if (p.done || p.tokens.length >= maxK) { next.push(p); continue }
       if (el.kind === 'term') {
-        const tokens = [...p.tokens, literals.get(termKey(el)) as string]
-        if (admit(p, tokens)) next.push({ tokens, done: false })
+        extend(p, literals.get(termKey(el)) as string)
       } else if (el.kind === 'regex') {
-        const tokens = [...p.tokens, regexTokens.get(regexKey(el)) as string]
-        if (admit(p, tokens)) next.push({ tokens, done: false })
+        extend(p, regexTokens.get(regexKey(el)) as string)
       } else if (el.kind === 'token') {
-        const tokens = [...p.tokens, el.name]
-        if (admit(p, tokens)) next.push({ tokens, done: false })
+        extend(p, el.name)
       } else if (el.kind === 'ref') {
         const set = classSets?.get(el.name)
         if (null != set) {
-          const tokens = [...p.tokens, set]
-          if (admit(p, tokens)) next.push({ tokens, done: false })
+          extend(p, set)
           continue
         }
         if (visited.has(el.name)) {
-          next.push({ tokens: p.tokens, done: true })
+          put(p.tokens, true)
           continue
         }
-        const childVisited = new Set(visited); childVisited.add(el.name)
-        const target = grammar.productions.find((pr) => pr.name === el.name)
+        if (undefined === target) {
+          target = grammar.productions.find((pr) => pr.name === el.name) ?? null
+          childVisited = new Set(visited)
+          childVisited.add(el.name)
+        }
         if (!target || target.alts.length === 0) {
-          next.push({ tokens: p.tokens, done: true })
+          put(p.tokens, true)
           continue
         }
-        for (const sub of target.alts) {
-          const subPaths = altPrefixesRaw(
+        const held = p.tokens.length
+        let subs = byLength?.get(held)
+        if (undefined === subs) {
+          subs = target.alts.map((sub) => altPrefixesRaw(
             sub, grammar, literals, regexTokens,
-            maxK - p.tokens.length, childVisited,
+            maxK - held, childVisited as Set<string>,
             // The head of the outer path is the head of the sub-path
             // while nothing has been consumed yet.
-            0 === p.tokens.length ? headFilter : undefined,
-            classSets)
+            0 === held ? headFilter : undefined,
+            classSets, budget))
+          ;(byLength ??= new Map()).set(held, subs)
+        }
+        for (const subPaths of subs) {
           for (const sp of subPaths) {
-            next.push({
-              tokens: [...p.tokens, ...sp.tokens],
-              // Propagate `done` so the outer loop won't extend a
-              // cycle-truncated sub-prefix.
-              done: sp.done,
-            })
+            // A path's tokens are never changed once it is made, so
+            // either side's array serves when the other is empty. `done`
+            // goes with the sub-path, so the outer loop never extends a
+            // cycle-truncated sub-prefix.
+            put(0 === sp.tokens.length ? p.tokens
+              : 0 === p.tokens.length ? sp.tokens
+              : [...p.tokens, ...sp.tokens], sp.done)
           }
         }
       } else {
         // Desugar should have eliminated group/star/etc. at this point.
-        next.push({ tokens: p.tokens, done: true })
+        put(p.tokens, true)
       }
     }
     paths = next
-    if (paths.every((p) => p.done || p.tokens.length >= maxK)) break
+    if (!open) break
   }
 
   return paths
@@ -7970,16 +8405,27 @@ function altPrefixes(
   literals: Map<string, string>,
   regexTokens: Map<string, string>,
   maxK: number,
-  classSets?: Map<string, string>,
+  classSets: Map<string, string> | undefined,
+  // Once the prefixes are known, they alone stay held, until the caller
+  // restores what it held before.
+  budget: EmitBudget,
 ): string[][] {
+  const base = budget.held
   const raw = altPrefixesRaw(
-    alt, grammar, literals, regexTokens, maxK, new Set(), undefined, classSets)
+    alt, grammar, literals, regexTokens, maxK, new Set(), undefined, classSets,
+    budget)
   const seen = new Set<string>()
   const out: string[][] = []
+  let kept = 0
   for (const p of raw) {
     const key = p.tokens.join(' ')
-    if (!seen.has(key)) { seen.add(key); out.push(p.tokens) }
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(p.tokens)
+      kept += 1 + p.tokens.length
+    }
   }
+  budget.keep(base, kept)
   return out
 }
 
@@ -8029,11 +8475,26 @@ function dispatchPrefixes(
   contest: (a: string, b: string) => boolean,
   exitPaths: string[][],
   classSets: Map<string, string>,
+  // Once the prefixes are known, they alone stay held, until the caller
+  // restores what it held before.
+  budget: EmitBudget,
 ): DispatchPrefixes[] {
+  const base = budget.held
   const n = alts.length
+  // One alternative's paths, of which only those it returns stay held
+  // once it has returned (MAX_EMIT_UNITS).
+  const enumerate = (
+    alt: Sequence, k: number, filter?: (tok: string) => boolean,
+  ): PrefixPath[] => {
+    const base = budget.held
+    const paths = altPrefixesRaw(
+      alt, grammar, literals, regexTokens, k, new Set(), filter, classSets,
+      budget)
+    budget.settle(base, paths)
+    return paths
+  }
   const one: PrefixPath[][] = alts.map((alt) =>
-    0 === alt.length ? [] : altPrefixesRaw(
-      alt, grammar, literals, regexTokens, 1, new Set(), undefined, classSets))
+    0 === alt.length ? [] : enumerate(alt, 1))
   const nullable = one.map((paths) =>
     paths.some((p) => 0 === p.tokens.length && !p.done))
   // Heads in enumeration order, once each.
@@ -8070,9 +8531,9 @@ function dispatchPrefixes(
 
   // Deep paths, only under the contested heads.
   const deep: PrefixPath[][] = alts.map((alt, i) =>
-    0 === contested[i].size ? [] : altPrefixesRaw(
-      alt, grammar, literals, regexTokens, maxK, new Set(),
-      (t) => contested[i].has(t), classSets).filter((p) => 0 < p.tokens.length))
+    0 === contested[i].size ? [] : enumerate(
+      alt, maxK, (t) => contested[i].has(t))
+      .filter((p) => 0 < p.tokens.length))
 
   // The depth scan below compares every contested path with every
   // rival's, position by position, and so asks `contest` about the same
@@ -8129,13 +8590,18 @@ function dispatchPrefixes(
     return d
   }
 
-  return alts.map((alt, i) => {
+  // Each prefix is held as it is kept, and what the paths held is free
+  // once every prefix is known.
+  let kept = 0
+  const out = alts.map((alt, i) => {
     const prefixes: string[][] = []
     const seen = new Set<string>()
     const push = (tokens: string[]) => {
       const key = tokens.join(' ')
       if (seen.has(key)) return
       seen.add(key)
+      budget.hold(1 + tokens.length)
+      kept += 1 + tokens.length
       prefixes.push(tokens)
     }
     for (const h of heads[i]) {
@@ -8147,6 +8613,8 @@ function dispatchPrefixes(
     }
     return { prefixes, nullable: nullable[i] }
   })
+  budget.keep(base, kept)
+  return out
 }
 
 // The most token pairs one decision's contest table holds, a byte each:
@@ -8254,9 +8722,12 @@ export {
   MAX_REPEAT_EXPANSION,
   MAX_LEFT_RECURSION_EXPANSION,
   MAX_LEFT_RECURSION_ELEMENTS,
+  MAX_EMIT_UNITS,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,
+  // For the tests alone; not part of the package's API (src/bnf.ts).
+  setMemoLimit,
 }
 
 // (`ConvertOptions` is exported at its own declaration above.)

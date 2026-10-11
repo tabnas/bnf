@@ -121,6 +121,8 @@ func (c *contestCtx) headsContest(a, b string) bool {
 	if hit, ok := c.contestCache[key]; ok {
 		return hit
 	}
+	// Kept only while the memo has room (maxMemoEntries).
+	keep := len(c.contestCache) < memoLimit
 	out := false
 	ma, aSet := c.tokenSets[strings.TrimPrefix(a, "#")]
 	mb, bSet := c.tokenSets[strings.TrimPrefix(b, "#")]
@@ -180,7 +182,12 @@ func (c *contestCtx) headsContest(a, b string) bool {
 		out = !c.regexHeadIsExact(a) || !c.regexHeadIsExact(b) || c.tokensOverlap(a, b) ||
 			c.engineTokenMeets(a, b) || c.engineTokenMeets(b, a)
 	}
-	c.contestCache[key] = out
+	// A provisional answer that is not kept goes again.
+	if keep {
+		c.contestCache[key] = out
+	} else {
+		delete(c.contestCache, key)
+	}
 	return out
 }
 
@@ -385,6 +392,8 @@ func (c *contestCtx) tokensOverlap(a, b string) bool {
 	if hit, ok := c.overlapCache[key]; ok {
 		return hit
 	}
+	// Kept only while the memo has room (maxMemoEntries).
+	keep := len(c.overlapCache) < memoLimit
 	hit := false
 	ma, aClass := c.classMembers[a]
 	mb, bClass := c.classMembers[b]
@@ -417,7 +426,12 @@ func (c *contestCtx) tokensOverlap(a, b string) bool {
 		rb := c.tokenRangesOf(b)
 		hit = ra != nil && rb != nil && charRangesOverlap(ra, rb)
 	}
-	c.overlapCache[key] = hit
+	// A provisional answer that is not kept goes again.
+	if keep {
+		c.overlapCache[key] = hit
+	} else {
+		delete(c.overlapCache, key)
+	}
 	return hit
 }
 
@@ -497,9 +511,12 @@ func contestedByFollow(prod *Production, alt Sequence, literals, regexTokens map
 // Ordered BEFORE the continue alternatives; under negotiated lexing the
 // guard can re-cut the character to the follow token's identity, and a
 // failed guard leaves the loop's own alternatives to re-cut it back.
+//
+// made charges each guard as it is made (MaxEmitUnits).
 func pairExitGuards(prod *Production, baseO map[string]any,
 	followPairs map[string]map[string]map[string]bool,
-	firstSets map[string]map[string]bool, cc *contestCtx) []map[string]any {
+	firstSets map[string]map[string]bool, cc *contestCtx,
+	made func(map[string]any) map[string]any) []map[string]any {
 
 	if !prod.RepeatHelper {
 		return nil
@@ -542,7 +559,7 @@ func pairExitGuards(prod *Production, baseO map[string]any,
 			g := copyMap(baseO)
 			g["s"] = s
 			g["b"] = 2
-			out = append(out, g)
+			out = append(out, made(g))
 		}
 	}
 	return out
@@ -552,13 +569,19 @@ func pairExitGuards(prod *Production, baseO map[string]any,
 // dispatch entry: the keyword plus a token only the keyword alternative
 // can follow it with. Returns nil when no guard can be justified — and
 // then no reordering happens either, which leaves the entry exactly
-// where the grammar put it.
+// where the grammar put it. The paths it enumerates are held while it
+// runs (MaxEmitUnits), and made charges each guard as it is made.
 func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f string,
 	consumed int, grammar *Grammar, literals, regexTokens map[string]string,
-	followSets map[string]map[string]bool, classSets map[string]string) []map[string]any {
+	followSets map[string]map[string]bool, classSets map[string]string,
+	budget *emitBudget, made func(map[string]any) map[string]any) []map[string]any {
 
-	paths := altPrefixesRaw(alt, grammar, literals, regexTokens, 2, map[string]bool{}, nil, classSets)
+	// The paths are held until they have been read (MaxEmitUnits).
+	base := budget.held
+	paths := altPrefixesRaw(alt, grammar, literals, regexTokens, 2, map[string]bool{}, nil,
+		classSets, budget)
 	seconds := map[string]bool{}
+	known := true
 	for _, path := range paths {
 		p := path.tokens
 		if len(p) == 0 || p[0] != f {
@@ -574,11 +597,16 @@ func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f stri
 		// reordering either.
 		fol := followSets[prod.Name]
 		if len(fol) == 0 {
-			return nil
+			known = false
+			break
 		}
 		for t := range fol {
 			seconds[t] = true
 		}
+	}
+	budget.restore(base)
+	if !known {
+		return nil
 	}
 	if len(seconds) == 0 || len(seconds) > 16 {
 		return nil
@@ -588,7 +616,7 @@ func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f stri
 		g := copyMap(o)
 		g["s"] = f + " " + u
 		g["b"] = 2 - consumed
-		out = append(out, g)
+		out = append(out, made(g))
 	}
 	return out
 }
@@ -625,7 +653,7 @@ func descentOf(o map[string]any) string {
 
 func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Grammar,
 	literals, regexTokens map[string]string, followSets map[string]map[string]bool,
-	cc *contestCtx) []map[string]any {
+	cc *contestCtx, budget *emitBudget, made func(map[string]any) map[string]any) []map[string]any {
 
 	// A token class's set is a literal head here (cc.literalHeads): its
 	// members are literals and engine tokens, never a character class
@@ -693,6 +721,9 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 	// per lookahead prefix of the same alternative) and the scan is
 	// quadratic, so without this the coverage test runs on every pair.
 	contestsByHead := map[string][]bool{}
+	// The answers it keeps: no more than the memo limit (maxMemoEntries),
+	// and a head past it is answered as it comes.
+	kept := 0
 
 	for i := 0; i < n; i++ {
 		e := entries[i]
@@ -706,15 +737,23 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 		firstC, lastC := -1, -1
 		if fr != nil && e.alt != nil {
 			hits, ok := contestsByHead[f]
-			if !ok {
+			if !ok && kept+len(classIdx) <= memoLimit {
 				hits = make([]bool, len(classIdx))
 				for k := range classIdx {
 					hits[k] = charRangesOverlap(fr, classRanges[k])
 				}
 				contestsByHead[f] = hits
+				kept += len(classIdx)
+				ok = true
 			}
 			for k, c := range classIdx {
-				if !hits[k] {
+				hit := false
+				if ok {
+					hit = hits[k]
+				} else {
+					hit = charRangesOverlap(fr, classRanges[k])
+				}
+				if !hit {
 					continue
 				}
 				// Same descent target either way — order is moot.
@@ -748,7 +787,7 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 		var guards []map[string]any
 		if consumed == 0 || consumed == 1 {
 			guards = synthKeywordGuards(prod, e.o, e.alt, f, consumed,
-				grammar, literals, regexTokens, followSets, cc.classSets)
+				grammar, literals, regexTokens, followSets, cc.classSets, budget, made)
 		}
 		if guards == nil {
 			put(e.o, float64(i))

@@ -1508,7 +1508,7 @@ func TestProductionSpansSurviveTheRewritePasses(t *testing.T) {
 	liftLiteralTokens(out, start)
 	normalizeBuiltinTokens(out)
 	out = eliminateLeftRecursion(out)
-	out = rewriteProbeDispatches(out)
+	out = rewriteProbeDispatches(out, newEmitBudget())
 	out = leftFactor(out)
 	out = rewriteTailRepeats(out, start)
 	out = desugar(out)

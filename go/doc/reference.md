@@ -44,6 +44,8 @@ spec, err := bnf.EmitGrammarSpec(grammar, &bnf.ConvertOptions{
 
 The call is serialised internally, because the diagnostic prefix is
 per-emit package state. Concurrent calls are safe and take their turn.
+It returns an `*EmitError` for a grammar that would write more than
+`MaxEmitUnits`.
 
 ### `func EliminateLeftRecursion(grammar *Grammar) *Grammar`
 
@@ -277,6 +279,42 @@ a chain from 514 rules on. `A = [x1] … [xk] A "y" / "z"` needs no
 substitution, and its split adds k² + k: the bound refuses it from
 k = 362 on. Past the bound, `EmitGrammarSpec` returns an `*EmitError`
 that names the rule, before the step that would pass it allocates.
+
+### `const MaxEmitUnits = 3500000`
+
+What compiling one grammar may write, counted in units. A rule of the
+spec counts 1, and an alternate 1, with 1 more for each token its `s`
+names and 1 for the rule it names in `p` or `r`. Each name the grammar
+removes counts 2, for the rule and the fixed token it writes in their
+place. A token set counts 1 for each member, and so do three tables the
+emitter builds on the way:
+the tokens each probe helper lists, the tokens a rule can begin with
+and those that can follow it, and the pairs of tokens that can follow
+it. The emitter charges a probe helper's rule with its list, which fixes
+it.
+
+The emitter also counts, while they last, the token paths a choice
+enumerates to tell its alternatives apart. While one alternative's
+enumeration runs, every path it makes counts 1, and 1 more for each
+token it holds, at every level. Once the enumeration returns, only the
+paths it returned stay counted. Once the emitter decides the choice, only
+the prefixes it dispatches on stay counted, until the emitter has written
+them as alternates. What the emitter writes and what it holds never pass
+the bound together.
+
+The emitter charges each unit before the allocation that would hold it.
+Past the bound, `EmitGrammarSpec` returns an `*EmitError` that names the
+rule, or the character class whose token set would pass it, and says
+what the emitter was writing. P optional prefixes over a vocabulary of V
+tokens write about 4·P·V units, so the bound refuses a thousand of each,
+and it refuses forty alternatives of up to forty optional elements each,
+whose enumeration grows with the fourth power of their number. No
+grammar the downstream suites compile writes more than 329,213 units.
+The bound holds memory, not time: a grammar can still spend seconds on
+the choices the emitter decides under it. The memos the contest checks
+keep, of token pairs answered, hold no more than 65,536 answers each.
+Past that, the check answers a pair without keeping it, which changes no
+output.
 
 ## Semantic actions
 

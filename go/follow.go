@@ -22,13 +22,24 @@ package bnf
 // only widen what the lexer is willing to produce there.
 func computeFollowSets(grammar *Grammar, literals, regexTokens map[string]string,
 	firstSets map[string]map[string]bool, nullable map[string]bool, start string,
+	budget *emitBudget,
 ) map[string]map[string]bool {
+	// Each entry is charged as it is added (MaxEmitUnits).
 	follow := map[string]map[string]bool{}
+	prods := map[string]*Production{}
 	for _, p := range grammar.Productions {
 		follow[p.Name] = map[string]bool{}
+		prods[p.Name] = p
+	}
+	// A refusal names the rule whose set was growing.
+	begin := func(name string) {
+		p := prods[name]
+		budget.begin(ruleSubject(originOf(p)), originOf(p), p.Sp, emitStepFollow)
 	}
 	// End-of-source can follow the start rule.
 	if f, ok := follow[start]; ok {
+		begin(start)
+		budget.charge(1)
 		f["#ZZ"] = true
 	}
 
@@ -45,8 +56,10 @@ func computeFollowSets(grammar *Grammar, literals, regexTokens map[string]string
 					if !ok {
 						continue
 					}
+					begin(el.Name)
 					add := func(tok string) {
 						if !target[tok] {
+							budget.charge(1)
 							target[tok] = true
 							changed = true
 						}
@@ -91,11 +104,14 @@ func computeFollowSets(grammar *Grammar, literals, regexTokens map[string]string
 // grammar does not describe.
 func computeFollowPairs(grammar *Grammar, literals, regexTokens map[string]string,
 	firstSets map[string]map[string]bool, nullable map[string]bool,
-	follow map[string]map[string]bool,
+	follow map[string]map[string]bool, budget *emitBudget,
 ) map[string]map[string]map[string]bool {
+	// Each pair is charged as it is added (MaxEmitUnits).
 	pairs := map[string]map[string]map[string]bool{}
+	prods := map[string]*Production{}
 	for _, p := range grammar.Productions {
 		pairs[p.Name] = map[string]map[string]bool{}
+		prods[p.Name] = p
 	}
 
 	tokOf := func(el *Element) (string, bool) {
@@ -120,6 +136,7 @@ func computeFollowPairs(grammar *Grammar, literals, regexTokens map[string]strin
 		if us[u] {
 			return false
 		}
+		budget.charge(1)
 		us[u] = true
 		return true
 	}
@@ -137,6 +154,10 @@ func computeFollowPairs(grammar *Grammar, literals, regexTokens map[string]strin
 					if _, ok := pairs[el.Name]; !ok {
 						continue
 					}
+					// A refusal names the rule whose set was growing.
+					target := prods[el.Name]
+					budget.begin(ruleSubject(originOf(target)), originOf(target),
+						target.Sp, emitStepPairs)
 
 					blocked := false
 					for j := i + 1; j < len(alt); j++ {
