@@ -637,19 +637,23 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 
 func altPrefixes(alt Sequence, grammar *Grammar, literals, regexTokens map[string]string, maxK int,
 	classSets map[string]string, budget *emitBudget) [][]string {
+	base := budget.held
 	raw := altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{}, nil,
 		classSets, budget)
 	seen := map[string]bool{}
 	out := [][]string{}
+	kept := 0
 	for _, p := range raw {
 		key := joinSpace(p.tokens)
 		if !seen[key] {
 			seen[key] = true
 			out = append(out, p.tokens)
+			kept += 1 + len(p.tokens)
 		}
 	}
-	// What the enumeration held is released once the prefixes are known.
-	budget.release()
+	// Once the prefixes are known, they alone stay held, until the caller
+	// restores what it held before.
+	budget.keep(base, kept)
 	return out
 }
 
@@ -678,6 +682,7 @@ type dispatchPrefixSet struct {
 func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens map[string]string,
 	maxK int, contest func(a, b string) bool, exitPaths [][]string,
 	classSets map[string]string, budget *emitBudget) []dispatchPrefixSet {
+	base := budget.held
 	n := len(alts)
 	// One alternative's paths, of which only those it returns stay held
 	// once it has returned (MaxEmitUnits).
@@ -849,6 +854,9 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 		return d
 	}
 
+	// Each prefix is held as it is kept, and what the paths held is free once
+	// every prefix is known.
+	kept := 0
 	out := make([]dispatchPrefixSet, n)
 	for i := range alts {
 		seen := map[string]bool{}
@@ -859,6 +867,8 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 				return
 			}
 			seen[key] = true
+			budget.hold(1 + len(tokens))
+			kept += 1 + len(tokens)
 			prefixes = append(prefixes, tokens)
 		}
 		for _, h := range heads[i] {
@@ -875,8 +885,9 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 		}
 		out[i] = dispatchPrefixSet{prefixes: prefixes, nullable: nullable[i]}
 	}
-	// What the enumeration held is released once the prefixes are known.
-	budget.release()
+	// Once the prefixes are known, they alone stay held, until the caller
+	// restores what it held before.
+	budget.keep(base, kept)
 	return out
 }
 

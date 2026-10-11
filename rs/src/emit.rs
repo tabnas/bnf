@@ -1842,6 +1842,8 @@ impl Emitter<'_> {
         f: &str,
         consumed: i64,
     ) -> Result<Option<Vec<AltSpec>>, EmitError> {
+        // The paths are held until they have been read (`MAX_EMIT_UNITS`).
+        let base = self.budget.held();
         let paths = alt_prefixes_raw(
             alt,
             self.grammar,
@@ -1852,8 +1854,8 @@ impl Emitter<'_> {
             Some(&self.contest.class_sets),
             &self.budget,
         )?;
-        self.budget.release();
         let mut seconds: IndexSet<String> = IndexSet::new();
+        let mut known = true;
         for p in &paths {
             if p.tokens.first().map(|t| &**t) != Some(f) {
                 continue;
@@ -1865,13 +1867,18 @@ impl Emitter<'_> {
             // The literal can end the alternative: the second token is
             // whatever may follow the production. An unknown FOLLOW means
             // no guard.
-            let Some(fol) = self.follow_sets.get(&prod.name) else {
-                return Ok(None);
-            };
-            if fol.is_empty() {
-                return Ok(None);
+            match self.follow_sets.get(&prod.name) {
+                Some(fol) if !fol.is_empty() => seconds.extend(fol.iter().cloned()),
+                _ => {
+                    known = false;
+                    break;
+                }
             }
-            seconds.extend(fol.iter().cloned());
+        }
+        drop(paths);
+        self.budget.restore(base);
+        if !known {
+            return Ok(None);
         }
         if seconds.is_empty() || seconds.len() > 16 {
             return Ok(None);
@@ -2314,6 +2321,9 @@ impl Emitter<'_> {
                         // deduped; bail to the 1-token peek if the fan-out
                         // is degenerate).
                         let mut paths: Option<Vec<Vec<String>>> = None;
+                        // What `alt_prefixes` returns stays held until the
+                        // entries made from it are written (`MAX_EMIT_UNITS`).
+                        let peek_base = self.budget.held();
                         if self.alt_head_contested(idx, &ordered)
                             || self.contested_by_follow(prod, alt)
                         {
@@ -2361,6 +2371,7 @@ impl Emitter<'_> {
                                 alt: Some(alt.clone()),
                             });
                         }
+                        self.budget.restore(peek_base);
                         continue;
                     }
                 }
@@ -2605,6 +2616,9 @@ impl Emitter<'_> {
                 }
             }
         }
+        // What `dispatch_prefixes` returns stays held until every entry made
+        // from it is written (`MAX_EMIT_UNITS`).
+        let dispatch_base = self.budget.held();
         let dispatch = {
             let contest = &self.contest;
             dispatch_prefixes(
@@ -2728,6 +2742,8 @@ impl Emitter<'_> {
                 }
             }
         }
+        drop(dispatch);
+        self.budget.restore(dispatch_base);
 
         // Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
         // first, then one unguarded fallback that pushes the impl with

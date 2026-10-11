@@ -172,12 +172,14 @@ takes, not the memory. `MAX_EMIT_UNITS` (`src/budget.rs`) holds what the
 emitter writes after that: every rule, alternate and token or rule an
 alternate names, every token-set member, every probe-list entry and every
 FIRST, FOLLOW and FOLLOW₂ entry, each charged before it is made, and, while
-a choice is decided, the token paths its enumeration holds. A thousand
-optional prefixes over a vocabulary of a thousand tokens, and forty
-alternatives of up to forty optional elements, are refused within a
-second of an optimised build. It bounds memory, not time: a grammar can
-still spend seconds on the choices it decides under it. All four refuse
-with the rule named, or for a token set the class. The memos of token pairs `ContestCtx` and the
+a choice is decided, the token paths its enumeration holds, and then the
+prefixes it dispatches on, until they are written. A thousand optional
+prefixes over a vocabulary of a thousand tokens, and forty alternatives
+of up to forty optional elements, are refused in under a second of an
+optimised build where they were measured, and the tests give them three.
+It bounds memory, not time: a grammar can still spend seconds on the
+choices it decides under it. All four refuse with the rule named, or for
+a token set the class. The memos of token pairs `ContestCtx` and the
 keyword-shadow ordering keep are limited to `MAX_MEMO_ENTRIES` answers
 each, and answer past it without keeping, which changes no output: a rule
 of four thousand alternatives with distinct heads kept a gigabyte of

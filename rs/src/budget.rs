@@ -30,8 +30,9 @@ use crate::spec::{AltSpec, RuleSpec};
 /// enumerates to tell its alternatives apart. While one alternative's
 /// enumeration runs, every path it makes counts 1 plus 1 for each token it
 /// holds, at every level of the enumeration; once it returns, only the
-/// paths it returned stay counted, until the choice is decided. Written and
-/// held together never pass the limit. `MAX_EMIT_UNITS` in
+/// paths it returned stay counted, and once the choice is decided, only the
+/// prefixes it dispatches on, until they have been written as its
+/// alternates. Written and held together never pass the limit. `MAX_EMIT_UNITS` in
 /// `ts/src/compiler.ts` records the measurements behind the value.
 pub const MAX_EMIT_UNITS: usize = 3_500_000;
 
@@ -169,9 +170,17 @@ impl EmitBudget {
         self.held.set(base + n);
     }
 
-    /// The decision is made: what it held is free again.
-    pub fn release(&self) {
-        self.held.set(0);
+    /// A decision that began with `base` held has made what it returns,
+    /// `n` units: from now on that alone stays held, until its caller has
+    /// used it.
+    pub fn keep(&self, base: usize, n: usize) {
+        self.held.set(base + n);
+    }
+
+    /// What a decision returned has been used: the budget holds again what
+    /// it held before the decision began.
+    pub fn restore(&self, base: usize) {
+        self.held.set(base);
     }
 
     fn refusal(&self, holding: bool) -> EmitError {

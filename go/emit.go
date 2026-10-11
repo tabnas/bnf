@@ -1902,6 +1902,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 					// degenerate) so the ordering has lookahead to work
 					// with.
 					var paths [][]string
+					// What altPrefixes returns stays held until the entries
+					// made from it are written (MaxEmitUnits).
+					peekBase := budget.held
 					if altHeadContested(alt, ordered, literals, regexTokens,
 						firstSets, nullable, cc) ||
 						contestedByFollow(prod, alt, literals, regexTokens,
@@ -1932,6 +1935,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 							}
 							entries = append(entries, dispatchEntry{o: made(o), alt: alt})
 						}
+						budget.restore(peekBase)
 						continue
 					}
 
@@ -1957,6 +1961,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 						}
 						entries = append(entries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
 					}
+					budget.restore(peekBase)
 					continue
 				}
 			}
@@ -2159,6 +2164,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		}
 	}
 	const lookaheadK = 4
+	// What dispatchPrefixes returns stays held until every entry made from it
+	// is written (MaxEmitUnits).
+	dispatchBase := budget.held
 	dispatch := dispatchPrefixes(prod.Alts, grammar, literals, regexTokens, lookaheadK,
 		cc.headsContest, exitPaths, cc.classSets, budget)
 
@@ -2266,6 +2274,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			}
 		}
 	}
+	budget.restore(dispatchBase)
 
 	// Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
 	// first (naming the follow token is what makes the lexer offer it at

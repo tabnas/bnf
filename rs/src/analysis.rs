@@ -711,6 +711,7 @@ pub(crate) fn alt_prefixes(
     class_sets: Option<&IndexMap<String, String>>,
     budget: &EmitBudget,
 ) -> Result<Vec<Vec<String>>, EmitError> {
+    let base = budget.held();
     let raw = alt_prefixes_raw(
         alt,
         grammar,
@@ -723,14 +724,17 @@ pub(crate) fn alt_prefixes(
     )?;
     let mut seen: IndexSet<String> = IndexSet::new();
     let mut out: Vec<Vec<String>> = Vec::new();
+    let mut kept = 0;
     for p in raw {
         let key = p.tokens.join(" ");
         if seen.insert(key) {
+            kept += 1 + p.tokens.len();
             out.push(p.tokens.iter().map(|t| t.to_string()).collect());
         }
     }
-    // What the enumeration held is released once the prefixes are known.
-    budget.release();
+    // Once the prefixes are known, they alone stay held, until the caller
+    // restores what it held before.
+    budget.keep(base, kept);
     Ok(out)
 }
 
@@ -867,6 +871,7 @@ pub(crate) fn dispatch_prefixes(
     class_sets: &IndexMap<String, String>,
     budget: &EmitBudget,
 ) -> Result<Vec<DispatchPrefixes>, EmitError> {
+    let base = budget.held();
     let n = alts.len();
     // One alternative's paths, of which only those it returns stay held
     // once it has returned (`MAX_EMIT_UNITS`).
@@ -1043,6 +1048,9 @@ pub(crate) fn dispatch_prefixes(
         d
     };
 
+    // Each prefix is held as it is kept, and what the paths held is free
+    // once every prefix is known.
+    let mut kept = 0;
     let mut out: Vec<DispatchPrefixes> = Vec::with_capacity(n);
     for i in 0..n {
         let mut seen: IndexSet<String> = IndexSet::new();
@@ -1050,6 +1058,8 @@ pub(crate) fn dispatch_prefixes(
         for h in &heads[i] {
             if !contested[i].contains(h) {
                 if seen.insert(h.clone()) {
+                    budget.hold(2)?;
+                    kept += 2;
                     prefixes.push(vec![h.clone()]);
                 }
                 continue;
@@ -1061,6 +1071,8 @@ pub(crate) fn dispatch_prefixes(
                 let d = depth_of(&deep_ids[i][at], i);
                 let prefix: Vec<String> = p.tokens[..d].iter().map(|t| t.to_string()).collect();
                 if seen.insert(prefix.join(" ")) {
+                    budget.hold(1 + d)?;
+                    kept += 1 + d;
                     prefixes.push(prefix);
                 }
             }
@@ -1071,7 +1083,8 @@ pub(crate) fn dispatch_prefixes(
         });
     }
     let _ = one;
-    // What the enumeration held is released once the prefixes are known.
-    budget.release();
+    // Once the prefixes are known, they alone stay held, until the caller
+    // restores what it held before.
+    budget.keep(base, kept);
     Ok(out)
 }

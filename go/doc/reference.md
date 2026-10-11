@@ -295,8 +295,10 @@ The emitter also counts, while they last, the token paths a choice
 enumerates to tell its alternatives apart. While one alternative's
 enumeration runs, every path it makes counts 1, and 1 more for each
 token it holds, at every level. Once the enumeration returns, only the
-paths it returned stay counted, until the emitter decides the choice.
-What the emitter writes and what it holds never pass the bound together.
+paths it returned stay counted. Once the emitter decides the choice, only
+the prefixes it dispatches on stay counted, until the emitter has written
+them as alternates. What the emitter writes and what it holds never pass
+the bound together.
 
 The emitter charges each unit before the allocation that would hold it.
 Past the bound, `EmitGrammarSpec` returns an `*EmitError` that names the

@@ -36,8 +36,9 @@ import (
 // enumerates to tell its alternatives apart (altPrefixesRaw). While one
 // alternative's enumeration runs, every path it makes counts 1 plus 1 for
 // each token it holds, at every level of the enumeration; once it returns,
-// only the paths it returned stay counted, until the choice is decided.
-// Written and held together never pass the limit:
+// only the paths it returned stay counted, and once the choice is decided,
+// only the prefixes it dispatches on, until they have been written as its
+// alternates. Written and held together never pass the limit:
 //
 //	written + held ≤ MaxEmitUnits
 //
@@ -146,9 +147,17 @@ func (b *emitBudget) settle(base int, paths []prefixPath) {
 	b.held = base + n
 }
 
-// release frees what the decision held, once it is made.
-func (b *emitBudget) release() {
-	b.held = 0
+// keep records that a decision which began with base held has made what it
+// returns, n units: from now on that alone stays held, until its caller has
+// used it.
+func (b *emitBudget) keep(base, n int) {
+	b.held = base + n
+}
+
+// restore records that what a decision returned has been used: the budget
+// holds again what it held before the decision began.
+func (b *emitBudget) restore(base int) {
+	b.held = base
 }
 
 func (b *emitBudget) refuse(holding bool) {

@@ -576,10 +576,12 @@ func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f stri
 	followSets map[string]map[string]bool, classSets map[string]string,
 	budget *emitBudget, made func(map[string]any) map[string]any) []map[string]any {
 
+	// The paths are held until they have been read (MaxEmitUnits).
+	base := budget.held
 	paths := altPrefixesRaw(alt, grammar, literals, regexTokens, 2, map[string]bool{}, nil,
 		classSets, budget)
-	budget.release()
 	seconds := map[string]bool{}
+	known := true
 	for _, path := range paths {
 		p := path.tokens
 		if len(p) == 0 || p[0] != f {
@@ -595,11 +597,16 @@ func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f stri
 		// reordering either.
 		fol := followSets[prod.Name]
 		if len(fol) == 0 {
-			return nil
+			known = false
+			break
 		}
 		for t := range fol {
 			seconds[t] = true
 		}
+	}
+	budget.restore(base)
+	if !known {
+		return nil
 	}
 	if len(seconds) == 0 || len(seconds) > 16 {
 		return nil

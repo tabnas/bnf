@@ -99,6 +99,28 @@ fn nested(c: usize) -> Grammar {
     )])
 }
 
+/// S = "s" F D: F holds C nested classes, as `nested`'s A does, and D N
+/// alternatives of distinct heads, each past a reference, which a
+/// dispatcher decides.
+fn dispatched(c: usize, n: usize) -> Grammar {
+    let mut f = nested(c).productions.remove(0);
+    f.name = "F".to_string();
+    Grammar::new(vec![
+        prod(
+            "S",
+            vec![vec![sens_term("s"), reference("F"), reference("D")]],
+        ),
+        f,
+        prod(
+            "D",
+            (0..n)
+                .map(|i| vec![sens_term(&format!("k{i}")), reference("B"), sens_term("e")])
+                .collect(),
+        ),
+        prod("B", vec![vec![sens_term("b")], vec![sens_term("c")]]),
+    ])
+}
+
 const PROBE: &str = "Write that optional prefix and what follows it as two alternatives, \
                      one with the prefix and one without.";
 const ALTERNATES: &str = "Factor what its alternatives share into rules of their own.";
@@ -124,13 +146,16 @@ fn emit(grammar: &Grammar) -> Result<GrammarSpec, EmitError> {
     emit_grammar_spec(grammar, &ConvertOptions::tag("x"))
 }
 
-/// A second in an optimised build, as the TypeScript and Go tests hold
-/// them to; an unoptimised test build takes several times as long.
+/// Three seconds in an optimised build, as the TypeScript and Go tests
+/// give: the refusals take 0.35 s and 0.45 s where they were measured, a
+/// slower machine has taken twice that, and what the limit guards against
+/// is the minutes these shapes took unbounded. An unoptimised test build
+/// takes several times as long.
 fn within() -> Duration {
     if cfg!(debug_assertions) {
         Duration::from_secs(10)
     } else {
-        Duration::from_secs(1)
+        Duration::from_secs(3)
     }
 }
 
@@ -161,7 +186,7 @@ fn is_three_and_a_half_million_units() {
 }
 
 #[test]
-fn refuses_a_thousand_probes_over_a_thousand_tokens_within_a_second() {
+fn refuses_a_thousand_probes_over_a_thousand_tokens_in_seconds() {
     // Each probe's list is charged with the rule it becomes, 4·1,001 + 2
     // units, as it is made: t873's would pass the limit.
     let (err, elapsed) = refused_within(|| probes(1000, 1000));
@@ -202,7 +227,7 @@ fn counts_every_unit_the_probe_shape_writes_up_to_the_limit_and_no_further() {
 }
 
 #[test]
-fn refuses_forty_alternatives_of_up_to_forty_options_within_a_second() {
+fn refuses_forty_alternatives_of_up_to_forty_options_in_seconds() {
     let (err, elapsed) = refused_within(|| options(40));
     assert_eq!(err.message, holds("A", 3_486_837, 13163));
     assert_eq!(err.rule.as_deref(), Some("A"));
@@ -245,6 +270,26 @@ fn counts_every_token_set_member_up_to_the_limit_and_no_further() {
             "writing its alternates",
             5954,
             3_494_046,
+            ALTERNATES
+        )
+    );
+}
+
+#[test]
+fn holds_the_prefixes_a_choice_dispatches_on_until_its_alternates_are_written() {
+    // The nested classes fill most of the limit; D's dispatcher then holds
+    // the prefixes it decided on, two units for each of its N heads, while
+    // it writes the alternates made from them.
+    let spec = emit(&dispatched(2635, 569)).expect("569 dispatched alternatives");
+    assert!(spec.rule.contains_key("D"));
+    let err = emit(&dispatched(2635, 570)).expect_err("570 dispatched alternatives compiled");
+    assert_eq!(
+        err.message,
+        adds(
+            "rule 'D'",
+            "writing its alternates",
+            15372,
+            3_484_628,
             ALTERNATES
         )
     );

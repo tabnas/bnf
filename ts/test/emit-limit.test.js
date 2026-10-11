@@ -101,6 +101,20 @@ const nested = (C) => ({
   }],
 })
 
+// S = "s" F D: F holds C nested classes, as above, and D N alternatives of
+// distinct heads, each past a reference, which a dispatcher decides.
+const dispatched = (C, N) => ({
+  productions: [
+    { name: 'S', alts: [[lit('s'), ref('F'), ref('D')]] },
+    { name: 'F', alts: nested(C).productions[0].alts },
+    {
+      name: 'D',
+      alts: Array.from({ length: N }, (_, i) => [lit('k' + i), ref('B'), lit('e')]),
+    },
+    { name: 'B', alts: [[lit('b')], [lit('c')]] },
+  ],
+})
+
 const ADVICE = {
   probe: 'Write that optional prefix and what follows it as two ' +
     'alternatives, one with the prefix and one without.',
@@ -124,9 +138,11 @@ const holds = (rule, room, written) =>
 const emit = (g) => emitGrammarSpec(g, { tag: 'x' })
 
 // Each try builds the grammar afresh and checks the refusal in full. The
-// time is the fastest of up to three tries: whatever else the machine is
-// running can slow one compile down, which says nothing about the work the
-// refusal takes.
+// time is the fastest of up to three tries, since whatever else the machine
+// is running can slow one compile down. The limit is three seconds: the two
+// refusals below take 0.2 s and 0.6 to 0.8 s where they were measured, a
+// slower machine has taken twice that, and what the limit guards against is
+// the minutes these shapes took unbounded.
 const refusedWithin = (make, ms, check) => {
   let best = Infinity
   for (let i = 0; i < 3 && best >= ms; i++) {
@@ -150,10 +166,10 @@ describe('emit limit', () => {
     assert.equal(MAX_EMIT_UNITS, 3500000)
   })
 
-  it('refuses a thousand probes over a thousand tokens within a second', () => {
+  it('refuses a thousand probes over a thousand tokens in seconds', () => {
     // Each probe's list is charged with the rule it becomes, 4·1,001 + 2
     // units, as it is made: t873's would pass the limit.
-    refusedWithin(() => probes(1000, 1000), 1000, (error) => {
+    refusedWithin(() => probes(1000, 1000), 3000, (error) => {
       assert.equal(error.message, adds("rule 't873'",
         'writing the probe for one of its optional prefixes', 2762, 3497238,
         ADVICE.probe))
@@ -174,8 +190,8 @@ describe('emit limit', () => {
     })
   })
 
-  it('refuses forty alternatives of up to forty options within a second', () => {
-    refusedWithin(() => options(40), 1000, (error) => {
+  it('refuses forty alternatives of up to forty options in seconds', () => {
+    refusedWithin(() => options(40), 3000, (error) => {
       assert.equal(error.message, holds('A', 3486837, 13163))
       assert.equal(error.rule, 'A')
     })
@@ -207,6 +223,17 @@ describe('emit limit', () => {
     assert.equal(members, 2641 * 2642 / 2)
     assert.throws(() => emit(nested(2642)), {
       message: adds("rule 'A'", 'writing its alternates', 5954, 3494046,
+        ADVICE.alternates),
+    })
+  })
+
+  it('holds the prefixes a choice dispatches on until its alternates are written', () => {
+    // The nested classes fill most of the limit; D's dispatcher then holds
+    // the prefixes it decided on, two units for each of its N heads, while
+    // it writes the alternates made from them.
+    assert.ok(null != emit(dispatched(2635, 569)).rule.D)
+    assert.throws(() => emit(dispatched(2635, 570)), {
+      message: adds("rule 'D'", 'writing its alternates', 15372, 3484628,
         ADVICE.alternates),
     })
   })

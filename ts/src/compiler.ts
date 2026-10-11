@@ -4506,8 +4506,9 @@ function tokensIn(alt: Sequence, out: Set<string>): void {
 // enumerates to tell its alternatives apart (altPrefixesRaw). While one
 // alternative's enumeration runs, every path it makes counts 1 plus 1 for
 // each token it holds, at every level of the enumeration; once it returns,
-// only the paths it returned stay counted, until the choice is decided.
-// Written and held together never pass the limit:
+// only the paths it returned stay counted, and once the choice is decided,
+// only the prefixes it dispatches on, until they have been written as its
+// alternates. Written and held together never pass the limit:
 //
 //   written + held ≤ MAX_EMIT_UNITS
 //
@@ -4530,8 +4531,9 @@ function tokensIn(alt: Sequence, out: Set<string>): void {
 // under it, but for two that the limit refuses: email.abnf and dhall.abnf,
 // from abnf's conformance corpus, neither of which finished before within
 // the 256 MB and 60 seconds abnf gives a grammar. An optimised build of each
-// runtime refuses 1,000 probes over 1,000 tokens, and 40 alternatives of up
-// to 40 options, within a second.
+// runtime refuses 1,000 probes over 1,000 tokens in 0.2 to 0.45 seconds,
+// and 40 alternatives of up to 40 options in 0.45 to 0.8, where they were
+// measured.
 //
 // The limit bounds what is written and held, not the time spent deciding
 // under it. In an optimised build, refusing email.abnf takes 6 to 9 seconds
@@ -4628,9 +4630,16 @@ class EmitBudget {
     this.held = base + n
   }
 
-  // The decision is made: what it held is free again.
-  release(): void {
-    this.held = 0
+  // A decision that began with `base` held has made what it returns, `n`
+  // units: from now on that alone stays held, until its caller has used it.
+  keep(base: number, n: number): void {
+    this.held = base + n
+  }
+
+  // What a decision returned has been used: the budget holds again what it
+  // held before the decision began.
+  restore(base: number): void {
+    this.held = base
   }
 
   private refuse(holding: boolean): never {
@@ -5826,11 +5835,13 @@ function emitProduction(
   const synthKeywordGuards = (
     o: any, alt: Sequence, f: string, consumed: number,
   ): any[] | null => {
+    // The paths are held until they have been read (MAX_EMIT_UNITS).
+    const base = budget.held
     const paths = altPrefixesRaw(
       alt, grammar, literals, regexTokens, 2, new Set(), undefined, classSets,
       budget)
-    budget.release()
     const seconds = new Set<string>()
+    let known = true
     for (const p of paths) {
       if (p.tokens[0] !== f) continue
       if (2 <= p.tokens.length) { seconds.add(p.tokens[1]); continue }
@@ -5839,9 +5850,11 @@ function emitProduction(
       // the production. An unknown FOLLOW means no guard — and then
       // no reordering either.
       const fol = followSets.get(prod.name)
-      if (null == fol || 0 === fol.size) return null
+      if (null == fol || 0 === fol.size) { known = false; break }
       for (const t of fol) seconds.add(t)
     }
+    budget.restore(base)
+    if (!known) return null
     if (0 === seconds.size || 16 < seconds.size) return null
     return [...seconds].map((u) =>
       made({ ...o, s: f + ' ' + u, b: 2 - consumed }))
@@ -6279,6 +6292,9 @@ function emitProduction(
           // peek if the fan-out is degenerate) so the specificity
           // ordering has lookahead to work with.
           let paths: string[][] | null = null
+          // What altPrefixes returns stays held until the entries made
+          // from it are written (MAX_EMIT_UNITS).
+          const peekBase = budget.held
           if (altHeadContested(alt, ordered) || contestedByFollow(alt)) {
             const pfx = altPrefixes(
               alt, grammar, literals, regexTokens, LOOKAHEAD_K, classSets,
@@ -6321,6 +6337,7 @@ function emitProduction(
               entries.push({ o: made(o), alt })
             }
           }
+          budget.restore(peekBase)
           continue
         }
       }
@@ -6485,6 +6502,9 @@ function emitProduction(
       for (const [t, us] of pairs) for (const u of us) exitPaths.push([t, u])
     }
   }
+  // What dispatchPrefixes returns stays held until every entry made from it
+  // is written (MAX_EMIT_UNITS).
+  const dispatchBase = budget.held
   const dispatch = dispatchPrefixes(
     prod.alts, grammar, literals, regexTokens, LOOKAHEAD_K, headsContest,
     exitPaths, classSets, budget)
@@ -6585,6 +6605,7 @@ function emitProduction(
       }
     }
   }
+  budget.restore(dispatchBase)
 
   // Re-issue each nullable alternative's ε-derivation: FOLLOW peeks
   // first (they name the follow token, so the lexer offers it at this
@@ -8372,19 +8393,26 @@ function altPrefixes(
   regexTokens: Map<string, string>,
   maxK: number,
   classSets: Map<string, string> | undefined,
-  // What the enumeration holds is released once the prefixes are known.
+  // Once the prefixes are known, they alone stay held, until the caller
+  // restores what it held before.
   budget: EmitBudget,
 ): string[][] {
+  const base = budget.held
   const raw = altPrefixesRaw(
     alt, grammar, literals, regexTokens, maxK, new Set(), undefined, classSets,
     budget)
   const seen = new Set<string>()
   const out: string[][] = []
+  let kept = 0
   for (const p of raw) {
     const key = p.tokens.join(' ')
-    if (!seen.has(key)) { seen.add(key); out.push(p.tokens) }
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(p.tokens)
+      kept += 1 + p.tokens.length
+    }
   }
-  budget.release()
+  budget.keep(base, kept)
   return out
 }
 
@@ -8434,9 +8462,11 @@ function dispatchPrefixes(
   contest: (a: string, b: string) => boolean,
   exitPaths: string[][],
   classSets: Map<string, string>,
-  // What the enumeration holds is released once the prefixes are known.
+  // Once the prefixes are known, they alone stay held, until the caller
+  // restores what it held before.
   budget: EmitBudget,
 ): DispatchPrefixes[] {
+  const base = budget.held
   const n = alts.length
   // One alternative's paths, of which only those it returns stay held
   // once it has returned (MAX_EMIT_UNITS).
@@ -8547,6 +8577,9 @@ function dispatchPrefixes(
     return d
   }
 
+  // Each prefix is held as it is kept, and what the paths held is free
+  // once every prefix is known.
+  let kept = 0
   const out = alts.map((alt, i) => {
     const prefixes: string[][] = []
     const seen = new Set<string>()
@@ -8554,6 +8587,8 @@ function dispatchPrefixes(
       const key = tokens.join(' ')
       if (seen.has(key)) return
       seen.add(key)
+      budget.hold(1 + tokens.length)
+      kept += 1 + tokens.length
       prefixes.push(tokens)
     }
     for (const h of heads[i]) {
@@ -8565,7 +8600,7 @@ function dispatchPrefixes(
     }
     return { prefixes, nullable: nullable[i] }
   })
-  budget.release()
+  budget.keep(base, kept)
   return out
 }
 

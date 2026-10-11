@@ -96,6 +96,24 @@ func elNested(c int) *Grammar {
 	return &Grammar{Productions: []*Production{a}}
 }
 
+// elDispatched is S = "s" F D: F holds c nested classes, as elNested's A
+// does, and D n alternatives of distinct heads, each past a reference,
+// which a dispatcher decides.
+func elDispatched(c, n int) *Grammar {
+	f := elNested(c).Productions[0]
+	f.Name = "F"
+	d := &Production{Name: "D"}
+	for i := 0; i < n; i++ {
+		d.Alts = append(d.Alts, Sequence{elLit(fmt.Sprintf("k%d", i)), elRef("B"), elLit("e")})
+	}
+	return &Grammar{Productions: []*Production{
+		{Name: "S", Alts: []Sequence{{elLit("s"), elRef("F"), elRef("D")}}},
+		f,
+		d,
+		{Name: "B", Alts: []Sequence{{elLit("b")}, {elLit("c")}}},
+	}}
+}
+
 const (
 	elAdviceProbe = "Write that optional prefix and what follows it as two " +
 		"alternatives, one with the prefix and one without."
@@ -132,9 +150,13 @@ func elRefused(t *testing.T, g *Grammar) (*EmitError, time.Duration) {
 
 // elRefusedWithin compiles what build makes, afresh each time, until a
 // compile is refused within limit, at most three times, and returns the
-// last refusal and the fastest time. Whatever else the machine is running
-// can slow one compile down, which says nothing about the work the refusal
-// takes.
+// last refusal and the fastest time, since whatever else the machine is
+// running can slow one compile down. The tests give three seconds: the
+// refusals take 0.45 s and 0.6 to 0.7 s where they were measured, a slower
+// machine has taken twice that, and what the limit guards against is the
+// minutes these shapes took unbounded.
+const elWithin = 3 * time.Second
+
 func elRefusedWithin(t *testing.T, build func() *Grammar, limit time.Duration) (*EmitError, time.Duration) {
 	t.Helper()
 	var ee *EmitError
@@ -167,16 +189,16 @@ func TestEmitLimitIs3500000(t *testing.T) {
 	}
 }
 
-func TestEmitLimitRefusesAThousandProbesWithinASecond(t *testing.T) {
+func TestEmitLimitRefusesAThousandProbesInSeconds(t *testing.T) {
 	// Each probe's list is charged with the rule it becomes, 4·1,001 + 2
 	// units, as it is made: t873's would pass the limit.
-	ee, elapsed := elRefusedWithin(t, func() *Grammar { return elProbes(1000, 1000) }, time.Second)
+	ee, elapsed := elRefusedWithin(t, func() *Grammar { return elProbes(1000, 1000) }, elWithin)
 	elWant(t, ee, elAdds("rule 't873'", "writing the probe for one of its optional prefixes",
 		2762, 3497238, elAdviceProbe))
 	if ee.Rule != "t873" || ee.Sp == nil || *ee.Sp != (SrcSpan{S: 8730, E: 8739, R: 875, C: 1}) {
 		t.Fatalf("rule %q, span %+v", ee.Rule, ee.Sp)
 	}
-	if elapsed > time.Second {
+	if elapsed > elWithin {
 		t.Fatalf("refused after %v at best", elapsed)
 	}
 }
@@ -196,13 +218,13 @@ func TestEmitLimitCountsEveryUnitTheProbeShapeWrites(t *testing.T) {
 	elWant(t, ee, elAdds("rule 't881'", "writing its alternates", 9, 3499991, elAdviceAlternates))
 }
 
-func TestEmitLimitRefusesFortyAlternativesOfFortyOptionsWithinASecond(t *testing.T) {
-	ee, elapsed := elRefusedWithin(t, func() *Grammar { return elOptions(40) }, time.Second)
+func TestEmitLimitRefusesFortyAlternativesOfFortyOptionsInSeconds(t *testing.T) {
+	ee, elapsed := elRefusedWithin(t, func() *Grammar { return elOptions(40) }, elWithin)
 	elWant(t, ee, elHolds("A", 3486837, 13163))
 	if ee.Rule != "A" {
 		t.Fatalf("rule %q", ee.Rule)
 	}
-	if elapsed > time.Second {
+	if elapsed > elWithin {
 		t.Fatalf("refused after %v at best", elapsed)
 	}
 }
@@ -237,6 +259,15 @@ func TestEmitLimitCountsEveryTokenSetMember(t *testing.T) {
 	}
 	ee, _ := elRefused(t, elNested(2642))
 	elWant(t, ee, elAdds("rule 'A'", "writing its alternates", 5954, 3494046, elAdviceAlternates))
+}
+
+func TestEmitLimitHoldsADispatchersPrefixesUntilItsAlternatesAreWritten(t *testing.T) {
+	// The nested classes fill most of the limit; D's dispatcher then holds
+	// the prefixes it decided on, two units for each of its n heads, while
+	// it writes the alternates made from them.
+	elCompiles(t, elDispatched(2635, 569))
+	ee, _ := elRefused(t, elDispatched(2635, 570))
+	elWant(t, ee, elAdds("rule 'D'", "writing its alternates", 15372, 3484628, elAdviceAlternates))
 }
 
 func TestEmitLimitRefusesTheTokenSetThatWouldPassItNamingTheClass(t *testing.T) {
