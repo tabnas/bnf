@@ -658,6 +658,13 @@ struct Emitter<'a> {
     value_rules: IndexSet<String>,
     prov: Option<IndexMap<String, String>>,
     rule_spec: IndexMap<String, Option<RuleSpec>>,
+    /// The token names a literal head can be: every literal's token and
+    /// every token class's set. Collected once, when the token tables are
+    /// complete: rebuilt for every production, as it was, it made the
+    /// keyword-shadow ordering quadratic in the size of the grammar.
+    literal_heads: IndexSet<String>,
+    /// The token names a character class can be, collected once likewise.
+    class_heads: IndexSet<String>,
 }
 
 /// Compile a grammar IR into a tabnas `GrammarSpec`.
@@ -932,6 +939,15 @@ pub fn emit_grammar_spec(
         emit_marks: opts.marks,
     };
 
+    // Nothing allocates a token from here on, so the head sets are final.
+    let literal_heads: IndexSet<String> = tokens
+        .literals
+        .values()
+        .chain(contest.class_sets.values())
+        .cloned()
+        .collect();
+    let class_heads: IndexSet<String> = tokens.regex_tokens.values().cloned().collect();
+
     let mut emitter = Emitter {
         grammar: &grammar,
         tag: tag.clone(),
@@ -952,6 +968,8 @@ pub fn emit_grammar_spec(
             None
         },
         rule_spec: IndexMap::new(),
+        literal_heads,
+        class_heads,
     };
 
     let grammar_ref: &Grammar = emitter.grammar;
@@ -1763,17 +1781,10 @@ impl Emitter<'_> {
     /// drops behind the class entries so it can no longer steal; entries
     /// that already carry multi-token prefixes simply move ahead.
     fn reorder_keyword_shadow(&self, prod: &Production, entries: &[Entry]) -> Vec<Placed> {
-        // A token class's set is a literal head here: its members are
-        // literals and engine tokens, never a character class
-        // (`token_class_names`), and with the option off those members
-        // are literal heads this ordering places, each one.
-        let lit_toks: IndexSet<&String> = self
-            .tokens
-            .literals
-            .values()
-            .chain(self.contest.class_sets.values())
-            .collect();
-        let class_toks: IndexSet<&String> = self.tokens.regex_tokens.values().collect();
+        // A token class's set is a literal head here (`literal_heads`):
+        // its members are literals and engine tokens, never a character
+        // class (`token_class_names`), and with the option off those
+        // members are literal heads this ordering places, each one.
 
         // Head token and lookahead length, resolved ONCE per entry.
         let n = entries.len();
@@ -1797,7 +1808,7 @@ impl Emitter<'_> {
         let mut class_ranges: Vec<Vec<CharRange>> = Vec::new();
         for (i, head) in heads.iter().enumerate() {
             let Some(f) = head else { continue };
-            if !class_toks.contains(f) {
+            if !self.class_heads.contains(f) {
                 continue;
             }
             let Some(r) = self.contest.token_ranges_of(f) else {
@@ -1832,9 +1843,7 @@ impl Emitter<'_> {
         for (i, e) in entries.iter().enumerate() {
             let f = heads[i].as_deref();
             let fr = match f {
-                Some(f) if lit_toks.contains(&f.to_string()) => {
-                    self.contest.literal_head_ranges_of(f)
-                }
+                Some(f) if self.literal_heads.contains(f) => self.contest.literal_head_ranges_of(f),
                 _ => None,
             };
 
@@ -1915,7 +1924,6 @@ impl Emitter<'_> {
     /// the longer alternative. Entries are permuted among their own
     /// slots so everything else stays put.
     fn specificity_permute(&self, entries: &mut [Entry]) {
-        let class_toks: IndexSet<&String> = self.tokens.regex_tokens.values().collect();
         let n = entries.len();
         let mut s_lens: Vec<usize> = vec![0; n];
         let mut heads: Vec<Option<String>> = vec![None; n];
@@ -1928,7 +1936,7 @@ impl Emitter<'_> {
                 continue;
             }
             let f = s.split(' ').next().unwrap_or("").to_string();
-            if class_toks.contains(&f) {
+            if self.class_heads.contains(&f) {
                 heads[i] = Some(f);
             }
         }
@@ -2040,7 +2048,6 @@ impl Emitter<'_> {
         else {
             return false;
         };
-        let class_head_toks: IndexSet<&String> = self.tokens.regex_tokens.values().collect();
         for (j, other) in all.iter().enumerate() {
             if j == idx || other.is_empty() {
                 continue;
@@ -2054,8 +2061,8 @@ impl Emitter<'_> {
                     if t == u {
                         return true;
                     }
-                    if class_head_toks.contains(t)
-                        && class_head_toks.contains(u)
+                    if self.class_heads.contains(t)
+                        && self.class_heads.contains(u)
                         && self.contest.tokens_overlap(t, u)
                     {
                         return true;

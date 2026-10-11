@@ -5,12 +5,14 @@
 //! rewrite. Mirrors `eliminateLeftRecursion` and `rewriteTailRepeats` in
 //! `ts/src/compiler.ts`.
 
+use std::collections::HashMap;
+
 use indexmap::{IndexMap, IndexSet};
 
 use crate::annotate::exempt_alias;
 use crate::ir::{
     diag_name, refs_in, Element, EmitError, Grammar, Kind, Production, Sequence, SrcSpan,
-    TailRepeatSpec,
+    TailRepeatSpec, MAX_LEFT_RECURSION_EXPANSION,
 };
 use crate::prose::{element_may_match_without_consuming, non_consuming_rules};
 
@@ -424,6 +426,10 @@ pub(crate) fn eliminate_left_recursion_keeping(
         // alias can (re)introduce a leading ref to an earlier A_k. Re-run
         // the pass until it reaches a fixed point.
         if !exempt_alias(&prods[i], &cyclic) {
+            // The alternatives A_i has gained from substitution so far, held
+            // to MAX_LEFT_RECURSION_EXPANSION before each substitution is
+            // made.
+            let mut gained = 0usize;
             let guard = prods.len() + 1;
             for _ in 0..guard {
                 let mut changed = false;
@@ -449,6 +455,7 @@ pub(crate) fn eliminate_left_recursion_keeping(
                         prods[i] = next;
                         sources.insert(target_name, next_sources);
                     } else {
+                        gained = charge_substitution(&prods[i], &prods[j], gained)?;
                         let source = prods[j].clone();
                         let target_name = prods[i].name.clone();
                         let target_sources = sources[&target_name].clone();
@@ -477,16 +484,29 @@ pub(crate) fn eliminate_left_recursion_keeping(
     }
 
     // Restore the caller's declared order, so the start rule still ends
-    // up first.
-    let mut by_name: IndexMap<String, Production> =
-        prods.into_iter().map(|p| (p.name.clone(), p)).collect();
-    let mut ordered = Vec::new();
+    // up first. Taken from slots rather than removed from an ordered map,
+    // whose removal shifts every later entry: once per production, that
+    // was quadratic in the size of the grammar. The slots keep the map's
+    // semantics: a repeated name keeps its first place and its last
+    // production, and is taken once.
+    let mut slot_of: HashMap<String, usize> = HashMap::with_capacity(prods.len());
+    let mut slots: Vec<Option<Production>> = Vec::with_capacity(prods.len());
+    for p in prods {
+        match slot_of.get(&p.name) {
+            Some(&at) => slots[at] = Some(p),
+            None => {
+                slot_of.insert(p.name.clone(), slots.len());
+                slots.push(Some(p));
+            }
+        }
+    }
+    let mut ordered = Vec::with_capacity(slots.len());
     for name in &original_order {
-        if let Some(p) = by_name.shift_remove(name) {
+        if let Some(p) = slot_of.get(name).and_then(|&at| slots[at].take()) {
             ordered.push(p);
         }
     }
-    ordered.extend(by_name.into_values());
+    ordered.extend(slots.into_iter().flatten());
 
     Ok(EliminatedGrammar {
         grammar: Grammar {
@@ -706,6 +726,47 @@ fn has_leading_ref_to(prod: &Production, name: &str) -> bool {
     prod.alts
         .iter()
         .any(|alt| alt.first().is_some_and(|el| el.is_ref_to(name)))
+}
+
+/// Charge a substitution of `source` into `target` against what `target`
+/// may gain ([`MAX_LEFT_RECURSION_EXPANSION`]), BEFORE it is made, and
+/// return the new total; `gained` is what the rule has gained so far. Each
+/// of the `led` alternatives of `target` that begin with `source` becomes
+/// one alternative per alternative of `source`, a gain of
+/// `led × (|source| − 1)`. Mirrors `chargeSubstitution` in
+/// `ts/src/compiler.ts`.
+fn charge_substitution(
+    target: &Production,
+    source: &Production,
+    gained: usize,
+) -> Result<usize, EmitError> {
+    let led = target
+        .alts
+        .iter()
+        .filter(|alt| alt.first().is_some_and(|el| el.is_ref_to(&source.name)))
+        .count();
+    let gain = led.checked_mul(source.alts.len().saturating_sub(1));
+    match gain {
+        Some(gain) if gain <= MAX_LEFT_RECURSION_EXPANSION.saturating_sub(gained) => {
+            Ok(gained + gain)
+        }
+        _ => Err(EmitError::at(
+            format!(
+                "{}: rule '{}' exceeds the left-recursion expansion limit of {} alternatives \
+                 while inlining '{}', which begins {} of its alternatives and has {} of its \
+                 own. Factor '{}' out of the alternatives it begins.",
+                diag_name(),
+                target.name,
+                MAX_LEFT_RECURSION_EXPANSION,
+                source.name,
+                led,
+                source.alts.len(),
+                source.name
+            ),
+            &target.name,
+            target.sp,
+        )),
+    }
 }
 
 /// For every alternative of `target` that begins with a ref to `source`,

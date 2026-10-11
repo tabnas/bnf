@@ -29,6 +29,7 @@ this crate.
 | `tests/regex_flags_test.rs` | no twin: the `RegExp` constructor's own rules on an `Element::regex` flag string, which TypeScript gets from the constructor for free and this port has to state — the flags it knows, no repeats, `u` and `v` never together, and the fixed order `RegExp.prototype.flags` reports |
 | `tests/doc_examples_test.rs` | `go/doc_examples_test.go`: the claims the crate documentation makes |
 | `tests/divergence_test.rs` | the executable register for the Rust entries in [`../DIVERGENCE.md`](../DIVERGENCE.md): one test per recorded difference, so a repaired entry has to lose its test as well as its section |
+| `tests/leftrec_limit_test.rs` | `go/leftrec_limit_test.go` and `ts/test/leftrec-limit.test.js`: the left-recursion expansion limit |
 | `tests/version_test.rs` | the version sites must agree |
 | `README.md` | the crate front page; its `rust` fences run as doctests |
 
@@ -107,7 +108,12 @@ own input, and `node tests/oracle/generate.cjs regen <fixture.json>`
 replays its `ir`, `opts` and case sources through TypeScript again.
 Those need only this repository's `ts/` and the engine, no front-end. A
 fixture whose `pureError` is set records an IR TypeScript REFUSED, and
-that refusal message is graded byte for byte like the emitted text.
+that refusal message is graded byte for byte like the emitted text. The
+refusals are shared by all three runtimes: `ts/test/oracle-refusal.test.js`
+holds the canonical compiler to each refusal it recorded, and
+`go/oracle_refusal_test.go` grades the Go port against them the same way.
+`ir-leftrec-limit` is the cycle of twenty rules that the left-recursion
+expansion limit refuses.
 
 ## Untrusted IR, and where the stack still runs out
 
@@ -128,10 +134,14 @@ and 30000 levels. Reaching that needs a front-end that can itself build
 a tree that deep; an IR that arrives as JSON cannot, since `serde_json`
 stops at 128.
 
-A bounded repetition expands into roughly two rules per count, in this
-port and in TypeScript alike, so `0*1000000a` exhausts memory in either
-runtime. That is the compiler's design, not a difference between the
-ports.
+Two bounds keep a small IR from making a large compiler product, in this
+port and in TypeScript alike. `MAX_REPEAT_EXPANSION` holds what numeric
+repetition may expand into, so `0*1000000a` is refused before its helpers
+are allocated. `MAX_LEFT_RECURSION_EXPANSION` holds the alternatives one
+rule may gain from the left-recursion substitution, so a cycle of rules
+whose alternatives lead with the next one is refused before it multiplies;
+without it, twenty such rules exhausted memory and aborted the process.
+Both refuse with the rule named.
 
 ## Things that look like bugs and are not
 

@@ -502,7 +502,9 @@ There is no `test/` directory in this repository and no `test/spec`
 fixtures anywhere in it, so no `ERROR` rows of any kind — code-pinning,
 message-pinning or bare — exist here. The cross-runtime parity contract
 is carried instead by `rs/tests/oracle/*.json`, which hold the
-TypeScript compiler's own emitted text. Compiler diagnostics are thrown errors with prose
+TypeScript compiler's own emitted text, and its refusals, whose messages
+the Rust oracle test, `go/oracle_refusal_test.go` and
+`ts/test/oracle-refusal.test.js` each hold to byte for byte. Compiler diagnostics are thrown errors with prose
 messages, not coded parse errors; the front-ends own the wording their own
 tests pin.
 

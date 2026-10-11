@@ -152,6 +152,18 @@ const MaxInfinity = 1 << 30
 // allocate. One unit is a mandatory copy or a generated helper.
 const MaxRepeatExpansion = 8192
 
+// MaxLeftRecursionExpansion is the most alternatives one rule may gain
+// from Paull's substitution before left-recursion elimination refuses the
+// grammar: each substitution adds led × (|source| − 1) alternatives for
+// the led alternatives that begin with the source, summed per rule.
+// Without it a cycle of k rules whose alternatives lead with the next one
+// multiplies to 2^(k+1) alternatives. No grammar in the downstream corpora
+// gains more than 28 (dhall.abnf, which does not compile within abnf's
+// 60 s budget for another reason, gains 85); the cycle gains 508 at k = 8
+// and 1020 at k = 9. MAX_LEFT_RECURSION_EXPANSION in ts/src/compiler.ts
+// records the measurement.
+const MaxLeftRecursionExpansion = 512
+
 type Sequence []*Element
 
 // ProbeDispatchSpec configures a synthesised dispatcher production for

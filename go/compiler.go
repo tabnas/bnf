@@ -329,6 +329,9 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 	// grammar. Mirrors the TS eliminateLeftRecursion.
 	for i := 0; i < len(prods); i++ {
 		if !isExemptAlias(prods[i]) {
+			// The alternatives A_i has gained from substitution so far, held
+			// to MaxLeftRecursionExpansion before each substitution is made.
+			gained := 0
 			guard := len(prods) + 1
 			for round := 0; round < guard; round++ {
 				changed := false
@@ -345,6 +348,7 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 						// one-alternate-per-member fan-out.
 						prods[i] = substituteLeadingRefByToken(prods[i], prods[j].Name)
 					} else {
+						gained = chargeSubstitution(prods[i], prods[j], gained)
 						prods[i] = substituteLeadingRef(prods[i], prods[j])
 					}
 					changed = true
@@ -517,6 +521,40 @@ func hasLeadingRefTo(prod *Production, name string) bool {
 		}
 	}
 	return false
+}
+
+// chargeSubstitution charges a substitution of source into target against
+// what target may gain (MaxLeftRecursionExpansion), BEFORE it is made, and
+// returns the new total; gained is what the rule has gained so far. Each of
+// the led alternatives of target that begin with source becomes one
+// alternative per alternative of source, a gain of led × (|source| − 1).
+// Past the bound it panics with an *EmitError, which emitGrammarSpec
+// returns as its error. Mirrors the TS `chargeSubstitution`.
+func chargeSubstitution(target, source *Production, gained int) int {
+	led := 0
+	for _, alt := range target.Alts {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == source.Name {
+			led++
+		}
+	}
+	each := len(source.Alts) - 1
+	if each <= 0 {
+		return gained
+	}
+	// led×each > remaining, asked without multiplying.
+	if led > (MaxLeftRecursionExpansion-gained)/each {
+		panic(&EmitError{
+			Message: fmt.Sprintf("%s: rule '%s' exceeds the left-recursion expansion limit "+
+				"of %d alternatives while inlining '%s', which begins %d of its "+
+				"alternatives and has %d of its own. Factor '%s' out of the "+
+				"alternatives it begins.",
+				diagName(), target.Name, MaxLeftRecursionExpansion, source.Name, led,
+				len(source.Alts), source.Name),
+			Rule: target.Name,
+			Sp:   target.Sp,
+		})
+	}
+	return gained + led*each
 }
 
 func substituteLeadingRef(target, source *Production) *Production {

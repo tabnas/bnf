@@ -963,6 +963,19 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		}
 	}
 
+	// Nothing allocates a token from here on, so the head sets are final.
+	cc.literalHeads = map[string]bool{}
+	for _, t := range literals {
+		cc.literalHeads[t] = true
+	}
+	for _, t := range cc.classSets {
+		cc.literalHeads[t] = true
+	}
+	cc.classHeads = map[string]bool{}
+	for _, t := range regexTokens {
+		cc.classHeads[t] = true
+	}
+
 	firstSets, nullable := computeFirstSets(grammar, literals, regexTokens, cc.classSets)
 	// Settle the contested left-recursion tail loops flagged during
 	// elimination, now that FIRST sets can say whether the competition is
@@ -1718,10 +1731,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	// The token names that came from character classes, for
 	// altHeadSharesToken: only between two of these does character
 	// overlap mean they can be handed the same token.
-	classHeadToks := map[string]bool{}
-	for _, t := range regexTokens {
-		classHeadToks[t] = true
-	}
+	classHeadToks := cc.classHeads
 
 	for _, alt := range prod.Alts {
 		if err := validateRefs(alt, knownRules, prod.Name); err != nil {
@@ -2013,7 +2023,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			entries = append(entries, dispatchEntry{o: o, alt: srcAlt})
 		}
 
-		specificityPermute(entries, cc, grammar, regexTokens)
+		specificityPermute(entries, cc, grammar)
 		opens := reorderKeywordShadow(prod, entries, grammar,
 			literals, regexTokens, followSets, cc)
 		// A loop has no close: every alternative either re-enters it by
@@ -2286,7 +2296,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		dispatchEntries = append(dispatchEntries, dispatchEntry{o: o})
 	}
 
-	specificityPermute(dispatchEntries, cc, grammar, regexTokens)
+	specificityPermute(dispatchEntries, cc, grammar)
 	dispOpens := reorderKeywordShadow(prod, dispatchEntries, grammar,
 		literals, regexTokens, followSets, cc)
 	// The impl rule this dispatches to inherits the array and fills it

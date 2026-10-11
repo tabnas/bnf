@@ -1,0 +1,706 @@
+{
+ "name": "ir-leftrec-limit",
+ "ir": {
+  "productions": [
+   {
+    "name": "root",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r0"
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r0",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r1"
+      },
+      {
+       "kind": "term",
+       "literal": "a0",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r1"
+      },
+      {
+       "kind": "term",
+       "literal": "b0",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x0",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r1",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r2"
+      },
+      {
+       "kind": "term",
+       "literal": "a1",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r2"
+      },
+      {
+       "kind": "term",
+       "literal": "b1",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x1",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r2",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r3"
+      },
+      {
+       "kind": "term",
+       "literal": "a2",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r3"
+      },
+      {
+       "kind": "term",
+       "literal": "b2",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x2",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r3",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r4"
+      },
+      {
+       "kind": "term",
+       "literal": "a3",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r4"
+      },
+      {
+       "kind": "term",
+       "literal": "b3",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x3",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r4",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r5"
+      },
+      {
+       "kind": "term",
+       "literal": "a4",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r5"
+      },
+      {
+       "kind": "term",
+       "literal": "b4",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x4",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r5",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r6"
+      },
+      {
+       "kind": "term",
+       "literal": "a5",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r6"
+      },
+      {
+       "kind": "term",
+       "literal": "b5",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x5",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r6",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r7"
+      },
+      {
+       "kind": "term",
+       "literal": "a6",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r7"
+      },
+      {
+       "kind": "term",
+       "literal": "b6",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x6",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r7",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r8"
+      },
+      {
+       "kind": "term",
+       "literal": "a7",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r8"
+      },
+      {
+       "kind": "term",
+       "literal": "b7",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x7",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r8",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r9"
+      },
+      {
+       "kind": "term",
+       "literal": "a8",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r9"
+      },
+      {
+       "kind": "term",
+       "literal": "b8",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x8",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r9",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r10"
+      },
+      {
+       "kind": "term",
+       "literal": "a9",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r10"
+      },
+      {
+       "kind": "term",
+       "literal": "b9",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x9",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r10",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r11"
+      },
+      {
+       "kind": "term",
+       "literal": "a10",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r11"
+      },
+      {
+       "kind": "term",
+       "literal": "b10",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x10",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r11",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r12"
+      },
+      {
+       "kind": "term",
+       "literal": "a11",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r12"
+      },
+      {
+       "kind": "term",
+       "literal": "b11",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x11",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r12",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r13"
+      },
+      {
+       "kind": "term",
+       "literal": "a12",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r13"
+      },
+      {
+       "kind": "term",
+       "literal": "b12",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x12",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r13",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r14"
+      },
+      {
+       "kind": "term",
+       "literal": "a13",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r14"
+      },
+      {
+       "kind": "term",
+       "literal": "b13",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x13",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r14",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r15"
+      },
+      {
+       "kind": "term",
+       "literal": "a14",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r15"
+      },
+      {
+       "kind": "term",
+       "literal": "b14",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x14",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r15",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r16"
+      },
+      {
+       "kind": "term",
+       "literal": "a15",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r16"
+      },
+      {
+       "kind": "term",
+       "literal": "b15",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x15",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r16",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r17"
+      },
+      {
+       "kind": "term",
+       "literal": "a16",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r17"
+      },
+      {
+       "kind": "term",
+       "literal": "b16",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x16",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r17",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r18"
+      },
+      {
+       "kind": "term",
+       "literal": "a17",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r18"
+      },
+      {
+       "kind": "term",
+       "literal": "b17",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x17",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r18",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r19"
+      },
+      {
+       "kind": "term",
+       "literal": "a18",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r19"
+      },
+      {
+       "kind": "term",
+       "literal": "b18",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x18",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   },
+   {
+    "name": "r19",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "r0"
+      },
+      {
+       "kind": "term",
+       "literal": "a19",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "r0"
+      },
+      {
+       "kind": "term",
+       "literal": "b19",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "x19",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   }
+  ]
+ },
+ "opts": {
+  "tag": "demo"
+ },
+ "pure": null,
+ "pureError": "demo: rule 'r11' exceeds the left-recursion expansion limit of 512 alternatives while inlining 'r12', which begins 2 of its alternatives and has 511 of its own. Factor 'r12' out of the alternatives it begins.",
+ "recognition": null,
+ "recognitionError": null,
+ "cases": []
+}
