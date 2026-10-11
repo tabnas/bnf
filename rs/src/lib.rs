@@ -67,8 +67,8 @@ pub use ir::{
     builtin_token, diag_name, escape_regexp, is_effectively_case_sensitive, is_prose_name,
     origin_of, refs_in, term_key, AmbiguityReport, ConvertOptions, Element, EmitError, Grammar,
     Kind, NodeKind, ProbeDispatchSpec, ProbeHelperSpec, Production, Sequence, SrcSpan,
-    TailRepeatSpec, ValueAnnotation, BUILTIN_TOKENS, MAX_ELEMENT_DEPTH, MAX_REPEAT_EXPANSION,
-    REMOVE_ALL, REMOVE_PROSE,
+    TailRepeatSpec, ValueAnnotation, BUILTIN_TOKENS, MAX_ELEMENT_DEPTH,
+    MAX_LEFT_RECURSION_EXPANSION, MAX_REPEAT_EXPANSION, REMOVE_ALL, REMOVE_PROSE,
 };
 pub use leftrec::eliminate_left_recursion;
 pub use spec::{

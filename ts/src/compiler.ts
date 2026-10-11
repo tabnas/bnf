@@ -1001,10 +1001,11 @@ type AmbiguityReport = {
 // which tabnas's push-down parser can execute without re-entering P
 // at the same source position.
 //
-// The substitution step can duplicate alternatives, so pathological
-// grammars will enlarge — caller is expected to keep the grammar
-// reasonably small (this is a first-step converter, not a full
-// toolchain).
+// The substitution step duplicates alternatives, and a chain of rules
+// whose alternatives lead with the next one multiplies them at every
+// step, so the alternatives a rule may gain from it are bounded:
+// MAX_LEFT_RECURSION_EXPANSION, below, refuses the grammar before the
+// substitution that would pass the bound is made.
 // Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
 // Returns the element sequence for the branch where the sugar *does*
 // match at least once, or null if the element is not nullable sugar.
@@ -1162,14 +1163,20 @@ function eliminateLeftRecursionKeeping(
     // substitution can reproduce the ref it just consumed. The guard
     // is belt-and-braces against a pathological grammar.
     if (!isExemptAlias(prods[i])) {
+      // The alternatives A_i has gained from substitution so far, held to
+      // MAX_LEFT_RECURSION_EXPANSION before each substitution is made.
+      let gained = 0
       const guard = prods.length + 1
       for (let round = 0; round < guard; round++) {
         let changed = false
         for (let j = 0; j < i; j++) {
           if (!hasLeadingRefTo(prods[i], prods[j].name)) continue
-          prods[i] = keep.has(prods[j].name)
-            ? substituteLeadingRefByToken(prods[i], prods[j].name)
-            : substituteLeadingRef(prods[i], prods[j])
+          if (keep.has(prods[j].name)) {
+            prods[i] = substituteLeadingRefByToken(prods[i], prods[j].name)
+          } else {
+            gained = chargeSubstitution(prods[i], prods[j], gained)
+            prods[i] = substituteLeadingRef(prods[i], prods[j])
+          }
           changed = true
         }
         if (!changed) break
@@ -1328,6 +1335,70 @@ function hasLeadingRefTo(prod: Production, name: string): boolean {
     }
   }
   return false
+}
+
+
+// The most alternatives one rule may GAIN from Paull's substitution
+// before left-recursion elimination refuses the grammar.
+//
+// Substituting `source` into `target` turns each of the alternatives of
+// `target` that begin with `source` into one alternative per alternative
+// of `source`. A chain of rules whose alternatives lead with the next
+// one therefore multiplies at every step: a cycle of k rules with two
+// such alternatives each (`r0 = r1 "a0" / r1 "b0" / "x0"`, …, up to
+// `r(k-1) = r0 …`) ends with 2^(k+1) − 1 alternatives in r0, from 3k in
+// the source. Compiling it took seconds at k = 8, over a minute at
+// k = 10, and at k = 20 exhausted memory before the substitution
+// finished.
+//
+// What a rule gains is the alternatives a substitution adds over the
+// ones it replaces, `led × (|source| − 1)` for `led` alternatives that
+// begin with `source`, summed over every substitution into the rule.
+// So neither a rule's own alternatives nor a reference inlined one for
+// one costs anything, and a large grammar is not held to a smaller
+// share: each rule has the whole bound to itself.
+//
+// Measured over every grammar the downstream corpora compile (abnf's 68
+// conformance files, its test grammars and spec fixtures, gbnf's
+// llama.cpp and live corpora, ebnf's grammars, every grammar the three
+// front-ends' suites and this package's compile, and the proto, semver
+// and aless grammars of the fleet): no rule gains more than 28 (proto's
+// `optionName`, compiled without `tokenClasses`). dhall.abnf's
+// `import-expression` gains 85; that grammar does not compile within
+// abnf's 60 s budget for another reason, its time going to lookahead
+// dispatch after this pass. The cycle
+// above gains 508 in r0 at k = 8, which compiles in 1.5 to 3 s, and 1020
+// at k = 9, which took 10 to 18 s in the three runtimes. This bound
+// leaves the corpus eighteen times the room its largest gain needs, and
+// refuses the cycle from k = 9 on before the substitution allocates.
+const MAX_LEFT_RECURSION_EXPANSION = 512
+
+
+// Charge a substitution of `source` into `target` against what `target`
+// may gain (MAX_LEFT_RECURSION_EXPANSION), BEFORE it is made, and return
+// the new total. `gained` is what the rule has gained so far.
+function chargeSubstitution(
+  target: Production,
+  source: Production,
+  gained: number,
+): number {
+  let led = 0
+  for (const alt of target.alts) {
+    if (alt.length > 0 && alt[0].kind === 'ref' && alt[0].name === source.name) {
+      led++
+    }
+  }
+  const gain = led * Math.max(source.alts.length - 1, 0)
+  if (gain > MAX_LEFT_RECURSION_EXPANSION - gained) {
+    throw new EmitError(
+      `${diagName()}: rule '${target.name}' exceeds the left-recursion ` +
+      `expansion limit of ${MAX_LEFT_RECURSION_EXPANSION} alternatives while ` +
+      `inlining '${source.name}', which begins ${led} of its alternatives ` +
+      `and has ${source.alts.length} of its own. Factor '${source.name}' ` +
+      `out of the alternatives it begins.`,
+      { rule: target.name, sp: target.sp })
+  }
+  return gained + gain
 }
 
 
@@ -7942,6 +8013,7 @@ export {
   isEffectivelyCaseSensitive,
   BUILTIN_TOKENS,
   MAX_REPEAT_EXPANSION,
+  MAX_LEFT_RECURSION_EXPANSION,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,

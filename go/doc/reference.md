@@ -49,7 +49,9 @@ per-emit package state. Concurrent calls are safe and take their turn.
 
 Runs the left-recursion pass alone, for a front-end that wants to
 inspect or test the rewritten IR. Returns a new grammar; the input is
-not modified.
+not modified. A grammar the pass refuses, a purely left-recursive rule
+or a rule past `MaxLeftRecursionExpansion`, panics with an
+`*EmitError`, which `EmitGrammarSpec` returns as its error instead.
 
 ## Options
 
@@ -235,6 +237,17 @@ compile errors; one that does not compiles to exactly the same grammar.
 
 The unbounded upper bound on a repetition, standing in for TypeScript's
 `Infinity`.
+
+### `const MaxLeftRecursionExpansion = 512`
+
+The most alternatives one rule may gain when the left-recursion pass
+substitutes the rules that lead its alternatives. Substituting a rule
+turns each alternative that begins with it into one alternative per
+alternative of that rule, so a chain of such rules multiplies at every
+step. Past the bound, `EmitGrammarSpec` returns an `*EmitError` that
+names the rule and the rule it was substituting, before making the
+alternatives. Factoring the leading reference out of the alternatives
+it begins keeps a grammar under it.
 
 ## Semantic actions
 

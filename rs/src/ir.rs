@@ -704,6 +704,22 @@ pub const MAX_ELEMENT_DEPTH: usize = 128;
 /// one mandatory copy or one generated helper.
 pub const MAX_REPEAT_EXPANSION: usize = 8192;
 
+/// The most alternatives one rule may gain from Paull's substitution
+/// before left-recursion elimination refuses the grammar.
+///
+/// Substituting a rule into the alternatives that begin with it turns
+/// each of them into one alternative per alternative of that rule, a gain
+/// of `led × (|source| − 1)` for `led` such alternatives, summed over every
+/// substitution into the rule. Without a bound a cycle of k rules whose
+/// alternatives lead with the next one multiplies to 2^(k+1) alternatives,
+/// and at k = 20 exhausted memory before the substitution finished. No
+/// grammar in the downstream corpora gains more than 28 (dhall.abnf, which
+/// does not compile within abnf's 60 s budget for another reason, gains
+/// 85); the cycle gains 508 at k = 8 and 1020 at k = 9.
+/// `MAX_LEFT_RECURSION_EXPANSION` in `ts/src/compiler.ts` records the
+/// measurement.
+pub const MAX_LEFT_RECURSION_EXPANSION: usize = 512;
+
 /// Refuse a grammar whose element nesting would overflow the stack of a
 /// pass that walks it. Measured with an explicit stack: finding the depth
 /// must not be able to overflow either.

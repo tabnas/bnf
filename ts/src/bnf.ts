@@ -36,6 +36,7 @@ export {
   isEffectivelyCaseSensitive,
   BUILTIN_TOKENS,
   MAX_REPEAT_EXPANSION,
+  MAX_LEFT_RECURSION_EXPANSION,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,
