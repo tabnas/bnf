@@ -1127,9 +1127,16 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	if clearAll {
 		spec.Clear = true
 	}
-	for _, name := range removeNames {
-		ruleSpec[name] = nil
-		fixedTokens["#"+name] = nil
+	// Each name writes two entries, a rule and a fixed token, and each is
+	// charged before it is written (MaxEmitUnits).
+	if len(removeNames) > 0 {
+		budget.begin(removalSubject(len(removeNames)), "", nil, emitStepRemove)
+		for _, name := range removeNames {
+			budget.charge(1)
+			ruleSpec[name] = nil
+			budget.charge(1)
+			fixedTokens["#"+name] = nil
+		}
 	}
 	return spec, nil
 }

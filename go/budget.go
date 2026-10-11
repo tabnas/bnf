@@ -19,14 +19,16 @@ import (
 // The compiled grammar holds rules, and each rule holds alternates. A rule
 // counts 1. An alternate counts 1, plus 1 for each token its s names, plus
 // 1 for the rule it names in p or r. A token set counts 1 for each of its
-// members. Three tables the emitter builds on the way count an entry a unit
-// as well: the tokens each probe helper lists (rewriteProbeDispatches), the
-// tokens in each rule's FIRST and FOLLOW sets, and the pairs of tokens in
-// each rule's FOLLOW₂ set. A grammar of R rules and A alternates that name N
-// tokens and rules in all, with M token-set members, P probe entries, F
+// members, and each name a grammar removes (<remove>) counts 2, for the
+// rule and the fixed token it writes in their place. Three tables the
+// emitter builds on the way count an entry a unit as well: the tokens each
+// probe helper lists (rewriteProbeDispatches), the tokens in each rule's
+// FIRST and FOLLOW sets, and the pairs of tokens in each rule's FOLLOW₂
+// set. A grammar of R rules and A alternates that name N tokens and rules
+// in all, with M token-set members, D removed names, P probe entries, F
 // FIRST and L FOLLOW entries and L₂ FOLLOW₂ pairs, writes
 //
-//	written = R + A + N + M + P + F + L + L₂
+//	written = R + A + N + M + 2·D + P + F + L + L₂
 //
 // units. Each one is charged at the point it is generated, before the
 // allocation that would hold it, so a grammar that would pass the limit is
@@ -87,6 +89,10 @@ var (
 		doing: "enumerating the token sequences that tell its alternatives apart",
 		advice: "Give its alternatives first tokens that tell them apart, or " +
 			"factor what they begin with into a rule of its own.",
+	}
+	emitStepRemove = emitStep{
+		doing:  "writing the rules and tokens it removes",
+		advice: "Remove fewer names.",
 	}
 )
 
@@ -193,6 +199,15 @@ func probeRuleUnits(n int) int {
 // ruleSubject is what a refusal names for a rule.
 func ruleSubject(name string) string {
 	return "rule '" + name + "'"
+}
+
+// removalSubject is what a refusal names for a grammar's <remove> list of
+// n names.
+func removalSubject(n int) string {
+	if n == 1 {
+		return "the removal list of 1 name"
+	}
+	return fmt.Sprintf("the removal list of %d names", n)
 }
 
 // altUnits is what an alternate holds (MaxEmitUnits): 1, 1 for each token

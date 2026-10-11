@@ -16,8 +16,8 @@ import (
 // so a grammar is refused before the step that would pass the limit is
 // made. The memos of token pairs are limited too (maxMemoEntries), and that
 // limit changes no output. Mirrors ts/test/emit-limit.test.js; every count
-// below is exact. A probe shape's refusal and that of the forty alternatives
-// of up to forty options are also shared fixtures,
+// below is exact. A probe shape's refusal, that of the forty alternatives of
+// up to forty options and that of a removal list are also shared fixtures,
 // rs/tests/oracle/ir-emit-units-*.json, which
 // TestOracleRefusalsMatchTypeScript grades.
 
@@ -121,6 +121,7 @@ const (
 	elAdviceLookahead  = "Give its alternatives first tokens that tell them apart, or " +
 		"factor what they begin with into a rule of its own."
 	elAdviceTokenSet = "Write fewer character classes that overlap it."
+	elAdviceRemove   = "Remove fewer names."
 )
 
 func elAdds(subject, doing string, room, written int, advice string) string {
@@ -268,6 +269,32 @@ func TestEmitLimitHoldsADispatchersPrefixesUntilItsAlternatesAreWritten(t *testi
 	elCompiles(t, elDispatched(2635, 569))
 	ee, _ := elRefused(t, elDispatched(2635, 570))
 	elWant(t, ee, elAdds("rule 'D'", "writing its alternates", 15372, 3484628, elAdviceAlternates))
+}
+
+func TestEmitLimitCountsTheEntriesTheRemovalsWrite(t *testing.T) {
+	// Each name a grammar removes writes a nil rule and a nil fixed token in
+	// the spec, 2 units. Beside the 3,499,332 units 2,641 nested classes
+	// write, 334 names fill the limit exactly, and 335 would pass it.
+	removing := func(n int) *Grammar {
+		g := elNested(2641)
+		for i := 0; i < n; i++ {
+			g.Remove = append(g.Remove, fmt.Sprintf("gone%d", i))
+		}
+		return g
+	}
+	spec, err := EmitGrammarSpec(removing(334), &ConvertOptions{Tag: "x"})
+	if err != nil {
+		t.Fatalf("334 removals refused: %v", err)
+	}
+	if rs, ok := spec.Rule["gone333"]; !ok || rs != nil {
+		t.Fatalf("gone333 is %v, present %v; want a nil rule", rs, ok)
+	}
+	ee, _ := elRefused(t, removing(335))
+	elWant(t, ee, elAdds("the removal list of 335 names", "writing the rules and tokens it removes",
+		668, 3499332, elAdviceRemove))
+	if ee.Rule != "" {
+		t.Fatalf("rule %q, want none", ee.Rule)
+	}
 }
 
 func TestEmitLimitRefusesTheTokenSetThatWouldPassItNamingTheClass(t *testing.T) {

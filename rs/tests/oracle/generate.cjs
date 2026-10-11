@@ -214,6 +214,9 @@ function regen(fixtureFile) {
 //                          tokens of v: 500 probes, the last refused
 //   ir-emit-units-options  A = [x0] … [x39] "y" / [x1] … [x39] "y" / … /
 //                          "z", refused while its lookahead is enumerated
+//   ir-emit-units-remove   2,642 character classes nested inside one
+//                          another, which write all but 664 units, and a
+//                          removal list of 333 names, 2 units each
 function limits(outdir) {
   const lit = (literal) => ({ kind: 'term', literal })
   const ref = (name) => ({ kind: 'ref', name })
@@ -241,10 +244,22 @@ function limits(outdir) {
       ],
     }],
   })
+  const removing = (c, n) => ({
+    productions: [{
+      name: 'A',
+      alts: Array.from({ length: c }, (_, i) => [{
+        kind: 'regex',
+        pattern: `[${String.fromCodePoint(0x100)}-${String.fromCodePoint(0x101 + i)}]`,
+        flags: 'u',
+      }]),
+    }],
+    remove: Array.from({ length: n }, (_, i) => 'gone' + i),
+  })
   Fs.mkdirSync(outdir, { recursive: true })
   for (const [name, ir] of [
     ['ir-emit-units-probes', probes(500, 1750)],
     ['ir-emit-units-options', options(40)],
+    ['ir-emit-units-remove', removing(2642, 333)],
   ]) {
     const fx = fixtureFor(name, ir, { tag: 'demo' }, [])
     if (null == fx.pureError) throw new Error(`${name} compiled`)

@@ -14,9 +14,10 @@
 // of degree up to four in their number: forty alternatives of up to forty
 // options did not finish in a minute.
 //
-// A probe shape's refusal and that of the forty alternatives of up to forty
-// options are also shared fixtures, rs/tests/oracle/ir-emit-units-*.json,
-// which oracle-refusal.test.js and the other runtimes' oracle tests grade.
+// A probe shape's refusal, that of the forty alternatives of up to forty
+// options and that of a removal list are also shared fixtures,
+// rs/tests/oracle/ir-emit-units-*.json, which oracle-refusal.test.js and the
+// other runtimes' oracle tests grade.
 //
 // The memos of token pairs are limited too (MAX_MEMO_ENTRIES), and that
 // limit changes no output, which the last tests show.
@@ -122,6 +123,7 @@ const ADVICE = {
   lookahead: 'Give its alternatives first tokens that tell them apart, or ' +
     'factor what they begin with into a rule of its own.',
   tokenSet: 'Write fewer character classes that overlap it.',
+  remove: 'Remove fewer names.',
 }
 
 const adds = (subject, doing, room, written, advice) =>
@@ -235,6 +237,27 @@ describe('emit limit', () => {
     assert.throws(() => emit(dispatched(2635, 570)), {
       message: adds("rule 'D'", 'writing its alternates', 15372, 3484628,
         ADVICE.alternates),
+    })
+  })
+
+  it('counts the entries the removals write, up to the limit and no further', () => {
+    // Each name a grammar removes writes a null rule and a null fixed token
+    // in the spec, 2 units. Beside the 3,499,332 units 2,641 nested classes
+    // write, 334 names fill the limit exactly, and 335 would pass it.
+    const removing = (n) => ({
+      ...nested(2641),
+      remove: Array.from({ length: n }, (_, i) => 'gone' + i),
+    })
+    const spec = emit(removing(334))
+    assert.equal(spec.rule.gone333, null)
+    assert.equal(spec.options.fixed.token['#gone333'], null)
+    assert.throws(() => emit(removing(335)), (error) => {
+      assert.ok(error instanceof EmitError)
+      assert.equal(error.message, adds('the removal list of 335 names',
+        'writing the rules and tokens it removes', 668, 3499332,
+        ADVICE.remove))
+      assert.equal(error.rule, undefined)
+      return true
     })
   })
 

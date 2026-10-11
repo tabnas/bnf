@@ -123,12 +123,14 @@ group in a tail, copied once per alternative of the rule inlined before it
 every rule it begins (`-source-group`), an inlined rule of empty
 alternatives (`-empty-alternatives`), and 362 options in front of a
 hidden left recursion, split before any substitution runs
-(`-optional-prefix`). The two `ir-emit-units-*` fixtures are the emit
+(`-optional-prefix`). The three `ir-emit-units-*` fixtures are the emit
 limit's (`MAX_EMIT_UNITS`): 500 probes over 1,750 tokens, the last of them
-refused (`-probes`), and forty alternatives of up to forty options, refused
-while their lookahead is enumerated (`-options`). `node
-tests/oracle/generate.cjs limits tests/oracle` writes them, each on one
-line, since their IRs are large, and `regen` keeps them so.
+refused (`-probes`), forty alternatives of up to forty options, refused
+while their lookahead is enumerated (`-options`), and a removal list of 333
+names beside 2,642 nested character classes, refused while it writes the
+rules and tokens it removes (`-remove`). `node tests/oracle/generate.cjs
+limits tests/oracle` writes them, each on one line, since their IRs are
+large, and `regen` keeps them so.
 
 ## Untrusted IR, and where the stack still runs out
 
@@ -170,8 +172,9 @@ elements each. Without it, 5,000 rules of the chain held hundreds of
 megabytes in each runtime, and a host's deadline bounds the time that
 takes, not the memory. `MAX_EMIT_UNITS` (`src/budget.rs`) holds what the
 emitter writes after that: every rule, alternate and token or rule an
-alternate names, every token-set member, every probe-list entry and every
-FIRST, FOLLOW and FOLLOW₂ entry, each charged before it is made, and, while
+alternate names, every token-set member, the rule and token entry each
+removed name writes, every probe-list entry and every FIRST, FOLLOW and
+FOLLOW₂ entry, each charged before it is made, and, while
 a choice is decided, the token paths its enumeration holds, and then the
 prefixes it dispatches on, until they are written. A thousand optional
 prefixes over a vocabulary of a thousand tokens, and forty alternatives

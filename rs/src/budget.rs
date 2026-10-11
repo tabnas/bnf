@@ -15,13 +15,15 @@ use crate::spec::{AltSpec, RuleSpec};
 /// The compiled grammar holds rules, and each rule holds alternates. A rule
 /// counts 1. An alternate counts 1, plus 1 for each token its `s` names,
 /// plus 1 for the rule it names in `p` or `r`. A token set counts 1 for
-/// each of its members. Three tables the emitter builds on the way count an
-/// entry a unit as well: the tokens each probe helper lists, the tokens in
-/// each rule's FIRST and FOLLOW sets, and the pairs of tokens in each rule's
-/// FOLLOW₂ set. A grammar of R rules and A alternates that name N tokens and
-/// rules in all, with M token-set members, P probe entries, F FIRST and L
-/// FOLLOW entries and L₂ FOLLOW₂ pairs, writes
-/// `R + A + N + M + P + F + L + L₂` units. Each one is charged at the point
+/// each of its members, and each name a grammar removes (`<remove>`) counts
+/// 2, for the rule and the fixed token it writes in their place. Three
+/// tables the emitter builds on the way count an entry a unit as well: the
+/// tokens each probe helper lists, the tokens in each rule's FIRST and
+/// FOLLOW sets, and the pairs of tokens in each rule's FOLLOW₂ set. A
+/// grammar of R rules and A alternates that name N tokens and rules in all,
+/// with M token-set members, D removed names, P probe entries, F FIRST and
+/// L FOLLOW entries and L₂ FOLLOW₂ pairs, writes
+/// `R + A + N + M + 2·D + P + F + L + L₂` units. Each one is charged at the point
 /// it is generated, before the allocation that would hold it, so a grammar
 /// that would pass the limit is refused before the step that would pass it
 /// allocates.
@@ -77,6 +79,10 @@ const STEP_LOOKAHEAD: EmitStep = EmitStep {
     advice: "Give its alternatives first tokens that tell them apart, or \
              factor what they begin with into a rule of its own.",
 };
+pub(crate) const STEP_REMOVE: EmitStep = EmitStep {
+    doing: "writing the rules and tokens it removes",
+    advice: "Remove fewer names.",
+};
 
 /// What a refusal names.
 #[derive(Clone)]
@@ -85,6 +91,8 @@ pub(crate) enum Subject {
     Rule(String),
     /// `the character class /p/`, carrying no rule.
     Class(String),
+    /// `the removal list of n names`, carrying no rule.
+    Removals(usize),
 }
 
 struct Step {
@@ -201,6 +209,8 @@ impl EmitBudget {
         let (subject, rule) = match &step.subject {
             Subject::Rule(name) => (format!("rule '{name}'"), Some(name.clone())),
             Subject::Class(pattern) => (format!("the character class /{pattern}/"), None),
+            Subject::Removals(1) => ("the removal list of 1 name".to_string(), None),
+            Subject::Removals(n) => (format!("the removal list of {n} names"), None),
         };
         EmitError {
             message: format!(

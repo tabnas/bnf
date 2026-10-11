@@ -5,11 +5,11 @@
 // while it runs. Each is charged before the allocation that would pass it,
 // so a grammar is refused before the step that would pass the limit is made.
 // Mirrors ts/test/emit-limit.test.js; every count below is exact. A probe
-// shape's refusal and that of the forty alternatives of up to forty options
-// are also shared fixtures, tests/oracle/ir-emit-units-*.json, which the
-// oracle test grades byte for byte here and in the other two runtimes. That
-// the memo limit changes no output is a unit test in src/emit.rs, since it
-// lifts the limit.
+// shape's refusal, that of the forty alternatives of up to forty options and
+// that of a removal list are also shared fixtures,
+// tests/oracle/ir-emit-units-*.json, which the oracle test grades byte for
+// byte here and in the other two runtimes. That the memo limit changes no
+// output is a unit test in src/emit.rs, since it lifts the limit.
 
 mod common;
 
@@ -125,6 +125,7 @@ const PROBE: &str = "Write that optional prefix and what follows it as two alter
                      one with the prefix and one without.";
 const ALTERNATES: &str = "Factor what its alternatives share into rules of their own.";
 const TOKEN_SET: &str = "Write fewer character classes that overlap it.";
+const REMOVE: &str = "Remove fewer names.";
 
 fn adds(subject: &str, doing: &str, room: usize, written: usize, advice: &str) -> String {
     format!(
@@ -293,6 +294,32 @@ fn holds_the_prefixes_a_choice_dispatches_on_until_its_alternates_are_written() 
             ALTERNATES
         )
     );
+}
+
+#[test]
+fn counts_the_entries_the_removals_write_up_to_the_limit_and_no_further() {
+    // Each name a grammar removes writes a null rule and a null fixed token
+    // in the spec, 2 units. Beside the 3,499,332 units 2,641 nested classes
+    // write, 334 names fill the limit exactly, and 335 would pass it.
+    let removing = |n: usize| {
+        let mut g = nested(2641);
+        g.remove = (0..n).map(|i| format!("gone{i}")).collect();
+        g
+    };
+    let spec = emit(&removing(334)).expect("334 removals");
+    assert_eq!(spec.rule.get("gone333"), Some(&None));
+    let err = emit(&removing(335)).expect_err("335 removals compiled");
+    assert_eq!(
+        err.message,
+        adds(
+            "the removal list of 335 names",
+            "writing the rules and tokens it removes",
+            668,
+            3_499_332,
+            REMOVE
+        )
+    );
+    assert_eq!(err.rule, None);
 }
 
 #[test]

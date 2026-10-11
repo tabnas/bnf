@@ -29,7 +29,7 @@ use crate::analysis::{
 use crate::annotate::{plan_array_helpers, plan_value_annotations};
 use crate::budget::{
     alt_units, memo_limit, probe_rule_units, rule_units, EmitBudget, Subject, STEP_ALTERNATES,
-    STEP_TOKEN_CLASS, STEP_TOKEN_SET,
+    STEP_REMOVE, STEP_TOKEN_CLASS, STEP_TOKEN_SET,
 };
 use crate::desugar::desugar;
 use crate::factor::{left_factor, seq_token_span, LOOKAHEAD_K};
@@ -1112,6 +1112,7 @@ pub fn emit_grammar_spec(
         refs,
         prov,
         mut rule_spec,
+        budget,
         ..
     } = emitter;
 
@@ -1144,8 +1145,15 @@ pub fn emit_grammar_spec(
     if clear_all {
         spec.clear = true;
     }
+    // Each name writes two entries, a rule and a fixed token, and each is
+    // charged before it is written (`MAX_EMIT_UNITS`).
+    if !remove_names.is_empty() {
+        budget.begin(Subject::Removals(remove_names.len()), None, &STEP_REMOVE);
+    }
     for name in &remove_names {
+        budget.charge(1)?;
         rule_spec.insert(name.clone(), None);
+        budget.charge(1)?;
         if let Some(Value::Object(fixed)) = spec.options.get_mut("fixed") {
             if let Some(Value::Object(token)) = fixed.get_mut("token") {
                 token.insert(format!("#{name}"), Value::Null);

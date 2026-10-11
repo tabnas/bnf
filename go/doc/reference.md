@@ -284,8 +284,10 @@ that names the rule, before the step that would pass it allocates.
 
 What compiling one grammar may write, counted in units. A rule of the
 spec counts 1, and an alternate 1, with 1 more for each token its `s`
-names and 1 for the rule it names in `p` or `r`. A token set counts 1
-for each member, and so do three tables the emitter builds on the way:
+names and 1 for the rule it names in `p` or `r`. Each name the grammar
+removes counts 2, for the rule and the fixed token it writes in their
+place. A token set counts 1 for each member, and so do three tables the
+emitter builds on the way:
 the tokens each probe helper lists, the tokens a rule can begin with
 and those that can follow it, and the pairs of tokens that can follow
 it. The emitter charges a probe helper's rule with its list, which fixes
