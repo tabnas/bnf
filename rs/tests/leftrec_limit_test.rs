@@ -3,12 +3,13 @@
 // What one rule may gain from Paull's substitution is bounded
 // (`MAX_LEFT_RECURSION_EXPANSION`), and so is what the whole grammar may gain
 // in elements and alternatives (`MAX_LEFT_RECURSION_ELEMENTS`). Each bound
-// refuses the grammar before the substitution that would pass it is made.
+// refuses the grammar before the step that would pass it is made.
 // Mirrors ts/test/leftrec-limit.test.js; every count below is exact. The
 // refusals of the twenty-rule cycle, of the shortest chain the element bound
-// refuses and of the four other shapes it counts (a group in a tail, a group
+// refuses and of the five other shapes it counts (a group in a tail, a group
 // of empty alternatives in a tail, a group in the inlined rule, the
-// alternatives the inlined rule writes) are also shared fixtures,
+// alternatives the inlined rule writes, and options split off in front of a
+// hidden left recursion) are also shared fixtures,
 // tests/oracle/ir-leftrec-*.json, graded byte for byte by the oracle test.
 
 mod common;
@@ -228,6 +229,27 @@ fn empty_group(k: usize) -> tabnas_bnf::Element {
     tabnas_bnf::Element::group((0..k).map(|_| vec![]).collect())
 }
 
+/// A = [x0] … [x(k - 1)] A "y" / "z": a hidden left recursion behind k
+/// options.
+fn optional_prefix(k: usize) -> Grammar {
+    let mut alt: Vec<tabnas_bnf::Element> = (0..k)
+        .map(|i| tabnas_bnf::Element::opt(sens_term(&format!("x{i}"))))
+        .collect();
+    alt.push(reference("A"));
+    alt.push(sens_term("y"));
+    Grammar::new(vec![prod("A", vec![alt, vec![sens_term("z")]])])
+}
+
+fn splitting(rule: &str, remaining: usize, added: usize) -> String {
+    format!(
+        "cyc: rule '{rule}' exceeds the left-recursion element limit of 131072 elements while \
+         splitting the elements that can match nothing before '{rule}' in one of its \
+         alternatives, which would add more than {remaining} elements to the {added} already \
+         added to the grammar. Write that alternative with fewer elements that can match \
+         nothing before '{rule}'."
+    )
+}
+
 fn elements(rule: &str, source: &str, led: usize, remaining: usize, added: usize) -> String {
     format!(
         "cyc: rule '{rule}' exceeds the left-recursion element limit of 131072 elements while \
@@ -375,6 +397,37 @@ fn counts_each_alternative_the_inlined_rule_writes() {
     assert_eq!(at.productions[0].alts.len(), 514);
     let err = emit(&grammar(257)).expect_err("a gain of 131327 compiled");
     assert_eq!(err.message, elements("t256", "s", 1, 256, 130816));
+}
+
+#[test]
+fn charges_splitting_off_what_can_match_nothing_before_a_hidden_left_recursion() {
+    // Splitting the i-th of k options off writes the rest of the
+    // alternative again, 2(k − i) + 2 elements. k = 361 adds
+    // 361 × 362 = 130682; k = 362 passes the limit at its 345th split, with
+    // 344 × 381 = 131064 added.
+    let at = eliminate_left_recursion(&optional_prefix(361)).expect("a gain of 130682");
+    // A = ("x0" [x1] … A "y" | … | "z") "y"*: 361 split alternatives and "z".
+    match &at.productions[0].alts[0][0].kind {
+        Kind::Group { alts } => assert_eq!(alts.len(), 362),
+        other => panic!("seed group: {other:?}"),
+    }
+    let err = emit(&optional_prefix(362)).expect_err("a gain of 131406 compiled");
+    assert_eq!(err.message, splitting("A", 8, 131064));
+}
+
+#[test]
+fn refuses_five_thousand_options_before_a_hidden_left_recursion_within_a_second() {
+    let start = Instant::now();
+    let err = emit(&optional_prefix(5000)).expect_err("the options compiled");
+    assert_eq!(err.message, splitting("A", 1228, 129844));
+    let err = eliminate_left_recursion(&optional_prefix(5000)).expect_err("the options were split");
+    let want = splitting("A", 1228, 129844);
+    assert!(err.message.ends_with(&want["cyc".len()..]), "{err}");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "refused after {elapsed:?}"
+    );
 }
 
 #[test]

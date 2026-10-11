@@ -316,13 +316,20 @@ fn is_hidden_left_recursive(alt: &[Rc<Element>], name: &str) -> bool {
 /// recursion that `eliminate_direct_left_rec` can remove:
 ///
 /// `A = ["x"] A "y" / "z"` becomes `A = "x" A "y" / A "y" / "z"`
+///
+/// Each split copies the rest of the alternative, so k such elements in
+/// front of the recursion write k alternatives holding about k²/2
+/// elements between them. Every split is charged to the grammar-wide
+/// budget ([`charge_expansion`]) before it is made, and `added` carries
+/// the total on to the substitution that follows.
 fn expand_nullable_left_prefixes(
     prods: Vec<Production>,
     sources: &mut RewriteSources,
-) -> Vec<Production> {
-    prods
-        .into_iter()
-        .map(|p| {
+    added: &mut usize,
+) -> Result<Vec<Production>, EmitError> {
+    let mut out = Vec::with_capacity(prods.len());
+    for p in prods {
+        out.push({
             let mut alts = p.alts.clone();
             let mut changed = false;
             // Each expansion shortens the leading sugar run of the
@@ -339,6 +346,7 @@ fn expand_nullable_left_prefixes(
                 let alt = alts[idx].clone();
                 let present = nullable_sugar_present(&alt[0])
                     .expect("hidden left recursion starts with nullable sugar");
+                *added = charge_expansion(&p, &alt, &present, *added)?;
                 let present_len = present.len();
                 let mut with: Sequence = present;
                 with.extend(alt[1..].iter().cloned());
@@ -364,8 +372,9 @@ fn expand_nullable_left_prefixes(
             } else {
                 p
             }
-        })
-        .collect()
+        });
+    }
+    Ok(out)
 }
 
 /// Eliminate left recursion, both direct (P → P α) and indirect
@@ -384,7 +393,7 @@ fn expand_nullable_left_prefixes(
 /// a sequence in every rule it begins: a chain of n rules, each one
 /// alternative that begins with the next, would come back holding about
 /// n²/2 elements, so the pass refuses a grammar it would add more than
-/// [`MAX_LEFT_RECURSION_ELEMENTS`](crate::MAX_LEFT_RECURSION_ELEMENTS) to,
+/// [`MAX_LEFT_RECURSION_ELEMENTS`] to,
 /// the chain from n = 514 on, before it copies them.
 pub fn eliminate_left_recursion(grammar: &ir::Grammar) -> Result<ir::Grammar, EmitError> {
     eliminate_left_recursion_keeping(&Grammar::from_ir(grammar), &IndexSet::new())
@@ -403,9 +412,10 @@ pub(crate) fn eliminate_left_recursion_keeping(
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
-    // What substitution has added to the grammar so far, in elements and
-    // alternatives, held to MAX_LEFT_RECURSION_ELEMENTS before each
-    // substitution is made.
+    // What elimination has added to the grammar so far, in elements and
+    // alternatives, held to MAX_LEFT_RECURSION_ELEMENTS before each step
+    // that adds is made: first the splitting of nullable prefixes, then
+    // each substitution.
     let mut added = 0usize;
 
     let copies: Vec<Production> = grammar
@@ -432,7 +442,11 @@ pub(crate) fn eliminate_left_recursion_keeping(
     // Order productions so that rules referenced at a leading position
     // are processed before the rules that reference them. Source metadata
     // is keyed by production name, so reordering cannot detach it.
-    let mut prods = topo_order_for_paull(expand_nullable_left_prefixes(copies, &mut sources));
+    let mut prods = topo_order_for_paull(expand_nullable_left_prefixes(
+        copies,
+        &mut sources,
+        &mut added,
+    )?);
 
     // Substitution normally runs for every production, even a cycle-free
     // one. One case is exempt: a PURE ALIAS, a production whose single
@@ -883,6 +897,51 @@ fn charge_elements(
         if gain > remaining {
             return refuse();
         }
+    }
+    Ok(added + gain)
+}
+
+/// Charge splitting `alt`, whose leading element `s` can match nothing,
+/// into `present rest` and `rest` ([`expand_nullable_left_prefixes`])
+/// against what the whole grammar may gain
+/// ([`MAX_LEFT_RECURSION_ELEMENTS`]), BEFORE the two alternatives are
+/// made, and return the new total. They cost
+/// `(1 + deep|present| + deep|rest|) + (1 + deep|rest|)`, and the one they
+/// replace cost `1 + deep|s| + deep|rest|`, so the split adds
+/// `1 + deep|present| + deep|rest| − deep|s|`, floored at zero. Mirrors
+/// `chargeExpansion` in `ts/src/compiler.ts`.
+fn charge_expansion(
+    prod: &Production,
+    alt: &[Rc<Element>],
+    present: &[Rc<Element>],
+    added: usize,
+) -> Result<usize, EmitError> {
+    let remaining = MAX_LEFT_RECURSION_ELEMENTS - added;
+    let lead = deep_size([&*alt[0]], usize::MAX);
+    // Counted until it passes what could still fit once `lead` is taken
+    // off, so the decision is exact.
+    let cap = remaining.saturating_add(lead).saturating_add(2);
+    let written = deep_size(present.iter().chain(&alt[1..]).map(|el| &**el), cap);
+    let gain = (written + 1).saturating_sub(lead);
+    if gain > remaining {
+        return Err(EmitError::at(
+            format!(
+                "{}: rule '{}' exceeds the left-recursion element limit of {} elements while \
+                 splitting the elements that can match nothing before '{}' in one of its \
+                 alternatives, which would add more than {} elements to the {} already added \
+                 to the grammar. Write that alternative with fewer elements that can match \
+                 nothing before '{}'.",
+                diag_name(),
+                prod.name,
+                MAX_LEFT_RECURSION_ELEMENTS,
+                prod.name,
+                remaining,
+                added,
+                prod.name
+            ),
+            &prod.name,
+            prod.sp,
+        ));
     }
     Ok(added + gain)
 }

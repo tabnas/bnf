@@ -1066,7 +1066,16 @@ function isHiddenLeftRecursive(alt: Sequence, name: string): boolean {
 //
 // Only alternatives that are actually hidden-left-recursive are
 // touched, so a grammar that compiles correctly today is unchanged.
-function expandNullableLeftPrefixes(prods: Production[]): Production[] {
+//
+// Each split copies the rest of the alternative, so `k` such elements in
+// front of the recursion write k alternatives holding about k²/2
+// elements between them. Every split is charged to the grammar-wide
+// budget (`chargeExpansion`) before it is made; `budget.added` carries
+// the total on to the substitution that follows.
+function expandNullableLeftPrefixes(
+  prods: Production[],
+  budget: { added: number },
+): Production[] {
   return prods.map((p) => {
     let alts = p.alts
     // Each expansion shortens the leading sugar run of the alternative
@@ -1077,6 +1086,7 @@ function expandNullableLeftPrefixes(prods: Production[]): Production[] {
       if (idx < 0) break
       const alt = alts[idx]
       const present = nullableSugarPresent(alt[0]) as Sequence
+      budget.added = chargeExpansion(p, alt, present, budget.added)
       alts = [
         ...alts.slice(0, idx),
         [...present, ...alt.slice(1)],
@@ -1104,6 +1114,11 @@ function eliminateLeftRecursionKeeping(
   const originalOrder = grammar.productions.map((p) => p.name)
   // Suffix-debt counter names handed out across the whole grammar.
   const debtNames = new Set<string>()
+  // What left-recursion elimination has added to the grammar so far, in
+  // elements and alternatives, held to MAX_LEFT_RECURSION_ELEMENTS before
+  // each step that adds is made: first the splitting of nullable prefixes,
+  // then each substitution.
+  const budget = { added: 0 }
 
   // Order productions so that rules referenced at a leading position
   // are processed before the rules that reference them. Paull's
@@ -1121,6 +1136,7 @@ function eliminateLeftRecursionKeeping(
         sp: p.sp,
         value: p.value,
       })),
+      budget,
     ),
   )
 
@@ -1147,10 +1163,7 @@ function eliminateLeftRecursionKeeping(
   const cyclic = findLeadingRefCycleMembers(prods)
   const isExemptAlias = (p: Production): boolean => exemptAlias(p, cyclic)
 
-  // What substitution has added to the grammar so far, in elements and
-  // alternatives, held to MAX_LEFT_RECURSION_ELEMENTS before each
-  // substitution is made.
-  let added = 0
+  let added = budget.added
 
   for (let i = 0; i < prods.length; i++) {
     // For each earlier production A_j, inline any alternative of
@@ -1423,47 +1436,62 @@ function hasLeadingRefTo(prod: Production, name: string): boolean {
 const MAX_LEFT_RECURSION_EXPANSION = 512
 
 
-// What Paull's substitution may ADD to the whole grammar, counted in
-// elements and alternatives, before left-recursion elimination refuses it.
+// What left-recursion elimination may ADD to the whole grammar, counted in
+// elements and alternatives, before it refuses the grammar.
 //
 // An element counts 1 and everything nested in it, all the way down: 1 for
 // each alternative of a group and the deep sizes of the elements in it, and
 // the deep size of the inner element of an option or a repetition. That is
 // its deep size. An alternative counts the same way: 1 for itself and the
-// deep size of each of its elements. Substituting `source` into `target`
-// replaces each alternative of `target` that begins with `source` by one
-// alternative per alternative of `source`, a_1 … a_m, each followed by the
-// replaced alternative's tail. What the new alternatives cost, less what
-// the one they replace cost, is
+// deep size of each of its elements. Two steps of the pass write more than
+// they replace, and each is charged before it allocates, as what it writes
+// less what it replaces, floored at zero; the bound holds the sum over
+// every one of them in the grammar.
+//
+// Paull's substitution of `source` into `target` replaces each
+// alternative of `target` that begins with `source` by one alternative per
+// alternative of `source`, a_1 … a_m, each followed by the replaced
+// alternative's tail:
 //
 //   Σᵢ (1 + deep|aᵢ| + deep|tail|) − (1 + 1 + deep|tail|)
 //     = (m − 1)·(1 + deep|tail|) + Σ deep|aᵢ| − 1
 //
-// floored at zero, and this bound holds the sum over every substitution in
-// the grammar. MAX_LEFT_RECURSION_EXPANSION bounds the alternatives one rule
-// gains; this bounds what all of them hold. Counting deep sizes and every
-// alternative, a group's as well, is what keeps a copy from looking free: a
-// tail holding a group of a thousand elements, or of a thousand empty
-// alternatives, is copied once per alternative of the source; a
-// one-alternative source holding a group writes the group into every rule
-// that begins with it; and a source of empty alternatives writes an
-// alternative each. Each of those is written out again by desugaring and in
-// the emitted grammar.
+// Splitting a hidden left recursion's leading element s, which can match
+// nothing, off an alternative `s rest` (expandNullableLeftPrefixes)
+// writes `present(s) rest` and `rest`:
+//
+//   (1 + deep|present(s)| + deep|rest|) + (1 + deep|rest|)
+//     − (1 + deep|s| + deep|rest|)
+//     = 1 + deep|present(s)| + deep|rest| − deep|s|
+//
+// which is deep|rest| for an option and deep|s| + deep|rest| for a
+// repetition.
+//
+// MAX_LEFT_RECURSION_EXPANSION bounds the alternatives one rule gains; this
+// bounds what all of them hold. Counting deep sizes and every alternative,
+// a group's as well, is what keeps a copy from looking free: a tail holding
+// a group of a thousand elements, or of a thousand empty alternatives, is
+// copied once per alternative of the source; a one-alternative source
+// holding a group writes the group into every rule that begins with it;
+// and a source of empty alternatives writes an alternative each. Each of
+// those is written out again by desugaring and in the emitted grammar.
 //
 // A chain of n rules, each one alternative that begins with the next
 // (`r0 = r1 "x0"`, `r1 = r2 "x1"`, …), gains no alternatives at all, but
 // ends with every rule holding the rest of the chain: (n − 2)(n − 1)/2
 // added, and an emitted grammar as large. A host's deadline bounds the
 // time that costs, not the memory, and at n = 5,000 the three runtimes
-// held 300 MB to 1.2 GB compiling it.
+// held 300 MB to 1.2 GB compiling it. `A = [x1] … [xk] A "y" / "z"` needs
+// no substitution at all, and its split writes k alternatives holding
+// about k²/2 elements: k(k + 1) added.
 //
 // Measured over the grammars MAX_LEFT_RECURSION_EXPANSION was measured
 // over, 1,171 of them: no grammar adds more than 6,615 (dhall.abnf, which
 // does not compile within abnf's budget for another reason), and none that
 // compiles more than 2,600 (proto's grammar, without `tokenClasses`). This
-// bound leaves nearly twenty times the room dhall.abnf needs, and refuses
-// the chain from n = 514 on, before the substitution that would pass it
-// allocates.
+// bound leaves nearly twenty times the room dhall.abnf needs. It refuses
+// the chain from n = 514 on and the run of options from k = 362 on, before
+// the step that would pass it allocates.
 const MAX_LEFT_RECURSION_ELEMENTS = 131072
 
 
@@ -1560,6 +1588,40 @@ function chargeElements(
     // one they replace cost, 1 + 1 + tail.
     gain += Math.max(m * (1 + tail) + held - (2 + tail), 0)
     if (gain > remaining) refuse()
+  }
+  return added + gain
+}
+
+
+// Charge splitting `alt`, whose leading element `s` can match nothing,
+// into `present rest` and `rest` (expandNullableLeftPrefixes) against
+// what the whole grammar may gain (MAX_LEFT_RECURSION_ELEMENTS), BEFORE
+// the two alternatives are made, and return the new total. They cost
+// (1 + deep|present| + deep|rest|) + (1 + deep|rest|), and the one they
+// replace cost 1 + deep|s| + deep|rest|, so the split adds
+// 1 + deep|present| + deep|rest| − deep|s|, floored at zero.
+function chargeExpansion(
+  prod: Production,
+  alt: Sequence,
+  present: Sequence,
+  added: number,
+): number {
+  const remaining = MAX_LEFT_RECURSION_ELEMENTS - added
+  const lead = deepSize([alt[0]], Infinity)
+  // Counted until it passes what could still fit once `lead` is taken
+  // off, so the decision is exact.
+  const written = deepSize([...present, ...alt.slice(1)], remaining + lead + 2)
+  const gain = Math.max(written + 1 - lead, 0)
+  if (gain > remaining) {
+    throw new EmitError(
+      `${diagName()}: rule '${prod.name}' exceeds the left-recursion ` +
+      `element limit of ${MAX_LEFT_RECURSION_ELEMENTS} elements while ` +
+      `splitting the elements that can match nothing before ` +
+      `'${prod.name}' in one of its alternatives, which would add more ` +
+      `than ${remaining} elements to the ${added} already added to the ` +
+      `grammar. Write that alternative with fewer elements that can ` +
+      `match nothing before '${prod.name}'.`,
+      { rule: prod.name, sp: prod.sp })
   }
   return added + gain
 }

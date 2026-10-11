@@ -252,22 +252,31 @@ it begins keeps a grammar under it.
 
 ### `const MaxLeftRecursionElements = 131072`
 
-What the left-recursion pass may add to the whole grammar when it
-substitutes the rules that lead alternatives, counted in elements and
-alternatives. An element's deep size is 1 and everything nested in it,
-all the way down: 1 for each alternative of a group and the deep sizes
-of the elements in it, and the deep size of the inner element of an
-option or a repetition. An alternative counts the same way: 1 and the
-deep size of each of its elements. Substituting a rule with the
-alternatives `a_1 … a_m` into an alternative that begins with it adds
-`(m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1`, floored at zero, and the
-bound holds the sum over every substitution in the grammar. A chain of
-rules, each one alternative that begins with the next, gains no
-alternatives but copies the rest of the chain into every rule, so what
-it adds grows with the square of its length: the bound refuses such a
-chain from 514 rules on. Past the bound, `EmitGrammarSpec` returns an
-`*EmitError` that names the rule and the rule it was substituting,
-before making the alternatives.
+What the left-recursion pass may add to the whole grammar, counted in
+elements and alternatives. An element's deep size is 1 and everything
+nested in it, all the way down: 1 for each alternative of a group and
+the deep sizes of the elements in it, and the deep size of the inner
+element of an option or a repetition. An alternative counts the same
+way: 1 and the deep size of each of its elements. Two steps of the pass
+write more than they replace, and the bound holds the sum of what they
+add over the whole grammar, each step counted as what it writes less
+what it replaces, floored at zero:
+
+- Substituting a rule with the alternatives `a_1 … a_m` into an
+  alternative that begins with it adds
+  `(m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1`.
+- Splitting a leading element `s` that can match nothing off an
+  alternative `s rest`, in front of a hidden left recursion, writes
+  `present(s) rest` and `rest`, and adds
+  `1 + deep|present(s)| + deep|rest| − deep|s|`.
+
+A chain of rules, each one alternative that begins with the next, gains
+no alternatives but copies the rest of the chain into every rule, so
+what it adds grows with the square of its length: the bound refuses such
+a chain from 514 rules on. `A = [x1] … [xk] A "y" / "z"` needs no
+substitution, and its split adds k² + k: the bound refuses it from
+k = 362 on. Past the bound, `EmitGrammarSpec` returns an `*EmitError`
+that names the rule, before the step that would pass it allocates.
 
 ## Semantic actions
 

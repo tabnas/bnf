@@ -115,13 +115,15 @@ refusals are shared by all three runtimes: `ts/test/oracle-refusal.test.js`
 holds the canonical compiler to each refusal it recorded, and
 `go/oracle_refusal_test.go` grades the Go port against them the same way.
 `ir-leftrec-limit` is the cycle of twenty rules that the left-recursion
-expansion limit refuses, and the five `ir-leftrec-elements-*` fixtures are
+expansion limit refuses, and the six `ir-leftrec-elements-*` fixtures are
 the shapes the element limit refuses: the chain of 514 rules (`-chain`), a
 group in a tail, copied once per alternative of the rule inlined before it
 (`-tail-group`), a group of empty alternatives there
 (`-tail-group-alternatives`), a group in the inlined rule, written into
-every rule it begins (`-source-group`), and an inlined rule of empty
-alternatives (`-empty-alternatives`).
+every rule it begins (`-source-group`), an inlined rule of empty
+alternatives (`-empty-alternatives`), and 362 options in front of a
+hidden left recursion, split before any substitution runs
+(`-optional-prefix`).
 
 ## Untrusted IR, and where the stack still runs out
 
@@ -151,13 +153,17 @@ its helpers are allocated. `MAX_LEFT_RECURSION_EXPANSION` holds the
 alternatives one rule may gain from the left-recursion substitution, so a
 cycle of rules whose alternatives lead with the next one is refused before
 it multiplies; without it, twenty such rules exhausted memory and aborted
-the process. `MAX_LEFT_RECURSION_ELEMENTS` holds what the substitution may
-add to the whole grammar, counting every element at any depth and every
-alternative, a group's as well, so a chain of rules of one alternative
-each, led by the next one, is refused from 514 rules on before it copies
-the rest of the chain into every rule; without it, 5,000 such rules held
-hundreds of megabytes in each runtime, and a host's deadline bounds the
-time that takes, not the memory. All three refuse with the rule named.
+the process. `MAX_LEFT_RECURSION_ELEMENTS` holds what left-recursion
+elimination may add to the whole grammar, counting every element at any
+depth and every alternative, a group's as well. Both steps that write more
+than they replace are charged before they allocate: the substitution, so a
+chain of rules of one alternative each, led by the next one, is refused
+from 514 rules on before it copies the rest of the chain into every rule,
+and the splitting of nullable prefixes, so `A = [x1] … [xk] A "y"` is
+refused from k = 362 on before it writes k alternatives of about k/2
+elements each. Without it, 5,000 rules of the chain held hundreds of
+megabytes in each runtime, and a host's deadline bounds the time that
+takes, not the memory. All three refuse with the rule named.
 
 ## Elements are shared, as TypeScript and Go share them
 

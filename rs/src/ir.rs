@@ -690,27 +690,35 @@ pub const MAX_REPEAT_EXPANSION: usize = 8192;
 /// measurement.
 pub const MAX_LEFT_RECURSION_EXPANSION: usize = 512;
 
-/// What Paull's substitution may add to the whole grammar, counted in
-/// elements and alternatives, before left-recursion elimination refuses it.
+/// What left-recursion elimination may add to the whole grammar, counted
+/// in elements and alternatives, before it refuses the grammar.
 ///
 /// An element counts 1 and everything nested in it, all the way down: 1
 /// for each alternative of a group and the deep sizes of the elements in
 /// it, and the deep size of the inner element of an option or a
 /// repetition. That is its deep size. An alternative counts the same way:
-/// 1 for itself and the deep size of each of its elements. Substituting a
-/// rule into an alternative that begins with it replaces that alternative
-/// by one per alternative of the rule, `a_1 … a_m`, each followed by the
-/// replaced alternative's tail. That adds
-/// `(m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1`, floored at zero, and this
-/// bound holds the sum over every substitution in the grammar.
+/// 1 for itself and the deep size of each of its elements. Two steps of the
+/// pass write more than they replace, and each is charged before it
+/// allocates, as what it writes less what it replaces, floored at zero;
+/// this bound holds the sum over every one of them in the grammar.
+/// Substituting a rule into an alternative that begins with it replaces
+/// that alternative by one per alternative of the rule, `a_1 … a_m`, each
+/// followed by the replaced alternative's tail, which adds
+/// `(m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1`. Splitting a hidden left
+/// recursion's leading element `s`, which can match nothing, off an
+/// alternative `s rest` writes `present(s) rest` and `rest`, which adds
+/// `1 + deep|present(s)| + deep|rest| − deep|s|`: `deep|rest|` for an
+/// option, `deep|s| + deep|rest|` for a repetition.
 /// [`MAX_LEFT_RECURSION_EXPANSION`] bounds the alternatives one rule gains;
 /// this bounds what all of them hold. A chain of n rules, each one
 /// alternative that begins with the next, gains no alternatives at all, but
 /// ends with every rule holding the rest of the chain: (n − 2)(n − 1)/2
-/// added. No grammar in the downstream corpora adds more than 6,615
-/// (dhall.abnf), and none that compiles more than 2,600; the chain is
-/// refused from n = 514 on. `MAX_LEFT_RECURSION_ELEMENTS` in
-/// `ts/src/compiler.ts` records the measurement.
+/// added. `A = [x1] … [xk] A "y" / "z"` needs no substitution, and its
+/// split adds k(k + 1). No grammar in the downstream corpora adds more than
+/// 6,615 (dhall.abnf), and none that compiles more than 2,600; the chain is
+/// refused from n = 514 on, and the options from k = 362 on.
+/// `MAX_LEFT_RECURSION_ELEMENTS` in `ts/src/compiler.ts` records the
+/// measurement.
 pub const MAX_LEFT_RECURSION_ELEMENTS: usize = 131072;
 
 /// Refuse a grammar whose element nesting would overflow the stack of a

@@ -13,7 +13,7 @@ import (
 // What one rule may gain from Paull's substitution is bounded
 // (MaxLeftRecursionExpansion), and so is what the whole grammar may gain in
 // elements and alternatives (MaxLeftRecursionElements). Each bound refuses
-// the grammar before the substitution that would pass it is made. Mirrors
+// the grammar before the step that would pass it is made. Mirrors
 // ts/test/leftrec-limit.test.js; every count below is exact.
 
 func lrLit(s string) *Element {
@@ -245,6 +245,28 @@ func lrEmptyGroup(k int) *Element {
 	return &Element{Kind: KindGroup, Alts: alts}
 }
 
+// lrOptionalPrefix is A = [x0] … [x(k-1)] A "y" / "z": a hidden left
+// recursion behind k options.
+func lrOptionalPrefix(k int) *Grammar {
+	alt := Sequence{}
+	for i := 0; i < k; i++ {
+		alt = append(alt, &Element{Kind: KindOpt, Inner: lrLit(fmt.Sprintf("x%d", i))})
+	}
+	alt = append(alt, lrRef("A"), lrLit("y"))
+	return &Grammar{Productions: []*Production{
+		{Name: "A", Alts: []Sequence{alt, {lrLit("z")}}},
+	}}
+}
+
+func lrSplitting(rule string, remaining, added int) string {
+	return fmt.Sprintf("cyc: rule '%s' exceeds the left-recursion element limit of 131072 "+
+		"elements while splitting the elements that can match nothing before '%s' in one "+
+		"of its alternatives, which would add more than %d elements to the %d already "+
+		"added to the grammar. Write that alternative with fewer elements that can match "+
+		"nothing before '%s'.",
+		rule, rule, remaining, added, rule)
+}
+
 func lrElements(rule, source string, led, remaining, added int) string {
 	return fmt.Sprintf("cyc: rule '%s' exceeds the left-recursion element limit of 131072 "+
 		"elements while inlining '%s', which begins %d of its alternatives and would add more "+
@@ -415,6 +437,36 @@ func TestLeftRecursionElementsCountEachAlternativeTheInlinedRuleWrites(t *testin
 	}
 	lrRefusedWith(t, lrEmit(t, g(257), &ConvertOptions{Tag: "cyc"}),
 		lrElements("t256", "s", 1, 256, 130816))
+}
+
+func TestLeftRecursionElementsChargeSplittingAnOptionalPrefix(t *testing.T) {
+	// Splitting the i-th of k options off writes the rest of the alternative
+	// again, 2(k − i) + 2 elements. k = 361 adds 361 × 362 = 130682; k = 362
+	// passes the limit at its 345th split, with 344 × 381 = 131064 added.
+	out, refused := lrEliminate(lrOptionalPrefix(361))
+	if refused != nil {
+		t.Fatal(refused)
+	}
+	// A = ("x0" [x1] … A "y" | … | "z") "y"*: 361 split alternatives and "z".
+	if seeds := out.Productions[0].Alts[0][0]; seeds.Kind != KindGroup || len(seeds.Alts) != 362 {
+		t.Fatalf("seed group: %+v", seeds)
+	}
+	lrRefusedWith(t, lrEmit(t, lrOptionalPrefix(362), &ConvertOptions{Tag: "cyc"}),
+		lrSplitting("A", 8, 131064))
+}
+
+func TestLeftRecursionElementsRefuseFiveThousandOptionsWithinASecond(t *testing.T) {
+	start := time.Now()
+	lrRefusedWith(t, lrEmit(t, lrOptionalPrefix(5000), &ConvertOptions{Tag: "cyc"}),
+		lrSplitting("A", 1228, 129844))
+	_, refused := lrEliminate(lrOptionalPrefix(5000))
+	want := strings.TrimPrefix(lrSplitting("A", 1228, 129844), "cyc")
+	if refused == nil || !strings.HasSuffix(refused.Message, want) {
+		t.Fatalf("refused = %v", refused)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("refused after %v", elapsed)
+	}
 }
 
 func TestLeftRecursionElementsSumEverySubstitutionInTheGrammar(t *testing.T) {

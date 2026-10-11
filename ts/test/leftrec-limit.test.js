@@ -3,7 +3,7 @@
 // What one rule may gain from Paull's substitution is bounded
 // (MAX_LEFT_RECURSION_EXPANSION), and so is what the whole grammar may gain
 // in elements and alternatives (MAX_LEFT_RECURSION_ELEMENTS). Each bound
-// refuses the grammar before the substitution that would pass it is made.
+// refuses the grammar before the step that would pass it is made.
 //
 // A cycle of k rules, each with two alternatives led by the next one,
 // doubles at every substitution: without the first bound, k = 20 exhausted
@@ -182,6 +182,27 @@ const emptyGroup = (k) => ({
   alts: Array.from({ length: k }, () => []),
 })
 
+// A = [x0] … [x(k - 1)] A "y" / "z": a hidden left recursion behind k
+// options.
+const optionalPrefix = (k) => ({
+  productions: [{
+    name: 'A',
+    alts: [
+      [...Array.from({ length: k }, (_, i) => ({ kind: 'opt', inner: lit('x' + i) })),
+        ref('A'), lit('y')],
+      [lit('z')],
+    ],
+  }],
+})
+
+const splitting = (rule, remaining, added) =>
+  `cyc: rule '${rule}' exceeds the left-recursion element limit of 131072 ` +
+  `elements while splitting the elements that can match nothing before ` +
+  `'${rule}' in one of its alternatives, which would add more than ` +
+  `${remaining} elements to the ${added} already added to the grammar. ` +
+  `Write that alternative with fewer elements that can match nothing ` +
+  `before '${rule}'.`
+
 const elements = (rule, source, led, remaining, added) =>
   `cyc: rule '${rule}' exceeds the left-recursion element limit of 131072 ` +
   `elements while inlining '${source}', which begins ${led} of its ` +
@@ -327,6 +348,35 @@ describe('left-recursion element limit', () => {
       () => emitGrammarSpec(g(257), { tag: 'cyc' }),
       { message: elements('t256', 's', 1, 256, 130816) },
     )
+  })
+
+  it('charges splitting off what can match nothing before a hidden left recursion', () => {
+    // Splitting the i-th of k options off writes the rest of the
+    // alternative again, 2(k − i) + 2 elements. k = 361 adds
+    // 361 × 362 = 130682; k = 362 passes the limit at its 345th split,
+    // with 344 × 381 = 131064 added.
+    const at = eliminateLeftRecursion(optionalPrefix(361))
+    // A = ("x0" [x1] … A "y" | … | "z") "y"*: 361 split alternatives and "z".
+    assert.equal(at.productions[0].alts[0][0].alts.length, 362)
+    assert.throws(
+      () => emitGrammarSpec(optionalPrefix(362), { tag: 'cyc' }),
+      { message: splitting('A', 8, 131064) },
+    )
+  })
+
+  it('refuses five thousand options before a hidden left recursion within a second', () => {
+    const t0 = process.hrtime.bigint()
+    assert.throws(
+      () => emitGrammarSpec(optionalPrefix(5000), { tag: 'cyc' }),
+      { message: splitting('A', 1228, 129844) },
+    )
+    const want = splitting('A', 1228, 129844).slice('cyc'.length)
+    assert.throws(
+      () => eliminateLeftRecursion(optionalPrefix(5000)),
+      (error) => error instanceof EmitError && error.message.endsWith(want),
+    )
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6
+    assert.ok(ms < 1000, `refused after ${ms.toFixed(0)} ms`)
   })
 
   it('sums every substitution in the grammar', () => {

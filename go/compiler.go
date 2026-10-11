@@ -4,6 +4,7 @@ package bnf
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -154,7 +155,13 @@ func isHiddenLeftRecursive(alt Sequence, name string) bool {
 // Only alternatives that are actually hidden-left-recursive are touched,
 // so a grammar that compiles correctly today is unchanged. Mirrors the TS
 // `expandNullableLeftPrefixes`.
-func expandNullableLeftPrefixes(prods []*Production) []*Production {
+//
+// Each split copies the rest of the alternative, so k such elements in front
+// of the recursion write k alternatives holding about k²/2 elements between
+// them. Every split is charged to the grammar-wide budget (chargeExpansion)
+// before it is made, and added carries the total on to the substitution that
+// follows.
+func expandNullableLeftPrefixes(prods []*Production, added *int) []*Production {
 	out := make([]*Production, len(prods))
 	for i, p := range prods {
 		alts := p.Alts
@@ -178,6 +185,7 @@ func expandNullableLeftPrefixes(prods []*Production) []*Production {
 			}
 			alt := alts[idx]
 			present := nullableSugarPresent(alt[0])
+			*added = chargeExpansion(p, alt, present, *added)
 			next := make([]Sequence, 0, len(alts)+1)
 			next = append(next, alts[:idx]...)
 			next = append(next, append(append(Sequence{}, present...), alt[1:]...))
@@ -287,8 +295,12 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 	// processed before the rules that reference them. Paull's substitution
 	// inlines A_j's alts into A_i for j < i, so putting dependencies first is
 	// what makes nullable-prefixed hidden left recursion reachable by the
-	// substitution step.
-	prods := topoOrderForPaull(expandNullableLeftPrefixes(copies))
+	// substitution step. added is what elimination has added to the grammar
+	// so far, in elements and alternatives, held to MaxLeftRecursionElements
+	// before each step that adds is made: first the splitting of nullable
+	// prefixes, then each substitution.
+	added := 0
+	prods := topoOrderForPaull(expandNullableLeftPrefixes(copies, &added))
 
 	// Substitution normally runs for every production, even a cycle-free one.
 	// That is pragmatic rather than theoretical: the multi-token altPrefixes
@@ -311,11 +323,6 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 	// (`P = Q`, `Q = P a / b`).
 	cyclic := findLeadingRefCycleMembers(prods)
 	isExemptAlias := func(p *Production) bool { return exemptAlias(p, cyclic) }
-
-	// What substitution has added to the grammar so far, in elements and
-	// alternatives, held to MaxLeftRecursionElements before each substitution
-	// is made.
-	added := 0
 
 	// Paull's invariant is that after the inner loop no alternative of A_i
 	// begins with a ref to any A_j, j < i. A single increasing pass gives that
@@ -705,6 +712,43 @@ func chargeElements(target, source *Production, added int) int {
 		if gain > remaining {
 			refuse()
 		}
+	}
+	return added + gain
+}
+
+// chargeExpansion charges splitting alt, whose leading element s can match
+// nothing, into present+rest and rest (expandNullableLeftPrefixes) against
+// what the whole grammar may gain (MaxLeftRecursionElements), BEFORE the two
+// alternatives are made, and returns the new total. They cost
+// (1 + deep|present| + deep|rest|) + (1 + deep|rest|), and the one they
+// replace cost 1 + deep|s| + deep|rest|, so the split adds
+// 1 + deep|present| + deep|rest| − deep|s|, floored at zero. Past the bound
+// it panics with an *EmitError. Mirrors the TS `chargeExpansion`.
+func chargeExpansion(prod *Production, alt, present Sequence, added int) int {
+	remaining := MaxLeftRecursionElements - added
+	lead := deepSize(alt[:1], math.MaxInt)
+	// Counted until it passes what could still fit once lead is taken off,
+	// so the decision is exact.
+	both := make([]*Element, 0, len(present)+len(alt)-1)
+	both = append(both, present...)
+	both = append(both, alt[1:]...)
+	written := deepSize(both, remaining+lead+2)
+	gain := written + 1 - lead
+	if gain < 0 {
+		gain = 0
+	}
+	if gain > remaining {
+		panic(&EmitError{
+			Message: fmt.Sprintf("%s: rule '%s' exceeds the left-recursion element limit "+
+				"of %d elements while splitting the elements that can match nothing "+
+				"before '%s' in one of its alternatives, which would add more than %d "+
+				"elements to the %d already added to the grammar. Write that alternative "+
+				"with fewer elements that can match nothing before '%s'.",
+				diagName(), prod.Name, MaxLeftRecursionElements, prod.Name, remaining,
+				added, prod.Name),
+			Rule: prod.Name,
+			Sp:   prod.Sp,
+		})
 	}
 	return added + gain
 }
