@@ -13,7 +13,7 @@ use indexmap::{IndexMap, IndexSet};
 use crate::annotate::exempt_alias;
 use crate::ir::{
     self, diag_name, Element, EmitError, Kind, SrcSpan, TailRepeatSpec,
-    MAX_LEFT_RECURSION_EXPANSION,
+    MAX_LEFT_RECURSION_ELEMENTS, MAX_LEFT_RECURSION_EXPANSION,
 };
 use crate::prose::{element_may_match_without_consuming, non_consuming_rules};
 use crate::shared::{owned, refs_in, AsElement, Grammar, Production, Sequence};
@@ -401,6 +401,9 @@ pub(crate) fn eliminate_left_recursion_keeping(
     let original_order: Vec<String> = grammar.productions.iter().map(|p| p.name.clone()).collect();
     // Suffix-debt counter names handed out across the whole grammar.
     let mut debt_names: IndexSet<String> = IndexSet::new();
+    // The element occurrences substitution has added to the grammar so far,
+    // held to MAX_LEFT_RECURSION_ELEMENTS before each substitution is made.
+    let mut added = 0usize;
 
     let copies: Vec<Production> = grammar
         .productions
@@ -471,6 +474,7 @@ pub(crate) fn eliminate_left_recursion_keeping(
                         )
                     } else {
                         gained = charge_substitution(&prods[i], &prods[j], gained)?;
+                        added = charge_elements(&prods[i], &prods[j], added)?;
                         substitute_leading_ref(
                             &prods[i],
                             &sources[&target_name],
@@ -778,6 +782,57 @@ fn charge_substitution(
             target.sp,
         )),
     }
+}
+
+/// Charge a substitution of `source` into `target` against the element
+/// occurrences the whole grammar may gain ([`MAX_LEFT_RECURSION_ELEMENTS`]),
+/// BEFORE it is made, and return the new total; `added` is what the
+/// substitutions so far have added. Each of the alternatives of `target`
+/// that begin with `source` is replaced by one alternative per alternative
+/// of `source`, `a_1 … a_m`, each followed by the replaced alternative's
+/// tail: it adds `Σ|a_i| + (m − 1)·|tail| − 1` occurrences, floored at
+/// zero. Mirrors `chargeElements` in `ts/src/compiler.ts`.
+fn charge_elements(
+    target: &Production,
+    source: &Production,
+    added: usize,
+) -> Result<usize, EmitError> {
+    let m = source.alts.len();
+    let held: usize = source.alts.iter().map(Vec::len).sum();
+    let mut led = 0usize;
+    let mut gain = 0usize;
+    for alt in &target.alts {
+        if !alt.first().is_some_and(|el| el.is_ref_to(&source.name)) {
+            continue;
+        }
+        led += 1;
+        let tail = alt.len() - 1;
+        // What the new alternatives hold, less what the one they replace
+        // held: `held + m·|tail|` against `1 + |tail|`.
+        let written = held.saturating_add(m.saturating_mul(tail));
+        gain = gain.saturating_add(written.saturating_sub(1 + tail));
+    }
+    if gain <= MAX_LEFT_RECURSION_ELEMENTS.saturating_sub(added) {
+        return Ok(added + gain);
+    }
+    Err(EmitError::at(
+        format!(
+            "{}: rule '{}' exceeds the left-recursion element limit of {} elements while \
+             inlining '{}', which begins {} of its alternatives and would add {} elements to \
+             the {} already added to the grammar. Factor '{}' out of the alternatives it \
+             begins.",
+            diag_name(),
+            target.name,
+            MAX_LEFT_RECURSION_ELEMENTS,
+            source.name,
+            led,
+            gain,
+            added,
+            source.name
+        ),
+        &target.name,
+        target.sp,
+    ))
 }
 
 /// For every alternative of `target` that begins with a ref to `source`,

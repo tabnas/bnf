@@ -1005,7 +1005,10 @@ type AmbiguityReport = {
 // whose alternatives lead with the next one multiplies them at every
 // step, so the alternatives a rule may gain from it are bounded:
 // MAX_LEFT_RECURSION_EXPANSION, below, refuses the grammar before the
-// substitution that would pass the bound is made.
+// substitution that would pass the bound is made. A chain of rules of one
+// alternative each gains no alternatives but copies the rest of the chain
+// into every rule, so the element occurrences the whole grammar gains are
+// bounded too: MAX_LEFT_RECURSION_ELEMENTS, refused the same way.
 // Sugar that can match nothing: `[X]`, `*X`, and `m*nX` with m = 0.
 // Returns the element sequence for the branch where the sugar *does*
 // match at least once, or null if the element is not nullable sugar.
@@ -1141,6 +1144,10 @@ function eliminateLeftRecursionKeeping(
   const cyclic = findLeadingRefCycleMembers(prods)
   const isExemptAlias = (p: Production): boolean => exemptAlias(p, cyclic)
 
+  // The element occurrences substitution has added to the grammar so far,
+  // held to MAX_LEFT_RECURSION_ELEMENTS before each substitution is made.
+  let added = 0
+
   for (let i = 0; i < prods.length; i++) {
     // For each earlier production A_j, inline any alternative of
     // A_i whose leading element is a reference to A_j.
@@ -1175,6 +1182,7 @@ function eliminateLeftRecursionKeeping(
             prods[i] = substituteLeadingRefByToken(prods[i], prods[j].name)
           } else {
             gained = chargeSubstitution(prods[i], prods[j], gained)
+            added = chargeElements(prods[i], prods[j], added)
             prods[i] = substituteLeadingRef(prods[i], prods[j])
           }
           changed = true
@@ -1374,6 +1382,36 @@ function hasLeadingRefTo(prod: Production, name: string): boolean {
 const MAX_LEFT_RECURSION_EXPANSION = 512
 
 
+// The most element occurrences Paull's substitution may ADD to the whole
+// grammar before left-recursion elimination refuses it.
+//
+// Substituting `source` into `target` replaces each alternative of `target`
+// that begins with `source` by one alternative per alternative of
+// `source`, a_1 … a_m, each followed by the replaced alternative's tail.
+// That adds, per alternative replaced,
+//
+//   Σ|a_i| + (m − 1)·|tail| − 1
+//
+// occurrences, floored at zero, and this bound holds their sum over every
+// substitution in the grammar. MAX_LEFT_RECURSION_EXPANSION bounds the
+// alternatives one rule gains; this bounds what the alternatives hold. A
+// chain of n rules, each one alternative that begins with the next
+// (`r0 = r1 "x0"`, `r1 = r2 "x1"`, …), gains no alternatives at all, but
+// ends with every rule holding the rest of the chain: (n − 2)(n − 1)/2
+// occurrences added, and an emitted grammar as large. A host's deadline
+// bounds the time that costs, not the memory, and at n = 5,000 the three
+// runtimes held 300 MB to 1.2 GB compiling it.
+//
+// Measured over the grammars MAX_LEFT_RECURSION_EXPANSION was measured
+// over, 1,171 of them: no grammar gains more than 1,636 occurrences
+// (dhall.abnf, which does not compile within abnf's budget for another
+// reason), and none that compiles more than 956 (proto's grammar, without
+// `tokenClasses`). This bound leaves twenty times the room dhall.abnf
+// needs, and refuses the chain from n = 258 on, before the substitution
+// that would pass it allocates.
+const MAX_LEFT_RECURSION_ELEMENTS = 32768
+
+
 // Charge a substitution of `source` into `target` against what `target`
 // may gain (MAX_LEFT_RECURSION_EXPANSION), BEFORE it is made, and return
 // the new total. `gained` is what the rule has gained so far.
@@ -1399,6 +1437,42 @@ function chargeSubstitution(
       { rule: target.name, sp: target.sp })
   }
   return gained + gain
+}
+
+
+// Charge a substitution of `source` into `target` against the element
+// occurrences the whole grammar may gain (MAX_LEFT_RECURSION_ELEMENTS),
+// BEFORE it is made, and return the new total. `added` is what the
+// substitutions so far have added; each alternative replaced adds
+// Σ|a_i| + (m − 1)·|tail| − 1, floored at zero.
+function chargeElements(
+  target: Production,
+  source: Production,
+  added: number,
+): number {
+  let held = 0
+  for (const alt of source.alts) held += alt.length
+  const m = source.alts.length
+  let led = 0
+  let gain = 0
+  for (const alt of target.alts) {
+    if (alt.length > 0 && alt[0].kind === 'ref' && alt[0].name === source.name) {
+      led++
+      const tail = alt.length - 1
+      // What the new alternatives hold, less what the one they replace held.
+      gain += Math.max(held + m * tail - (1 + tail), 0)
+    }
+  }
+  if (gain > MAX_LEFT_RECURSION_ELEMENTS - added) {
+    throw new EmitError(
+      `${diagName()}: rule '${target.name}' exceeds the left-recursion ` +
+      `element limit of ${MAX_LEFT_RECURSION_ELEMENTS} elements while ` +
+      `inlining '${source.name}', which begins ${led} of its alternatives ` +
+      `and would add ${gain} elements to the ${added} already added to the ` +
+      `grammar. Factor '${source.name}' out of the alternatives it begins.`,
+      { rule: target.name, sp: target.sp })
+  }
+  return added + gain
 }
 
 
@@ -8028,6 +8102,7 @@ export {
   BUILTIN_TOKENS,
   MAX_REPEAT_EXPANSION,
   MAX_LEFT_RECURSION_EXPANSION,
+  MAX_LEFT_RECURSION_ELEMENTS,
   REMOVE_PROSE,
   REMOVE_ALL,
   isProseName,

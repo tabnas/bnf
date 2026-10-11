@@ -69,7 +69,8 @@ pub use ir::{
     origin_of, refs_in, term_key, AmbiguityReport, ConvertOptions, Element, EmitError, Grammar,
     Kind, NodeKind, ProbeDispatchSpec, ProbeHelperSpec, Production, Sequence, SrcSpan,
     TailRepeatSpec, ValueAnnotation, BUILTIN_TOKENS, MAX_ELEMENT_DEPTH,
-    MAX_LEFT_RECURSION_EXPANSION, MAX_REPEAT_EXPANSION, REMOVE_ALL, REMOVE_PROSE,
+    MAX_LEFT_RECURSION_ELEMENTS, MAX_LEFT_RECURSION_EXPANSION, MAX_REPEAT_EXPANSION, REMOVE_ALL,
+    REMOVE_PROSE,
 };
 pub use leftrec::eliminate_left_recursion;
 pub use spec::{

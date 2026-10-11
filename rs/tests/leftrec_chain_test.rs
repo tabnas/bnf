@@ -3,13 +3,16 @@
 // A chain of rules, each one alternative that begins with the next, is
 // what Paull's substitution copies most: every rule ends up holding the
 // whole of the rule after it in front of its own tail, so a chain of n
-// rules holds about n²/2 element occurrences between them. The passes
+// rules holds about n²/2 element occurrences between them.
+// MAX_LEFT_RECURSION_ELEMENTS refuses the chain once the occurrences it
+// adds would pass 32,768 (tests/leftrec_limit_test.rs), and the passes
 // share an element between every sequence that holds it, as the
-// TypeScript and Go compilers do (src/shared.rs), so what the compiler
-// holds is a pointer or two per occurrence, never an element: an owned
-// element is `size_of::<Element>()` bytes before the strings it holds.
-// Copying owned elements, the compiler held 1.7 GB for a chain of 2,000
-// rules, and 6 GB was not enough for 5,000.
+// TypeScript and Go compilers do (src/shared.rs). So for the longest chain
+// the bound admits the compiler holds a pointer or two per occurrence,
+// never an element: an owned element is `size_of::<Element>()` bytes before
+// the strings it holds. Copying owned elements and with no bound, the
+// compiler held 1.7 GB for a chain of 2,000 rules, and 6 GB was not enough
+// for 5,000.
 //
 // This file is a test binary of its own because it counts what the whole
 // binary allocates.
@@ -23,8 +26,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{prod, reference, sens_term};
 use tabnas_bnf::{emit_grammar_spec, ConvertOptions, Element, Grammar};
 
-/// The rules in the chain.
-const N: usize = 5000;
+/// The rules in the chain: the most the element bound admits, whose
+/// substitutions add 1 + 2 + … + 255 = 32,640 occurrences.
+const N: usize = 257;
 
 /// The element occurrences the chain's rules hold once the substitution
 /// has run: the last rule is lifted into a token, and each rule before it
@@ -116,7 +120,7 @@ fn chain(n: usize) -> Grammar {
 }
 
 #[test]
-fn a_chain_of_five_thousand_leading_references_holds_no_element_per_occurrence() {
+fn the_longest_chain_the_element_limit_admits_holds_no_element_per_occurrence() {
     let grammar = chain(N);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);

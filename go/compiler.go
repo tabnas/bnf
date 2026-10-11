@@ -312,6 +312,10 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 	cyclic := findLeadingRefCycleMembers(prods)
 	isExemptAlias := func(p *Production) bool { return exemptAlias(p, cyclic) }
 
+	// The element occurrences substitution has added to the grammar so far,
+	// held to MaxLeftRecursionElements before each substitution is made.
+	added := 0
+
 	// Paull's invariant is that after the inner loop no alternative of A_i
 	// begins with a ref to any A_j, j < i. A single increasing pass gives that
 	// only when every A_j has itself been fully substituted — but the pure-alias
@@ -349,6 +353,7 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 						prods[i] = substituteLeadingRefByToken(prods[i], prods[j].Name)
 					} else {
 						gained = chargeSubstitution(prods[i], prods[j], gained)
+						added = chargeElements(prods[i], prods[j], added)
 						prods[i] = substituteLeadingRef(prods[i], prods[j])
 					}
 					changed = true
@@ -555,6 +560,49 @@ func chargeSubstitution(target, source *Production, gained int) int {
 		})
 	}
 	return gained + led*each
+}
+
+// chargeElements charges a substitution of source into target against the
+// element occurrences the whole grammar may gain (MaxLeftRecursionElements),
+// BEFORE it is made, and returns the new total; added is what the
+// substitutions so far have added. Each alternative of target that begins
+// with source is replaced by one alternative per alternative of source,
+// a_1 … a_m, each followed by the replaced alternative's tail: it adds
+// Σ|a_i| + (m − 1)·|tail| − 1 occurrences, floored at zero. Past the bound it
+// panics with an *EmitError, which emitGrammarSpec returns as its error.
+// Mirrors the TS `chargeElements`.
+func chargeElements(target, source *Production, added int) int {
+	held := 0
+	for _, alt := range source.Alts {
+		held += len(alt)
+	}
+	m := len(source.Alts)
+	led := 0
+	gain := 0
+	for _, alt := range target.Alts {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == source.Name {
+			led++
+			tail := len(alt) - 1
+			// What the new alternatives hold, less what the one they replace
+			// held.
+			if more := held + m*tail - (1 + tail); more > 0 {
+				gain += more
+			}
+		}
+	}
+	if gain > MaxLeftRecursionElements-added {
+		panic(&EmitError{
+			Message: fmt.Sprintf("%s: rule '%s' exceeds the left-recursion element limit "+
+				"of %d elements while inlining '%s', which begins %d of its "+
+				"alternatives and would add %d elements to the %d already added to "+
+				"the grammar. Factor '%s' out of the alternatives it begins.",
+				diagName(), target.Name, MaxLeftRecursionElements, source.Name, led,
+				gain, added, source.Name),
+			Rule: target.Name,
+			Sp:   target.Sp,
+		})
+	}
+	return added + gain
 }
 
 func substituteLeadingRef(target, source *Production) *Production {

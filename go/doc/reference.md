@@ -49,9 +49,10 @@ per-emit package state. Concurrent calls are safe and take their turn.
 
 Runs the left-recursion pass alone, for a front-end that wants to
 inspect or test the rewritten IR. Returns a new grammar; the input is
-not modified. A grammar the pass refuses, a purely left-recursive rule
-or a rule past `MaxLeftRecursionExpansion`, panics with an
-`*EmitError`, which `EmitGrammarSpec` returns as its error instead.
+not modified. A grammar the pass refuses, a purely left-recursive rule,
+a rule past `MaxLeftRecursionExpansion` or a grammar past
+`MaxLeftRecursionElements`, panics with an `*EmitError`, which
+`EmitGrammarSpec` returns as its error instead.
 
 ## Options
 
@@ -248,6 +249,20 @@ step. Past the bound, `EmitGrammarSpec` returns an `*EmitError` that
 names the rule and the rule it was substituting, before making the
 alternatives. Factoring the leading reference out of the alternatives
 it begins keeps a grammar under it.
+
+### `const MaxLeftRecursionElements = 32768`
+
+The most element occurrences the left-recursion pass may add to the
+whole grammar when it substitutes the rules that lead alternatives.
+Substituting a rule with the alternatives `a_1 … a_m` into an
+alternative that begins with it adds `Σ|a_i| + (m − 1)·|tail| − 1`
+occurrences, floored at zero, and the bound holds their sum over every
+substitution. A chain of rules, each one alternative that begins with
+the next, gains no alternatives but copies the rest of the chain into
+every rule, so what it adds grows with the square of its length: the
+bound refuses such a chain from 258 rules on. Past the bound,
+`EmitGrammarSpec` returns an `*EmitError` that names the rule and the
+rule it was substituting, before making the alternatives.
 
 ## Semantic actions
 

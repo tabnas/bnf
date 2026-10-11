@@ -690,6 +690,25 @@ pub const MAX_REPEAT_EXPANSION: usize = 8192;
 /// measurement.
 pub const MAX_LEFT_RECURSION_EXPANSION: usize = 512;
 
+/// The most element occurrences Paull's substitution may add to the
+/// whole grammar before left-recursion elimination refuses it.
+///
+/// Substituting a rule into an alternative that begins with it replaces
+/// that alternative by one per alternative of the rule, `a_1 … a_m`, each
+/// followed by the replaced alternative's tail. That adds
+/// `Σ|a_i| + (m − 1)·|tail| − 1` occurrences per alternative replaced,
+/// floored at zero, and this bound holds their sum over every substitution
+/// in the grammar. [`MAX_LEFT_RECURSION_EXPANSION`] bounds the alternatives
+/// one rule gains; this bounds what they hold. A chain of n rules, each one
+/// alternative that begins with the next, gains no alternatives at all,
+/// but ends with every rule holding the rest of the chain:
+/// (n − 2)(n − 1)/2 occurrences added, and an emitted grammar as large. No
+/// grammar in the downstream corpora gains more than 1,636 (dhall.abnf),
+/// and none that compiles more than 956; the chain is refused from
+/// n = 258 on. `MAX_LEFT_RECURSION_ELEMENTS` in `ts/src/compiler.ts`
+/// records the measurement.
+pub const MAX_LEFT_RECURSION_ELEMENTS: usize = 32768;
+
 /// Refuse a grammar whose element nesting would overflow the stack of a
 /// pass that walks it. Measured with an explicit stack: finding the depth
 /// must not be able to overflow either.
