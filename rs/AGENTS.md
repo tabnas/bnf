@@ -144,7 +144,14 @@ the left-recursion bounds (Tarjan's components and Paull's ordering in
 their own explicit stack for the same reason: a chain of a few thousand
 rules overflowed them when they recursed, and a chain of 100,000 now
 reaches the element limit and is refused there, on a test thread's 2 MB
-stack too. Keep both properties when editing these files.
+stack too. Keep both properties when editing these files. The walk that
+counts how many tokens a sequence can span (`seq_token_span` in
+`src/factor.rs`, which left factoring and the dispatcher's specificity
+ordering ask) keeps its own stack as well, and follows the rules a
+sequence names no further than `LOOKAHEAD_K` tokens, with one set of the
+rules on its way. When it recursed once per rule and copied the path at
+each, a chain of 15,000 rules, each ending in the next, overflowed a test
+thread's stack and held 8.5 GB.
 
 What is left, and is the caller's: DROPPING a deeply nested `Element`
 recurses through the `Box` chain, so a tree the compiler refused still

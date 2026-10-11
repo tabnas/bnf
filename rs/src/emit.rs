@@ -2117,7 +2117,7 @@ impl Emitter<'_> {
             .map(|&i| {
                 let span = match &entries[i].alt {
                     None => 0.0,
-                    Some(alt) => match seq_token_span(alt, self.grammar, &IndexSet::new()) {
+                    Some(alt) => match seq_token_span(alt, self.grammar) {
                         Some(n) => n as f64,
                         None => 1e9,
                     },

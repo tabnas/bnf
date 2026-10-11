@@ -1951,11 +1951,13 @@ function debtKey(debt: Record<string, number> | undefined): string {
 }
 
 // The most tokens a sequence can span, for deciding whether the
-// dispatcher's K-token lookahead can see past it. Runs on the raw IR —
-// left factoring precedes desugaring, so the sugar kinds are still
-// here and each has to be counted on its own terms. Returns Infinity
-// for anything unbounded (a star/plus, an unbounded rep, a cycle) or
-// unknown (prose), which is what makes factoring the only remedy.
+// dispatcher's K-token lookahead can see past it: the span itself while
+// it is at most LOOKAHEAD_K, and Infinity past that, or for anything
+// unbounded (a star/plus, an unbounded rep, a rule that refers back to a
+// rule on the way to it) or unknown (prose), which is what makes
+// factoring the only remedy. Runs on the raw IR — left factoring precedes
+// desugaring, so the sugar kinds are still here and each has to be
+// counted on its own terms. A repetition of at most none spans none.
 //
 // This must NOT be approximated by asking altPrefixesRaw: that walker
 // treats every element it does not recognise as a truncation, and
@@ -1963,63 +1965,119 @@ function debtKey(debt: Record<string, number> | undefined): string {
 // or `["-"]` read as unbounded and got factored, collapsing
 // alternatives the dispatcher separates perfectly well (and, with
 // `marks: true`, silently merging their user-visible marks).
-function seqTokenSpan(
-  seq: Sequence,
-  grammar: Grammar,
-  visited: Set<string>,
-): number {
-  let total = 0
-  for (const el of seq) {
-    total += elementTokenSpan(el, grammar, visited)
-    if (LOOKAHEAD_K < total) return Infinity
+//
+// The walk keeps its own stack, so no grammar runs it out of call stack,
+// and one set of the rules on its way, which a rule joins when the walk
+// enters it and leaves when the walk is done with it. Each sequence it
+// sums is given only the room LOOKAHEAD_K leaves it, and stops as soon as
+// it passes that: a chain of rules each ending in the next is followed for
+// five rules, not to its end. The walk this replaced followed the chain to
+// its end, recursing once per rule, with a copy of the path at each: a
+// chain of 30,000 rules ran TypeScript out of stack from about 2,500
+// rules, and held 8.5 GB in Rust at 15,000.
+type SpanFrame =
+  // A sequence being summed: its next element, what the elements before
+  // it span, and the room it has.
+  | { kind: 'seq'; seq: Sequence; at: number; total: number; room: number }
+  // The most any alternative spans, of a group or of a rule; the rule is
+  // on the way while its alternatives are walked.
+  | {
+    kind: 'alts'; alts: Sequence[]; at: number; most: number; room: number
+    rule: string | null
   }
-  return total
-}
+  // A bounded repetition, of what its element spans.
+  | { kind: 'rep'; times: number }
 
-function elementTokenSpan(
-  el: Element,
-  grammar: Grammar,
-  visited: Set<string>,
-): number {
-  switch (el.kind) {
-    case 'term':
-    case 'regex':
-    case 'token':
-      return 1
-    case 'prose':
-      return Infinity
-    case 'opt':
-      // Absent contributes 0, present contributes the inner span; the
-      // MOST it can span is the inner span.
-      return elementTokenSpan(el.inner, grammar, visited)
-    case 'star':
-    case 'plus':
-      return Infinity
-    case 'rep':
-      return Infinity === el.max
-        ? Infinity
-        : el.max * elementTokenSpan(el.inner, grammar, visited)
-    case 'group': {
-      let most = 0
-      for (const alt of el.alts) {
-        const n = seqTokenSpan(alt, grammar, visited)
-        if (most < n) most = n
+function seqTokenSpan(seq: Sequence, grammar: Grammar): number {
+  const onWay = new Set<string>()
+  const stack: SpanFrame[] = [
+    { kind: 'seq', seq, at: 0, total: 0, room: LOOKAHEAD_K }]
+
+  // Begin the span of `el` in `room`: what it spans when that is known at
+  // once, or undefined once the frames that will work it out are pushed.
+  const begin = (el: Element, room: number): number | undefined => {
+    for (;;) {
+      switch (el.kind) {
+        case 'term':
+        case 'regex':
+        case 'token':
+          return 1
+        case 'prose':
+        case 'star':
+        case 'plus':
+          return Infinity
+        case 'opt':
+          // Absent spans nothing and present spans the inner element, so
+          // the MOST it can span is what the inner element spans.
+          el = el.inner
+          continue
+        case 'rep':
+          if (Infinity === el.max) return Infinity
+          if (0 === el.max) return 0
+          stack.push({ kind: 'rep', times: el.max })
+          room = Math.floor(room / el.max)
+          el = el.inner
+          continue
+        case 'group':
+          stack.push({
+            kind: 'alts', alts: el.alts, at: 0, most: 0, room, rule: null,
+          })
+          return undefined
+        case 'ref': {
+          const name = el.name
+          if (onWay.has(name)) return Infinity
+          const target = grammar.productions.find((p) => p.name === name)
+          if (!target || 0 === target.alts.length) return Infinity
+          onWay.add(name)
+          stack.push({
+            kind: 'alts', alts: target.alts, at: 0, most: 0, room, rule: name,
+          })
+          return undefined
+        }
       }
-      return most
     }
-    case 'ref': {
-      if (visited.has(el.name)) return Infinity
-      const target = grammar.productions.find((p) => p.name === el.name)
-      if (!target || 0 === target.alts.length) return Infinity
-      const sub = new Set(visited)
-      sub.add(el.name)
-      let most = 0
-      for (const alt of target.alts) {
-        const n = seqTokenSpan(alt, grammar, sub)
-        if (most < n) most = n
+  }
+
+  // What the frame on top was waiting for: the span of the element or the
+  // alternative it began, or undefined while it has begun nothing.
+  let back: number | undefined
+  for (;;) {
+    const top = stack[stack.length - 1]
+    let span: number
+    if ('seq' === top.kind) {
+      if (undefined !== back) {
+        top.total += back
+        back = undefined
       }
-      return most
+      if (top.room < top.total) {
+        span = Infinity
+      } else if (top.at < top.seq.length) {
+        back = begin(top.seq[top.at++], top.room - top.total)
+        continue
+      } else {
+        span = top.total
+      }
+    } else if ('alts' === top.kind) {
+      if (undefined !== back) {
+        if (top.most < back) top.most = back
+        back = undefined
+      }
+      if (Infinity !== top.most && top.at < top.alts.length) {
+        stack.push({
+          kind: 'seq', seq: top.alts[top.at++], at: 0, total: 0,
+          room: top.room,
+        })
+        continue
+      }
+      span = top.most
+    } else {
+      span = top.times * (back as number)
+      back = undefined
     }
+    stack.pop()
+    if ('alts' === top.kind && null != top.rule) onWay.delete(top.rule)
+    if (0 === stack.length) return span
+    back = span
   }
 }
 
@@ -2177,7 +2235,7 @@ function factorOnce(
   const views = alts.map(unwrapAlt)
 
   const prefixBeyondLookahead = (prefix: Sequence): boolean =>
-    LOOKAHEAD_K < seqTokenSpan(prefix, grammar, new Set())
+    LOOKAHEAD_K < seqTokenSpan(prefix, grammar)
 
   for (let i = 0; i < alts.length - 1; i++) {
     if (0 === views[i].length) continue
@@ -6088,7 +6146,7 @@ function emitProduction(
     const spans = new Map<number, number>()
     for (const i of idxs) {
       const alt = entries[i].alt
-      const n = null == alt ? 0 : seqTokenSpan(alt, grammar, new Set())
+      const n = null == alt ? 0 : seqTokenSpan(alt, grammar)
       spans.set(i, Number.isFinite(n) ? n : 1e9)
     }
     const sorted = idxs

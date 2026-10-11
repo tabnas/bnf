@@ -15,7 +15,7 @@
 //!
 //! `P = α β1 / α β2   ⇒   P = α P$factN ; P$factN = β1 / β2`
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
@@ -104,65 +104,225 @@ pub(crate) fn seq_equal<E: AsElement>(a: &[E], b: &[E]) -> bool {
 }
 
 /// The most tokens a sequence can span, for deciding whether the
-/// dispatcher's K-token lookahead can see past it. Runs on the raw IR,
-/// so each sugar kind is counted on its own terms. `None` stands for
-/// infinity: anything unbounded (a star/plus, an unbounded rep, a cycle)
-/// or unknown (prose).
-pub(crate) fn seq_token_span<E: AsElement>(
-    seq: &[E],
-    grammar: &Grammar,
-    visited: &IndexSet<String>,
-) -> Option<usize> {
-    let mut total = 0usize;
-    for el in seq {
-        total = total.checked_add(element_token_span(el.element(), grammar, visited)?)?;
-        if total > LOOKAHEAD_K {
-            return None;
+/// dispatcher's K-token lookahead can see past it: the span itself while it
+/// is at most [`LOOKAHEAD_K`], and `None` past that, or for anything
+/// unbounded (a star/plus, an unbounded rep, a rule that refers back to a
+/// rule on the way to it) or unknown (prose). Runs on the raw IR, so each
+/// sugar kind is counted on its own terms. A repetition of at most none
+/// spans none.
+///
+/// The walk keeps its own stack and one set of the rules on its way, which
+/// a rule joins when the walk enters it and leaves when the walk is done
+/// with it. Each sequence it sums is given only the room `LOOKAHEAD_K`
+/// leaves it, and stops as soon as it passes that, so a chain of rules each
+/// ending in the next is followed for five rules, not to its end. Mirrors
+/// the TypeScript `seqTokenSpan`.
+pub(crate) fn seq_token_span<E: AsElement>(seq: &[E], grammar: &Grammar) -> Option<usize> {
+    let first: Vec<&Element> = seq.iter().map(AsElement::element).collect();
+    let mut on_way: HashSet<&str> = HashSet::new();
+    let mut stack = vec![SpanFrame::Seq {
+        elements: Elements::Borrowed(&first),
+        at: 0,
+        total: 0,
+        room: LOOKAHEAD_K,
+    }];
+    // What the frame on top was waiting for: the span of the element or the
+    // alternative it began, once that is known.
+    let mut back: Option<Option<usize>> = None;
+    loop {
+        let next = match stack.last_mut().expect("the walk has a frame") {
+            SpanFrame::Seq {
+                elements,
+                at,
+                total,
+                room,
+            } => match back.take() {
+                Some(None) => Next::Finish(None),
+                waited => {
+                    if let Some(Some(n)) = waited {
+                        *total = total.saturating_add(n);
+                    }
+                    if *total > *room {
+                        Next::Finish(None)
+                    } else if let Some(el) = elements.get(*at) {
+                        *at += 1;
+                        Next::Begin(el, *room - *total)
+                    } else {
+                        Next::Finish(Some(*total))
+                    }
+                }
+            },
+            SpanFrame::Alts {
+                alternatives,
+                at,
+                most,
+                room,
+                ..
+            } => match back.take() {
+                Some(None) => Next::Finish(None),
+                waited => {
+                    if let Some(Some(n)) = waited {
+                        *most = (*most).max(n);
+                    }
+                    match alternatives.get(*at) {
+                        Some(elements) => {
+                            *at += 1;
+                            Next::Push(SpanFrame::Seq {
+                                elements,
+                                at: 0,
+                                total: 0,
+                                room: *room,
+                            })
+                        }
+                        None => Next::Finish(Some(*most)),
+                    }
+                }
+            },
+            SpanFrame::Rep { times } => match back.take() {
+                Some(Some(n)) => Next::Finish(times.checked_mul(n)),
+                _ => Next::Finish(None),
+            },
+        };
+        match next {
+            Next::Begin(el, room) => back = begin_span(el, room, &mut stack, &mut on_way, grammar),
+            Next::Push(frame) => stack.push(frame),
+            Next::Finish(span) => {
+                if let Some(SpanFrame::Alts {
+                    rule: Some(rule), ..
+                }) = stack.pop()
+                {
+                    on_way.remove(rule);
+                }
+                if stack.is_empty() {
+                    return span;
+                }
+                back = Some(span);
+            }
         }
     }
-    Some(total)
 }
 
-fn element_token_span(
-    el: &Element,
-    grammar: &Grammar,
-    visited: &IndexSet<String>,
-) -> Option<usize> {
-    match &el.kind {
-        Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => Some(1),
-        Kind::Prose { .. } => None,
-        // Absent contributes 0, present the inner span; the MOST it can
-        // span is the inner span.
-        Kind::Opt { inner } => element_token_span(inner, grammar, visited),
-        Kind::Star { .. } | Kind::Plus { .. } => None,
-        Kind::Rep { max, inner, .. } => {
-            let max = (*max)?;
-            max.checked_mul(element_token_span(inner, grammar, visited)?)
-        }
-        Kind::Group { alts } => {
-            let mut most = 0;
-            for alt in alts {
-                let n = seq_token_span(alt, grammar, visited)?;
-                most = most.max(n);
-            }
-            Some(most)
-        }
-        Kind::Ref { name, .. } => {
-            if visited.contains(name) {
+/// Begin the span of `el` in `room`: what it spans when that is known at
+/// once (`None` for unbounded), or `None` once the frames that will work it
+/// out are pushed.
+fn begin_span<'g>(
+    mut el: &'g Element,
+    mut room: usize,
+    stack: &mut Vec<SpanFrame<'g>>,
+    on_way: &mut HashSet<&'g str>,
+    grammar: &'g Grammar,
+) -> Option<Option<usize>> {
+    loop {
+        match &el.kind {
+            Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => return Some(Some(1)),
+            Kind::Prose { .. } | Kind::Star { .. } | Kind::Plus { .. } => return Some(None),
+            // Absent spans nothing and present spans the inner element, so
+            // the MOST it can span is what the inner element spans.
+            Kind::Opt { inner } => el = inner,
+            Kind::Rep { max, inner, .. } => match *max {
+                None => return Some(None),
+                Some(0) => return Some(Some(0)),
+                Some(times) => {
+                    stack.push(SpanFrame::Rep { times });
+                    room /= times;
+                    el = inner;
+                }
+            },
+            Kind::Group { alts } => {
+                stack.push(SpanFrame::Alts {
+                    alternatives: Alternatives::Owned(alts),
+                    at: 0,
+                    most: 0,
+                    room,
+                    rule: None,
+                });
                 return None;
             }
-            let target = grammar.find(name)?;
-            if target.alts.is_empty() {
+            Kind::Ref { name, .. } => {
+                if on_way.contains(name.as_str()) {
+                    return Some(None);
+                }
+                let Some(target) = grammar.find(name) else {
+                    return Some(None);
+                };
+                if target.alts.is_empty() {
+                    return Some(None);
+                }
+                on_way.insert(name.as_str());
+                stack.push(SpanFrame::Alts {
+                    alternatives: Alternatives::Shared(&target.alts),
+                    at: 0,
+                    most: 0,
+                    room,
+                    rule: Some(name.as_str()),
+                });
                 return None;
             }
-            let mut sub = visited.clone();
-            sub.insert(name.clone());
-            let mut most = 0;
-            for alt in &target.alts {
-                let n = seq_token_span(alt, grammar, &sub)?;
-                most = most.max(n);
-            }
-            Some(most)
+        }
+    }
+}
+
+/// One step of [`seq_token_span`]'s walk.
+enum SpanFrame<'g> {
+    /// A sequence being summed: its next element, what the elements before
+    /// it span, and the room it has.
+    Seq {
+        elements: Elements<'g>,
+        at: usize,
+        total: usize,
+        room: usize,
+    },
+    /// The most any alternative spans, of a group or of a rule; the rule is
+    /// on the way while its alternatives are walked.
+    Alts {
+        alternatives: Alternatives<'g>,
+        at: usize,
+        most: usize,
+        room: usize,
+        rule: Option<&'g str>,
+    },
+    /// A bounded repetition, of what its element spans.
+    Rep { times: usize },
+}
+
+/// What the frame on top does next.
+enum Next<'g> {
+    Begin(&'g Element, usize),
+    Push(SpanFrame<'g>),
+    Finish(Option<usize>),
+}
+
+/// A sequence the walk sums: a group's alternative, a rule's, or the one
+/// the walk began with.
+#[derive(Clone, Copy)]
+enum Elements<'g> {
+    Owned(&'g [Element]),
+    Shared(&'g [Rc<Element>]),
+    Borrowed(&'g [&'g Element]),
+}
+
+impl<'g> Elements<'g> {
+    fn get(self, at: usize) -> Option<&'g Element> {
+        match self {
+            Elements::Owned(s) => s.get(at),
+            Elements::Shared(s) => s.get(at).map(|e| &**e),
+            Elements::Borrowed(s) => s.get(at).copied(),
+        }
+    }
+}
+
+/// The alternatives of a group or of a rule.
+#[derive(Clone, Copy)]
+enum Alternatives<'g> {
+    Owned(&'g [crate::ir::Sequence]),
+    Shared(&'g [Sequence]),
+}
+
+impl<'g> Alternatives<'g> {
+    fn get(self, at: usize) -> Option<Elements<'g>> {
+        match self {
+            Alternatives::Owned(a) => a.get(at).map(|s| Elements::Owned(s)),
+            Alternatives::Shared(a) => a.get(at).map(|s| Elements::Shared(s)),
         }
     }
 }
@@ -330,7 +490,7 @@ fn factor_once(
 ) -> Result<Option<Vec<Sequence>>, EmitError> {
     let views: Vec<Sequence> = alts.iter().map(|a| unwrap_alt(a)).collect();
     let prefix_beyond_lookahead = |prefix: &[Rc<Element>]| -> bool {
-        match seq_token_span(prefix, grammar, &IndexSet::new()) {
+        match seq_token_span(prefix, grammar) {
             None => true,
             Some(n) => n > LOOKAHEAD_K,
         }
