@@ -6,9 +6,12 @@
 //! production that expresses the same language. Mirrors `desugar` in
 //! `ts/src/compiler.ts`, including the helper names it mints.
 
+use std::rc::Rc;
+
 use indexmap::IndexSet;
 
-use crate::ir::{diag_name, origin_of, Element, Grammar, Kind, Production, Sequence};
+use crate::ir::{diag_name, Element, Kind};
+use crate::shared::{origin_of, AsElement, Grammar, Production, Sequence};
 
 struct Desugar {
     extra: Vec<Production>,
@@ -33,11 +36,11 @@ impl Desugar {
         }
     }
 
-    fn helper(&mut self, name: String, alts: Vec<Sequence>, repeat_helper: bool) -> Element {
+    fn helper(&mut self, name: String, alts: Vec<Sequence>, repeat_helper: bool) -> Rc<Element> {
         let mut prod = Production::helper(&name, alts, &self.origin);
         prod.repeat_helper = repeat_helper;
         self.extra.push(prod);
-        Element::reference(name)
+        Rc::new(Element::reference(name))
     }
 
     /// Every unbounded repetition, and only those, comes through here: the
@@ -49,24 +52,31 @@ impl Desugar {
     /// frame, the item pushed (or matched) from it and the loop re-entered
     /// by replacement (`r: H`), so rule depth over a repetition is what
     /// one item needs, whatever the item count. See `emit_repeat_loop`.
-    fn repeat_loop(&mut self, name: String, inner: Element, debt_guard: Option<String>) -> Element {
-        let self_ref = Element::reference(name.clone());
+    fn repeat_loop(
+        &mut self,
+        name: String,
+        inner: Rc<Element>,
+        debt_guard: Option<String>,
+    ) -> Rc<Element> {
+        let self_ref = Rc::new(Element::reference(name.clone()));
         let mut prod = Production::helper(&name, vec![vec![inner, self_ref], vec![]], &self.origin);
         prod.repeat_helper = true;
         prod.repeat_loop = true;
         prod.debt_guard = debt_guard;
         self.extra.push(prod);
-        Element::reference(name)
+        Rc::new(Element::reference(name))
     }
 
-    fn alt(&mut self, alt: &[Element]) -> Sequence {
+    /// A sequence of the working copy, or one inside a group, desugared.
+    fn alt<E: AsElement>(&mut self, alt: &[E]) -> Sequence {
         alt.iter().map(|el| self.element(el)).collect()
     }
 
-    fn element(&mut self, el: &Element) -> Element {
-        match &el.kind {
+    fn element<E: AsElement>(&mut self, el: &E) -> Rc<Element> {
+        match &el.element().kind {
+            // Shared as it stands: nothing about it changes.
             Kind::Term { .. } | Kind::Ref { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
-                return el.clone()
+                return el.share()
             }
             Kind::Prose { text } => {
                 // Unreachable: prose resolution drops every prose element
@@ -89,6 +99,7 @@ impl Desugar {
         }
 
         // `opt`, `star`, `plus` and `rep` all wrap a single inner element.
+        let el = el.element();
         let inner = self.element(el.inner().expect("sugar wraps an inner element"));
         // Name the generated helper after what it repeats. A literal
         // lifted from a named production carries that name, and a
@@ -149,7 +160,7 @@ impl Desugar {
                         // opt(group([[inner, <previous level>]])): the group
                         // helper first, then the optional wrapping a
                         // reference to it.
-                        let mut nested_ref: Option<Element> = None;
+                        let mut nested_ref: Option<Rc<Element>> = None;
                         for _ in 0..max.saturating_sub(*min) {
                             let seq: Sequence = match &nested_ref {
                                 Some(r) => vec![inner.clone(), r.clone()],
@@ -157,10 +168,10 @@ impl Desugar {
                             };
                             let group_name = self.fresh_name("group");
                             self.helper(group_name.clone(), vec![seq], false);
-                            let group_ref = Element::reference(group_name.clone());
+                            let group_ref = Rc::new(Element::reference(group_name.clone()));
                             let opt_name = self.fresh_name(&format!("opt_{group_name}"));
                             self.helper(opt_name.clone(), vec![vec![group_ref], vec![]], true);
-                            nested_ref = Some(Element::reference(opt_name));
+                            nested_ref = Some(Rc::new(Element::reference(opt_name)));
                         }
                         if let Some(r) = nested_ref {
                             rep_alt.push(r);

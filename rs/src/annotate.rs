@@ -13,8 +13,9 @@
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ir::{diag_name, origin_of, Element, EmitError, Grammar, Kind, NodeKind, Production};
+use crate::ir::{diag_name, Element, EmitError, Kind, NodeKind};
 use crate::leftrec::find_leading_ref_cycle_members;
+use crate::shared::{origin_of, Grammar, Production};
 
 /// What the planner predicts, per annotated production: one flag per
 /// part that produces a value. `plan` says whether that part nests (its
@@ -174,7 +175,11 @@ pub(crate) fn plan_value_annotations(grammar: &Grammar) -> Result<ValuePlan, Emi
         // Every part that PUSHES is a member, not every part that is a
         // reference: a group or a repetition becomes a reference to a
         // generated helper before the emitter sees it.
-        let parts: Vec<&Element> = alt.iter().filter(|el| pushes_value(el)).collect();
+        let parts: Vec<&Element> = alt
+            .iter()
+            .map(|el| &**el)
+            .filter(|el| pushes_value(el))
+            .collect();
 
         if v.kind == "array" {
             // An array's parts are positional; there is nothing for a

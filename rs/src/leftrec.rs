@@ -6,21 +6,26 @@
 //! `ts/src/compiler.ts`.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
 use crate::annotate::exempt_alias;
 use crate::ir::{
-    diag_name, refs_in, Element, EmitError, Grammar, Kind, Production, Sequence, SrcSpan,
-    TailRepeatSpec, MAX_LEFT_RECURSION_EXPANSION,
+    self, diag_name, Element, EmitError, Kind, SrcSpan, TailRepeatSpec,
+    MAX_LEFT_RECURSION_EXPANSION,
 };
 use crate::prose::{element_may_match_without_consuming, non_consuming_rules};
+use crate::shared::{owned, refs_in, AsElement, Grammar, Production, Sequence};
 
 /// Rewrite provenance is compiler-private. Rust callers can therefore keep
 /// constructing the public `Element { kind, sp }` shape while Paull
 /// substitution still attributes a synthesized loop to the element that was
 /// copied into it. The vectors mirror production alternatives and their
-/// top-level elements; every rewrite below updates both in lockstep.
+/// top-level elements; every rewrite below updates both in lockstep. A
+/// source is shared exactly as the element it mirrors is (see
+/// `crate::shared`): a substitution that copies an element's pointer copies
+/// its source's.
 #[derive(Clone)]
 struct RewriteSource {
     rule: String,
@@ -31,12 +36,14 @@ struct RewriteSource {
 #[derive(Clone)]
 enum RewriteSourceChildren {
     None,
-    Inner(Box<RewriteSource>),
-    Group(Vec<Vec<RewriteSource>>),
+    Inner(Rc<RewriteSource>),
+    Group(Vec<AltSources>),
 }
 
-type RewriteSources = IndexMap<String, Vec<Vec<RewriteSource>>>;
-type DirectRewrite = (Production, Vec<Vec<RewriteSource>>);
+/// The sources of one alternative's elements, in order.
+type AltSources = Vec<Rc<RewriteSource>>;
+type RewriteSources = IndexMap<String, Vec<AltSources>>;
+type DirectRewrite = (Production, Vec<AltSources>);
 
 /// The private result used by full emission. The public standalone pass
 /// returns only `grammar`, preserving its historical transformation-only
@@ -67,13 +74,13 @@ fn authored_source(el: &Element, prod: &Production) -> RewriteSource {
         | Kind::Star { inner, .. }
         | Kind::Plus { inner }
         | Kind::Rep { inner, .. } => {
-            RewriteSourceChildren::Inner(Box::new(authored_source(inner, prod)))
+            RewriteSourceChildren::Inner(Rc::new(authored_source(inner, prod)))
         }
         Kind::Group { alts } => RewriteSourceChildren::Group(
             alts.iter()
                 .map(|alt| {
                     alt.iter()
-                        .map(|child| authored_source(child, prod))
+                        .map(|child| Rc::new(authored_source(child, prod)))
                         .collect()
                 })
                 .collect(),
@@ -81,39 +88,36 @@ fn authored_source(el: &Element, prod: &Production) -> RewriteSource {
         _ => RewriteSourceChildren::None,
     };
     RewriteSource {
-        rule: crate::ir::origin_of(prod).to_string(),
+        rule: crate::shared::origin_of(prod).to_string(),
         sp: el.sp.or(prod.sp),
         children,
     }
 }
 
-fn generated_group_source(
-    alts: Vec<Vec<RewriteSource>>,
-    fallback: &RewriteSource,
-) -> RewriteSource {
+fn generated_group_source(alts: Vec<AltSources>, fallback: &RewriteSource) -> RewriteSource {
     let mut source = alts
         .iter()
         .flatten()
         .next()
-        .cloned()
+        .map(|first| RewriteSource::clone(first))
         .unwrap_or_else(|| fallback.clone());
     source.children = RewriteSourceChildren::Group(alts);
     source
 }
 
-fn nullable_sugar_sources(el: &Element, source: &RewriteSource) -> Option<Vec<RewriteSource>> {
+fn nullable_sugar_sources(el: &Element, source: &Rc<RewriteSource>) -> Option<AltSources> {
     let inner = match &source.children {
-        RewriteSourceChildren::Inner(inner) => inner.as_ref().clone(),
+        RewriteSourceChildren::Inner(inner) => Rc::clone(inner),
         _ => return None,
     };
     match &el.kind {
         Kind::Opt { .. } => Some(vec![inner]),
-        Kind::Star { .. } => Some(vec![inner, source.clone()]),
+        Kind::Star { .. } => Some(vec![inner, Rc::clone(source)]),
         Kind::Rep { min: 0, max, .. } => match max {
             Some(0) => None,
-            None => Some(vec![inner, source.clone()]),
+            None => Some(vec![inner, Rc::clone(source)]),
             Some(1) => Some(vec![inner]),
-            Some(_) => Some(vec![inner, source.clone()]),
+            Some(_) => Some(vec![inner, Rc::clone(source)]),
         },
         _ => None,
     }
@@ -272,17 +276,17 @@ fn validate_rewrite_repetitions(
 /// Deliberately narrow: a nullable REFERENCE is already handled by
 /// Paull's substitution; what that machinery cannot see is sugar,
 /// because this pass runs before desugaring.
-fn nullable_sugar_present(el: &Element) -> Option<Sequence> {
+fn nullable_sugar_present(el: &Rc<Element>) -> Option<Sequence> {
     match &el.kind {
-        Kind::Opt { inner } => Some(vec![(**inner).clone()]),
-        Kind::Star { inner, .. } => Some(vec![(**inner).clone(), el.clone()]),
+        Kind::Opt { inner } => Some(vec![inner.share()]),
+        Kind::Star { inner, .. } => Some(vec![inner.share(), Rc::clone(el)]),
         Kind::Rep { min: 0, max, inner } => match max {
             Some(0) => None,
-            None => Some(vec![(**inner).clone(), el.clone()]),
-            Some(1) => Some(vec![(**inner).clone()]),
+            None => Some(vec![inner.share(), Rc::clone(el)]),
+            Some(1) => Some(vec![inner.share()]),
             Some(max) => Some(vec![
-                (**inner).clone(),
-                Element::rep(0, Some(max - 1), (**inner).clone()),
+                inner.share(),
+                Rc::new(Element::rep(0, Some(max - 1), (**inner).clone())),
             ]),
         },
         _ => None,
@@ -293,7 +297,7 @@ fn nullable_sugar_present(el: &Element) -> Option<Sequence> {
 /// reachable only because everything before the self-reference can
 /// match nothing? `A = ["x"] A "y"` is the shape. Direct left recursion
 /// is excluded: there is no sugar to split.
-fn is_hidden_left_recursive(alt: &[Element], name: &str) -> bool {
+fn is_hidden_left_recursive(alt: &[Rc<Element>], name: &str) -> bool {
     let mut saw_sugar = false;
     for el in alt {
         if let Kind::Ref { name: n, .. } = &el.kind {
@@ -373,8 +377,16 @@ fn expand_nullable_left_prefixes(
 ///
 /// Returns a new grammar carrying only productions, in the caller's
 /// declared order. The input is not modified.
-pub fn eliminate_left_recursion(grammar: &Grammar) -> Result<Grammar, EmitError> {
-    eliminate_left_recursion_keeping(grammar, &IndexSet::new()).map(EliminatedGrammar::into_grammar)
+///
+/// The result holds an owned element per occurrence, as the public IR
+/// does, where [`emit_grammar_spec`](crate::emit_grammar_spec) shares one
+/// element between every sequence that holds it. Substitution can repeat
+/// a sequence in every rule it begins: a chain of n rules, each one
+/// alternative that begins with the next, comes back holding about n²/2
+/// elements, 12.5 million for n = 5,000.
+pub fn eliminate_left_recursion(grammar: &ir::Grammar) -> Result<ir::Grammar, EmitError> {
+    eliminate_left_recursion_keeping(&Grammar::from_ir(grammar), &IndexSet::new())
+        .map(|eliminated| eliminated.into_grammar().into_ir())
 }
 
 /// [`eliminate_left_recursion`] with a set of productions that are never
@@ -402,7 +414,11 @@ pub(crate) fn eliminate_left_recursion_keeping(
             let alts = p
                 .alts
                 .iter()
-                .map(|alt| alt.iter().map(|el| authored_source(el, p)).collect())
+                .map(|alt| {
+                    alt.iter()
+                        .map(|el| Rc::new(authored_source(el, p)))
+                        .collect()
+                })
                 .collect();
             (p.name.clone(), alts)
         })
@@ -437,38 +453,33 @@ pub(crate) fn eliminate_left_recursion_keeping(
                     if !has_leading_ref_to(&prods[i], &prods[j].name) {
                         continue;
                     }
-                    if keep.contains(&prods[j].name) {
+                    // Both rules, and their sources, are read where they
+                    // stand: nothing is copied but the pointers the new
+                    // alternatives hold.
+                    let target_name = prods[i].name.clone();
+                    let (next, next_sources) = if keep.contains(&prods[j].name) {
                         // A token class: substituted, exactly where any
                         // other leading reference is, by ONE token element
                         // naming its set (`#ident`) rather than by its
                         // alternatives. The tree is the one the plain
                         // substitution gives (the token consumed, no node)
                         // without the one-alternate-per-member fan-out.
-                        let class_name = prods[j].name.clone();
-                        let target_name = prods[i].name.clone();
-                        let target_sources = sources[&target_name].clone();
-                        let (next, next_sources) = substitute_leading_ref_by_token(
+                        substitute_leading_ref_by_token(
                             &prods[i],
-                            &target_sources,
-                            &class_name,
-                        );
-                        prods[i] = next;
-                        sources.insert(target_name, next_sources);
+                            &sources[&target_name],
+                            &prods[j].name,
+                        )
                     } else {
                         gained = charge_substitution(&prods[i], &prods[j], gained)?;
-                        let source = prods[j].clone();
-                        let target_name = prods[i].name.clone();
-                        let target_sources = sources[&target_name].clone();
-                        let source_sources = sources[&source.name].clone();
-                        let (next, next_sources) = substitute_leading_ref(
+                        substitute_leading_ref(
                             &prods[i],
-                            &target_sources,
-                            &source,
-                            &source_sources,
-                        );
-                        prods[i] = next;
-                        sources.insert(target_name, next_sources);
-                    }
+                            &sources[&target_name],
+                            &prods[j],
+                            &sources[&prods[j].name],
+                        )
+                    };
+                    prods[i] = next;
+                    sources.insert(target_name, next_sources);
                     changed = true;
                 }
                 if !changed {
@@ -774,10 +785,10 @@ fn charge_substitution(
 /// source-ref expanded to one of source's alts.
 fn substitute_leading_ref(
     target: &Production,
-    target_sources: &[Vec<RewriteSource>],
+    target_sources: &[AltSources],
     source: &Production,
-    source_sources: &[Vec<RewriteSource>],
-) -> (Production, Vec<Vec<RewriteSource>>) {
+    source_sources: &[AltSources],
+) -> (Production, Vec<AltSources>) {
     let mut new_alts: Vec<Sequence> = Vec::new();
     let mut new_sources = Vec::new();
     for (alt, alt_sources) in target.alts.iter().zip(target_sources) {
@@ -805,9 +816,9 @@ fn substitute_leading_ref(
 /// `emit_grammar_spec` under exactly that name; see `token_class_names`.
 fn substitute_leading_ref_by_token(
     target: &Production,
-    target_sources: &[Vec<RewriteSource>],
+    target_sources: &[AltSources],
     class_name: &str,
-) -> (Production, Vec<Vec<RewriteSource>>) {
+) -> (Production, Vec<AltSources>) {
     let mut new_sources = Vec::with_capacity(target.alts.len());
     let new_alts: Vec<Sequence> = target
         .alts
@@ -815,7 +826,7 @@ fn substitute_leading_ref_by_token(
         .zip(target_sources)
         .map(|(alt, alt_sources)| {
             if alt.first().is_some_and(|el| el.is_ref_to(class_name)) {
-                let mut combined = vec![Element::token(format!("#{class_name}"))];
+                let mut combined = vec![Rc::new(Element::token(format!("#{class_name}")))];
                 combined.extend(alt[1..].iter().cloned());
                 new_sources.push(alt_sources.clone());
                 combined
@@ -867,11 +878,11 @@ fn seeds_reference_self(seeds: &[Sequence], name: &str) -> bool {
 /// equivalent.
 fn eliminate_direct_left_rec(
     prod: &Production,
-    prod_sources: &[Vec<RewriteSource>],
+    prod_sources: &[AltSources],
     debt_names: &mut IndexSet<String>,
 ) -> Result<DirectRewrite, EmitError> {
-    let mut recursive: Vec<(Sequence, Vec<RewriteSource>)> = Vec::new();
-    let mut seeds: Vec<(Sequence, Vec<RewriteSource>)> = Vec::new();
+    let mut recursive: Vec<(Sequence, AltSources)> = Vec::new();
+    let mut seeds: Vec<(Sequence, AltSources)> = Vec::new();
     for (alt, alt_sources) in prod.alts.iter().zip(prod_sources) {
         if alt.first().is_some_and(|el| el.is_ref_to(&prod.name)) {
             recursive.push((alt[1..].to_vec(), alt_sources[1..].to_vec()));
@@ -883,7 +894,7 @@ fn eliminate_direct_left_rec(
     // A trivial recursive alt (P ::= P, nothing else) derives P from P
     // with no progress. Drop it silently: nullable-prefix expansion can
     // legitimately produce one.
-    let non_trivial: Vec<(Sequence, Vec<RewriteSource>)> = recursive
+    let non_trivial: Vec<(Sequence, AltSources)> = recursive
         .into_iter()
         .filter(|(tail, _)| !tail.is_empty())
         .collect();
@@ -903,18 +914,20 @@ fn eliminate_direct_left_rec(
         ));
     }
 
-    let (seeds, seed_sources): (Vec<Sequence>, Vec<Vec<RewriteSource>>) = seeds.into_iter().unzip();
-    let (non_trivial, tail_sources): (Vec<Sequence>, Vec<Vec<RewriteSource>>) =
+    let (seeds, seed_sources): (Vec<Sequence>, Vec<AltSources>) = seeds.into_iter().unzip();
+    let (non_trivial, tail_sources): (Vec<Sequence>, Vec<AltSources>) =
         non_trivial.into_iter().unzip();
+    // A group holds owned elements (it is the public `Kind`), so the
+    // sequences it is made of are copied into it.
     let seed_element = if seeds.len() == 1 && seeds[0].len() == 1 {
-        seeds[0][0].clone()
+        Rc::clone(&seeds[0][0])
     } else {
-        Element::group(seeds.clone())
+        Rc::new(Element::group(seeds.iter().map(|s| owned(s)).collect()))
     };
     let tail_inner = if non_trivial.len() == 1 && non_trivial[0].len() == 1 {
-        non_trivial[0][0].clone()
+        Element::clone(&non_trivial[0][0])
     } else {
-        Element::group(non_trivial.clone())
+        Element::group(non_trivial.iter().map(|s| owned(s)).collect())
     };
 
     // The rewrite is correct as a CFG, but it introduces a repetition
@@ -930,32 +943,32 @@ fn eliminate_direct_left_rec(
     };
     let star = Element {
         kind: Kind::Star {
-            inner: Box::new(tail_inner.clone()),
+            inner: Box::new(tail_inner),
             debt_guard,
         },
         sp: None,
     };
 
     let fallback = RewriteSource {
-        rule: crate::ir::origin_of(prod).to_string(),
+        rule: crate::shared::origin_of(prod).to_string(),
         sp: prod.sp,
         children: RewriteSourceChildren::None,
     };
     let seed_source = if seed_sources.len() == 1 && seed_sources[0].len() == 1 {
-        seed_sources[0][0].clone()
+        Rc::clone(&seed_sources[0][0])
     } else {
-        generated_group_source(seed_sources, &fallback)
+        Rc::new(generated_group_source(seed_sources, &fallback))
     };
     let tail_inner_source = if tail_sources.len() == 1 && tail_sources[0].len() == 1 {
-        tail_sources[0][0].clone()
+        Rc::clone(&tail_sources[0][0])
     } else {
-        generated_group_source(tail_sources, &fallback)
+        Rc::new(generated_group_source(tail_sources, &fallback))
     };
-    let mut tail_source = tail_inner_source.clone();
-    tail_source.children = RewriteSourceChildren::Inner(Box::new(tail_inner_source));
+    let mut tail_source = RewriteSource::clone(&tail_inner_source);
+    tail_source.children = RewriteSourceChildren::Inner(tail_inner_source);
     Ok((
-        prod.rebuilt(vec![vec![seed_element, star]]),
-        vec![vec![seed_source, tail_source]],
+        prod.rebuilt(vec![vec![seed_element, Rc::new(star)]]),
+        vec![vec![seed_source, Rc::new(tail_source)]],
     ))
 }
 
@@ -995,7 +1008,7 @@ pub(crate) fn rewrite_tail_repeats(mut grammar: Grammar, start: &str) -> Grammar
 
         // Normalize the option body to a sequence: `[ a b ]` parses as
         // opt(group([[a, b]])); `[ a ]` as opt(a).
-        let seq: Sequence = match &last_inner.kind {
+        let seq: ir::Sequence = match &last_inner.kind {
             Kind::Group { alts } => {
                 if alts.len() != 1 {
                     continue;
@@ -1010,12 +1023,12 @@ pub(crate) fn rewrite_tail_repeats(mut grammar: Grammar, start: &str) -> Grammar
         if !seq[seq.len() - 1].is_ref_to(&prod.name) {
             continue;
         }
-        let sep: Sequence = seq[..seq.len() - 1].to_vec();
+        let sep: ir::Sequence = seq[..seq.len() - 1].to_vec();
         if !sep.iter().all(Element::is_terminal) {
             continue;
         }
         let prefix: Sequence = alt[..alt.len() - 1].to_vec();
-        if prefix.is_empty() || !prefix.iter().all(Element::is_terminal) {
+        if prefix.is_empty() || !prefix.iter().all(|el| el.is_terminal()) {
             continue;
         }
 

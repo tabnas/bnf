@@ -11,6 +11,7 @@ this crate.
 | Path | Mirrors |
 |---|---|
 | `src/ir.rs` | the type half of `ts/src/compiler.ts`: `Element`/`Kind`, `Production`, `Grammar`, `ConvertOptions`, `EmitError`, the small exported helpers |
+| `src/shared.rs` | the IR as every pass holds it, in TypeScript's and Go's shape: `Grammar`, `Production` and `Sequence` again, each element of a production's sequences behind an `Rc` that every sequence holding it shares (see "Elements are shared" below) |
 | `src/prose.rs` | `resolveProseTerminals`, `liftLiteralTokens`, `normalizeBuiltinTokens`, `nullableRules` |
 | `src/annotate.rs` | `planValueAnnotations`, `planArrayHelpers` |
 | `src/leftrec.rs` | `eliminateLeftRecursion` (Paull's, hidden recursion, suffix-debt counters), `rewriteTailRepeats` |
@@ -30,6 +31,7 @@ this crate.
 | `tests/doc_examples_test.rs` | `go/doc_examples_test.go`: the claims the crate documentation makes |
 | `tests/divergence_test.rs` | the executable register for the Rust entries in [`../DIVERGENCE.md`](../DIVERGENCE.md): one test per recorded difference, so a repaired entry has to lose its test as well as its section |
 | `tests/leftrec_limit_test.rs` | `go/leftrec_limit_test.go` and `ts/test/leftrec-limit.test.js`: the left-recursion expansion limit |
+| `tests/leftrec_chain_test.rs` | no twin: what the compiler holds for a chain of 5,000 leading references, counted by the test binary's own allocator, which refuses any allocation that would take the total to one owned element per occurrence |
 | `tests/version_test.rs` | the version sites must agree |
 | `README.md` | the crate front page; its `rust` fences run as doctests |
 
@@ -143,6 +145,41 @@ whose alternatives lead with the next one is refused before it multiplies;
 without it, twenty such rules exhausted memory and aborted the process.
 Both refuse with the rule named.
 
+## Elements are shared, as TypeScript and Go share them
+
+The passes rebuild sequences out of other sequences' elements: Paull's
+substitution writes each alternative of the rule it inlines in front of
+the tail of every alternative that rule begins, factoring splits a run
+into a prefix and its tails, desugaring maps a sequence element by
+element. TypeScript and Go hold an element by reference, so a rebuilt
+sequence costs a pointer per element. The public IR here holds owned
+elements, which front-ends build, so the passes work on `src/shared.rs`
+instead: the same types with each element of a production's sequences
+behind an `Rc`. Two rules keep it the canonical shape:
+
+- **An element is never changed where it stands.** The one pass that
+  writes into one, `resolve_suffix_debts`, goes through `Rc::make_mut`,
+  which is TypeScript's `alt[i] = { ...el, debt }`: the sequence it writes
+  gets a new element, and every other sequence keeps the one it had.
+- **What a group holds stays owned.** `Kind::Group` is the public type, so
+  a group made out of shared sequences (`shared::owned`) copies them, and
+  a walk that starts on a production's sequence and descends into its
+  groups takes either kind (`shared::AsElement`).
+
+The provenance `src/leftrec.rs` keeps beside each element is shared the
+same way. A chain of n single-alternative rules, each beginning with the
+next, holds about n²/2 element occurrences after the substitution, and its
+emitted spec is as large; with owned copies the compiler held 1.7 GB for
+n = 2,000, and 6 GB was not enough for n = 5,000. It now holds a pointer
+or two per occurrence, less than TypeScript and Go hold for the same
+grammar, and `tests/leftrec_chain_test.rs` holds it there. The time is
+still quadratic, as the output is, and as it is in TypeScript and Go.
+
+The public `eliminate_left_recursion` returns the public IR, so it gives
+back an owned element per occurrence: for that chain, 2.1 GB at
+n = 5,000. A host that wants the compile and not the rewritten grammar
+calls `emit_grammar_spec`.
+
 ## Things that look like bugs and are not
 
 - **`\b` for `wordKeywords`.** The engine's `regex` crate has no
@@ -164,7 +201,8 @@ Both refuse with the rule named.
 - **Diagnostics use a thread-local prefix.** TypeScript's `_diagName` is
   module state; here it is `thread_local!`, which is what keeps
   `concurrent_emits_keep_their_own_diag_prefix` green.
-- **`Grammar` is cloned by value** on entry to `emit_grammar_spec`, so the
+- **`Grammar` is copied** on entry to `emit_grammar_spec`, every element
+  into an allocation of its own (`shared::Grammar::from_ir`), so the
   caller's IR is never modified; the TypeScript `cloneGrammar` hazards
   (dropping `remove`/`clearAll`, aliasing element arrays) cannot arise.
 - **`GrammarSpec::to_value` carries `meta` and `clear`;**

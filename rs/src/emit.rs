@@ -16,6 +16,7 @@
 //! compared byte for byte against TypeScript's.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Map, Value};
@@ -29,9 +30,9 @@ use crate::annotate::{plan_array_helpers, plan_value_annotations};
 use crate::desugar::desugar;
 use crate::factor::{left_factor, seq_token_span, LOOKAHEAD_K};
 use crate::ir::{
-    builtin_token, check_element_depth, diag_name, escape_regexp, is_effectively_case_sensitive,
-    origin_of, regex_key, set_diag_name, term_key_of, ConvertOptions, Element, EmitError, Grammar,
-    Kind, NodeKind, Production, Sequence, SrcSpan, ValueAnnotation,
+    self, builtin_token, check_element_depth, diag_name, escape_regexp,
+    is_effectively_case_sensitive, regex_key, set_diag_name, term_key_of, ConvertOptions, Element,
+    EmitError, Kind, NodeKind, SrcSpan, ValueAnnotation,
 };
 use crate::leftrec::eliminate_left_recursion_keeping;
 use crate::leftrec::rewrite_tail_repeats;
@@ -44,6 +45,7 @@ use crate::ranges::{
     char_ranges_overlap, class_analysis, class_pattern, code_unit_reach, fold_case_ranges,
     normalize_ranges, pattern_char_ranges, CharRange,
 };
+use crate::shared::{origin_of, AsElement, Grammar, Production, Sequence};
 use crate::spec::{AltSpec, GrammarSpec, RefAction, RuleSpec};
 
 /// A match-token matcher as the engine's wire format carries it:
@@ -673,7 +675,7 @@ struct Emitter<'a> {
 /// are prefixed with `opts.tag` (default `bnf`), the notation the grammar
 /// was written in.
 pub fn emit_grammar_spec(
-    grammar: &Grammar,
+    grammar: &ir::Grammar,
     opts: &ConvertOptions,
 ) -> Result<GrammarSpec, EmitError> {
     // Diagnostics name the notation the grammar was written in, not this
@@ -681,11 +683,13 @@ pub fn emit_grammar_spec(
     let tag = opts.tag.clone().unwrap_or_else(|| "bnf".to_string());
     set_diag_name(&tag);
 
-    // Before the grammar is even copied: cloning it recurses through the
+    // Before the grammar is even copied: copying it recurses through the
     // element tree too, so the shape has to be refused first.
     check_element_depth(grammar)?;
 
-    let mut grammar = grammar.clone();
+    // The working copy every pass below rebuilds, its elements shared
+    // between the sequences that hold them (see `crate::shared`).
+    let mut grammar = Grammar::from_ir(grammar);
 
     // Before ANY rewrite: annotations describe the grammar the AUTHOR
     // wrote, and the passes below are what make that shape unrecoverable.
@@ -736,16 +740,25 @@ pub fn emit_grammar_spec(
         IndexSet::new()
     };
 
+    // Each rewrite returns a new grammar and leaves the one it read alone.
+    // That one is dropped as soon as the next exists: a binding shadowed
+    // by the next pass's would live to the end of the function, and the
+    // sequences would be held once per pass rather than twice at most.
     let eliminated = eliminate_left_recursion_keeping(&grammar, &class_names)?;
+    drop(grammar);
     eliminated.validate_repetitions()?;
     let grammar = eliminated.into_grammar();
-    let grammar = rewrite_probe_dispatches(&grammar)?;
+    let next = rewrite_probe_dispatches(&grammar)?;
+    drop(grammar);
     // Left factoring runs after the probe rewriter and before
     // tail-repeat detection and desugaring.
-    let grammar = left_factor(&grammar)?;
+    let grammar = left_factor(&next)?;
+    drop(next);
     let grammar = rewrite_tail_repeats(grammar, &start);
     validate_repetitions(&grammar)?;
-    let mut grammar = desugar(&grammar);
+    let next = desugar(&grammar);
+    drop(grammar);
+    let mut grammar = next;
 
     // Both are named AFTER desugar, because both are keyed by the rule
     // names the emitter will actually see.
@@ -780,42 +793,42 @@ pub fn emit_grammar_spec(
     // Gather every terminal first. Probe helpers store their vocab as
     // elements rather than in `alts`, and a tail repeat's separator is
     // stashed off `alts` too, so walk those as well. The lifted literals
-    // are seeded up front: their productions no longer exist.
-    let mut terminals: Vec<Element> = lifted_literals;
-    for prod in &grammar.productions {
-        for alt in &prod.alts {
-            terminals.extend(alt.iter().cloned());
-        }
-        if let Some(ph) = &prod.probe_helper {
-            terminals.extend(ph.vocab_elements.iter().cloned());
-        }
-        if let Some(tr) = &prod.tail_repeat {
-            terminals.extend(tr.sep.iter().cloned());
-        }
-    }
+    // are seeded up front: their productions no longer exist. Walked
+    // where they stand, three times, rather than gathered: the sequences
+    // hold an element per occurrence, and a grammar whose substitutions
+    // repeat a sequence in every rule it leads holds the square of its
+    // size in occurrences.
+    let terminals = || {
+        lifted_literals
+            .iter()
+            .chain(grammar.productions.iter().flat_map(|prod| {
+                prod.alts
+                    .iter()
+                    .flatten()
+                    .map(|el| &**el)
+                    .chain(prod.probe_helper.iter().flat_map(|ph| &ph.vocab_elements))
+                    .chain(prod.tail_repeat.iter().flat_map(|tr| &tr.sep))
+            }))
+    };
 
     // Which character classes contest a position with another, and the
     // shared partition they are laid over: computed before anything is
     // allocated.
-    let mut classes = class_analysis(&terminals);
+    let mut classes = class_analysis(terminals());
 
     // Terminals carrying a lifted production name are allocated first,
     // so the name wins even when the same literal also appears inline in
     // an earlier rule.
-    let named: Vec<Element> = terminals
-        .iter()
-        .filter(|el| {
-            matches!(
-                &el.kind,
-                Kind::Term {
-                    token_name: Some(_),
-                    ..
-                }
-            )
-        })
-        .cloned()
-        .collect();
-    for el in named.iter().chain(terminals.iter()) {
+    let named = terminals().filter(|el| {
+        matches!(
+            &el.kind,
+            Kind::Term {
+                token_name: Some(_),
+                ..
+            }
+        )
+    });
+    for el in named.chain(terminals()) {
         match &el.kind {
             Kind::Term {
                 literal,
@@ -1285,10 +1298,11 @@ fn emit_class_token(
 
 /// Break an alternative into segments. Each segment is a (possibly
 /// empty) run of terminal tokens followed by at most one rule reference.
-fn segmentize(alt: &[Element], tokens: &Tokens) -> Vec<Segment> {
+fn segmentize<E: AsElement>(alt: &[E], tokens: &Tokens) -> Vec<Segment> {
     let mut segs: Vec<Segment> = Vec::new();
     let mut current = Segment::default();
     for el in alt {
+        let el = el.element();
         match &el.kind {
             Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
                 current.terms.push(tokens.name(el));
@@ -1316,7 +1330,7 @@ fn segmentize(alt: &[Element], tokens: &Tokens) -> Vec<Segment> {
 /// A stable, human-predictable mark for an alternative: its leading
 /// discriminator, the first matched token name (sans `#`), the pushed
 /// rule name, or `_` for the empty alt.
-fn alt_discriminator(alt: &[Element], tokens: &Tokens) -> String {
+fn alt_discriminator(alt: &[Rc<Element>], tokens: &Tokens) -> String {
     let Some(el) = alt.first() else {
         return "_".into();
     };
@@ -1368,7 +1382,7 @@ fn loop_item_of(prod: &Production) -> Result<Element, EmitError> {
                 && !matches!(&body[0].kind, Kind::Ref { debt: Some(_), .. })
         });
     match body {
-        Some(body) if shaped => Ok(body[0].clone()),
+        Some(body) if shaped => Ok(Element::clone(&body[0])),
         _ => Err(EmitError::new(format!(
             "{}: internal — repeat loop '{}' is not `item self / (empty)`",
             diag_name(),
@@ -1485,7 +1499,7 @@ impl Emitter<'_> {
         close
     }
 
-    fn validate_refs(&self, alt: &[Element], rule_name: &str) -> Result<(), EmitError> {
+    fn validate_refs(&self, alt: &[Rc<Element>], rule_name: &str) -> Result<(), EmitError> {
         for el in alt {
             if let Kind::Ref { name, .. } = &el.kind {
                 if !self.known_rules.contains(name) {
@@ -1643,7 +1657,10 @@ impl Emitter<'_> {
 
         let marks = if prod_kind == NodeKind::User && self.refs.emit_marks {
             Some(assign_marks(
-                &[prefix_alt.clone(), sep.clone()],
+                &[
+                    prefix_alt.clone(),
+                    sep.iter().map(AsElement::share).collect(),
+                ],
                 &self.tokens,
             ))
         } else {
@@ -1733,7 +1750,7 @@ impl Emitter<'_> {
         &self,
         prod: &Production,
         o: &AltSpec,
-        alt: &[Element],
+        alt: &[Rc<Element>],
         f: &str,
         consumed: i64,
     ) -> Option<Vec<AltSpec>> {
@@ -1998,7 +2015,7 @@ impl Emitter<'_> {
 
     /// True for a repetition helper whose content can start with a token
     /// its FOLLOW also contains.
-    fn contested_by_follow(&self, prod: &Production, alt: &[Element]) -> bool {
+    fn contested_by_follow(&self, prod: &Production, alt: &[Rc<Element>]) -> bool {
         if !prod.repeat_helper {
             return false;
         }
@@ -2163,7 +2180,7 @@ impl Emitter<'_> {
                 let segs = segmentize(alt, &self.tokens);
                 let seg = segs[0].clone();
                 let is_ref_only = !alt.is_empty()
-                    && alt.iter().all(Element::is_ref)
+                    && alt.iter().all(|el| el.is_ref())
                     && seg.terms.is_empty()
                     && seg.reference.is_some();
                 let mark = marks.as_ref().map(|m| m[idx].clone());
@@ -2368,7 +2385,7 @@ impl Emitter<'_> {
             // If any alt has a push, the close state must capture the
             // returned child.
             let mut close: Option<Vec<AltSpec>> = None;
-            if prod.alts.iter().any(|alt| alt.iter().any(Element::is_ref)) {
+            if prod.alts.iter().any(|alt| alt.iter().any(|el| el.is_ref())) {
                 let mut c = self.capture_close(&prod.name, prod_kind, None);
                 if marks.is_some() {
                     c.m = Some("_".into());
@@ -2817,7 +2834,7 @@ impl Emitter<'_> {
     fn emit_chain(
         &mut self,
         head_name: &str,
-        alt: &[Element],
+        alt: &[Rc<Element>],
         head_kind: NodeKind,
         origin: Option<&str>,
         value: Option<&ValueAnnotation>,
@@ -3085,12 +3102,12 @@ mod tests {
             ("lead", at(80, 96, 5, 1)),
             ("triv", at(96, 112, 6, 1)),
         ]);
-        let spanned = |name: &str, alts: Vec<Sequence>| Production {
+        let spanned = |name: &str, alts: Vec<ir::Sequence>| ir::Production {
             sp: Some(want[name]),
-            ..Production::new(name, alts)
+            ..ir::Production::new(name, alts)
         };
         let opt_group = Element::opt(Element::group(vec![vec![reference("x"), term("@")]]));
-        let g = Grammar::new(vec![
+        let g = ir::Grammar::new(vec![
             // The optional prefix shares vocabulary with the tail, so the
             // probe rewriter rebuilds `doc`.
             spanned("doc", vec![vec![opt_group, reference("y")]]),
@@ -3111,11 +3128,13 @@ mod tests {
 
         // The rewrite pipeline emit_grammar_spec runs, in its order.
         let start = "doc";
-        let mut out = g.clone();
+        let mut out = Grammar::from_ir(&g);
         resolve_prose_terminals(&mut out).expect("prose");
         lift_literal_tokens(&mut out, start);
         normalize_builtin_tokens(&mut out);
-        let out = crate::leftrec::eliminate_left_recursion(&out).expect("left recursion");
+        let out = eliminate_left_recursion_keeping(&out, &IndexSet::new())
+            .expect("left recursion")
+            .into_grammar();
         let out = rewrite_probe_dispatches(&out).expect("probe");
         let out = left_factor(&out).expect("factor");
         let out = rewrite_tail_repeats(out, start);
