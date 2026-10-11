@@ -30,8 +30,8 @@ this crate.
 | `tests/regex_flags_test.rs` | no twin: the `RegExp` constructor's own rules on an `Element::regex` flag string, which TypeScript gets from the constructor for free and this port has to state — the flags it knows, no repeats, `u` and `v` never together, and the fixed order `RegExp.prototype.flags` reports |
 | `tests/doc_examples_test.rs` | `go/doc_examples_test.go`: the claims the crate documentation makes |
 | `tests/divergence_test.rs` | the executable register for the Rust entries in [`../DIVERGENCE.md`](../DIVERGENCE.md): one test per recorded difference, so a repaired entry has to lose its test as well as its section |
-| `tests/leftrec_limit_test.rs` | `go/leftrec_limit_test.go` and `ts/test/leftrec-limit.test.js`: the left-recursion expansion limit |
-| `tests/leftrec_chain_test.rs` | no twin: what the compiler holds for a chain of 5,000 leading references, counted by the test binary's own allocator, which refuses any allocation that would take the total to one owned element per occurrence |
+| `tests/leftrec_limit_test.rs` | `go/leftrec_limit_test.go` and `ts/test/leftrec-limit.test.js`: the left-recursion expansion and element limits |
+| `tests/leftrec_chain_test.rs` | no twin: what the compiler holds for the longest chain of leading references the element limit admits, 513 rules, counted by the test binary's own allocator, which refuses any allocation that would take the total to one owned element per occurrence |
 | `tests/version_test.rs` | the version sites must agree |
 | `README.md` | the crate front page; its `rust` fences run as doctests |
 
@@ -115,7 +115,15 @@ refusals are shared by all three runtimes: `ts/test/oracle-refusal.test.js`
 holds the canonical compiler to each refusal it recorded, and
 `go/oracle_refusal_test.go` grades the Go port against them the same way.
 `ir-leftrec-limit` is the cycle of twenty rules that the left-recursion
-expansion limit refuses.
+expansion limit refuses, and the six `ir-leftrec-elements-*` fixtures are
+the shapes the element limit refuses: the chain of 514 rules (`-chain`), a
+group in a tail, copied once per alternative of the rule inlined before it
+(`-tail-group`), a group of empty alternatives there
+(`-tail-group-alternatives`), a group in the inlined rule, written into
+every rule it begins (`-source-group`), an inlined rule of empty
+alternatives (`-empty-alternatives`), and 362 options in front of a
+hidden left recursion, split before any substitution runs
+(`-optional-prefix`).
 
 ## Untrusted IR, and where the stack still runs out
 
@@ -123,11 +131,13 @@ expansion limit refuses.
 and refuses past `MAX_ELEMENT_DEPTH` (exported, defined in `src/ir.rs`),
 because the
 passes are recursive and a Rust stack that runs out aborts the process
-rather than unwinding. The walks over the REFERENCE graph (Tarjan's
-components and Paull's ordering in `src/leftrec.rs`) carry their own
-explicit stack for the same reason: a chain of a few thousand rules
-overflowed them when they recursed. Keep both properties when editing
-either file.
+rather than unwinding. The walks over the REFERENCE graph that run before
+the left-recursion bounds (Tarjan's components and Paull's ordering in
+`src/leftrec.rs`, and `reaches_annotated` in `src/annotate.rs`) carry
+their own explicit stack for the same reason: a chain of a few thousand
+rules overflowed them when they recursed, and a chain of 100,000 now
+reaches the element limit and is refused there, on a test thread's 2 MB
+stack too. Keep both properties when editing these files.
 
 What is left, and is the caller's: DROPPING a deeply nested `Element`
 recurses through the `Box` chain, so a tree the compiler refused still
@@ -136,14 +146,24 @@ and 30000 levels. Reaching that needs a front-end that can itself build
 a tree that deep; an IR that arrives as JSON cannot, since `serde_json`
 stops at 128.
 
-Two bounds keep a small IR from making a large compiler product, in this
-port and in TypeScript alike. `MAX_REPEAT_EXPANSION` holds what numeric
-repetition may expand into, so `0*1000000a` is refused before its helpers
-are allocated. `MAX_LEFT_RECURSION_EXPANSION` holds the alternatives one
-rule may gain from the left-recursion substitution, so a cycle of rules
-whose alternatives lead with the next one is refused before it multiplies;
-without it, twenty such rules exhausted memory and aborted the process.
-Both refuse with the rule named.
+Three bounds keep a small IR from making a large compiler product, in
+this port and in TypeScript and Go alike. `MAX_REPEAT_EXPANSION` holds
+what numeric repetition may expand into, so `0*1000000a` is refused before
+its helpers are allocated. `MAX_LEFT_RECURSION_EXPANSION` holds the
+alternatives one rule may gain from the left-recursion substitution, so a
+cycle of rules whose alternatives lead with the next one is refused before
+it multiplies; without it, twenty such rules exhausted memory and aborted
+the process. `MAX_LEFT_RECURSION_ELEMENTS` holds what left-recursion
+elimination may add to the whole grammar, counting every element at any
+depth and every alternative, a group's as well. Both steps that write more
+than they replace are charged before they allocate: the substitution, so a
+chain of rules of one alternative each, led by the next one, is refused
+from 514 rules on before it copies the rest of the chain into every rule,
+and the splitting of nullable prefixes, so `A = [x1] … [xk] A "y"` is
+refused from k = 362 on before it writes k alternatives of about k/2
+elements each. Without it, 5,000 rules of the chain held hundreds of
+megabytes in each runtime, and a host's deadline bounds the time that
+takes, not the memory. All three refuse with the rule named.
 
 ## Elements are shared, as TypeScript and Go share them
 
@@ -169,16 +189,15 @@ behind an `Rc`. Two rules keep it the canonical shape:
 The provenance `src/leftrec.rs` keeps beside each element is shared the
 same way. A chain of n single-alternative rules, each beginning with the
 next, holds about n²/2 element occurrences after the substitution, and its
-emitted spec is as large; with owned copies the compiler held 1.7 GB for
-n = 2,000, and 6 GB was not enough for n = 5,000. It now holds a pointer
-or two per occurrence, less than TypeScript and Go hold for the same
-grammar, and `tests/leftrec_chain_test.rs` holds it there. The time is
-still quadratic, as the output is, and as it is in TypeScript and Go.
+emitted spec is as large; with owned copies, and before the element limit,
+the compiler held 1.7 GB for n = 2,000, and 6 GB was not enough for
+n = 5,000. The limit now refuses the chain from n = 514 on, and for the
+longest chain it admits the compiler holds a pointer or two per
+occurrence; `tests/leftrec_chain_test.rs` holds it there.
 
 The public `eliminate_left_recursion` returns the public IR, so it gives
-back an owned element per occurrence: for that chain, 2.1 GB at
-n = 5,000. A host that wants the compile and not the rewritten grammar
-calls `emit_grammar_spec`.
+back an owned element per occurrence, and the element limit bounds how
+many the substitution can add to the grammar it was given.
 
 ## Things that look like bugs and are not
 

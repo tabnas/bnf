@@ -1,0 +1,2934 @@
+{
+ "name": "ir-leftrec-elements-optional-prefix",
+ "ir": {
+  "productions": [
+   {
+    "name": "A",
+    "alts": [
+     [
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x0",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x1",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x2",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x3",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x4",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x5",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x6",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x7",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x8",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x9",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x10",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x11",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x12",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x13",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x14",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x15",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x16",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x17",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x18",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x19",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x20",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x21",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x22",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x23",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x24",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x25",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x26",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x27",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x28",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x29",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x30",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x31",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x32",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x33",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x34",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x35",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x36",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x37",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x38",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x39",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x40",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x41",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x42",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x43",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x44",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x45",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x46",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x47",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x48",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x49",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x50",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x51",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x52",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x53",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x54",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x55",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x56",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x57",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x58",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x59",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x60",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x61",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x62",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x63",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x64",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x65",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x66",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x67",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x68",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x69",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x70",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x71",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x72",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x73",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x74",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x75",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x76",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x77",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x78",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x79",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x80",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x81",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x82",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x83",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x84",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x85",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x86",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x87",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x88",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x89",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x90",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x91",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x92",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x93",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x94",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x95",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x96",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x97",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x98",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x99",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x100",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x101",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x102",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x103",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x104",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x105",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x106",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x107",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x108",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x109",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x110",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x111",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x112",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x113",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x114",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x115",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x116",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x117",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x118",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x119",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x120",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x121",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x122",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x123",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x124",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x125",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x126",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x127",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x128",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x129",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x130",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x131",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x132",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x133",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x134",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x135",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x136",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x137",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x138",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x139",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x140",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x141",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x142",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x143",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x144",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x145",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x146",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x147",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x148",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x149",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x150",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x151",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x152",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x153",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x154",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x155",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x156",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x157",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x158",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x159",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x160",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x161",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x162",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x163",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x164",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x165",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x166",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x167",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x168",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x169",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x170",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x171",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x172",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x173",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x174",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x175",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x176",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x177",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x178",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x179",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x180",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x181",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x182",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x183",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x184",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x185",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x186",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x187",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x188",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x189",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x190",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x191",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x192",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x193",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x194",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x195",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x196",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x197",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x198",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x199",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x200",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x201",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x202",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x203",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x204",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x205",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x206",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x207",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x208",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x209",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x210",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x211",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x212",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x213",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x214",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x215",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x216",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x217",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x218",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x219",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x220",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x221",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x222",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x223",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x224",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x225",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x226",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x227",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x228",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x229",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x230",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x231",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x232",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x233",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x234",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x235",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x236",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x237",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x238",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x239",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x240",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x241",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x242",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x243",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x244",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x245",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x246",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x247",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x248",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x249",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x250",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x251",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x252",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x253",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x254",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x255",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x256",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x257",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x258",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x259",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x260",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x261",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x262",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x263",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x264",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x265",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x266",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x267",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x268",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x269",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x270",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x271",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x272",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x273",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x274",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x275",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x276",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x277",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x278",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x279",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x280",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x281",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x282",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x283",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x284",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x285",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x286",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x287",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x288",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x289",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x290",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x291",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x292",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x293",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x294",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x295",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x296",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x297",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x298",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x299",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x300",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x301",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x302",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x303",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x304",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x305",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x306",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x307",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x308",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x309",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x310",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x311",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x312",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x313",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x314",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x315",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x316",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x317",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x318",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x319",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x320",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x321",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x322",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x323",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x324",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x325",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x326",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x327",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x328",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x329",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x330",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x331",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x332",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x333",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x334",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x335",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x336",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x337",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x338",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x339",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x340",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x341",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x342",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x343",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x344",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x345",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x346",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x347",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x348",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x349",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x350",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x351",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x352",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x353",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x354",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x355",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x356",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x357",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x358",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x359",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x360",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "term",
+        "literal": "x361",
+        "caseSensitive": true
+       }
+      },
+      {
+       "kind": "ref",
+       "name": "A"
+      },
+      {
+       "kind": "term",
+       "literal": "y",
+       "caseSensitive": true
+      }
+     ],
+     [
+      {
+       "kind": "term",
+       "literal": "z",
+       "caseSensitive": true
+      }
+     ]
+    ]
+   }
+  ]
+ },
+ "opts": {
+  "tag": "demo"
+ },
+ "pure": null,
+ "pureError": "demo: rule 'A' exceeds the left-recursion element limit of 131072 elements while splitting the elements that can match nothing before 'A' in one of its alternatives, which would add more than 8 elements to the 131064 already added to the grammar. Write that alternative with fewer elements that can match nothing before 'A'.",
+ "recognition": null,
+ "recognitionError": null,
+ "cases": []
+}

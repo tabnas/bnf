@@ -347,47 +347,40 @@ fn hidden_annotated(el: &Element, by_name: &IndexMap<&str, &Production>) -> Opti
 }
 
 /// The first rule that BUILDS A VALUE reachable from this element, or
-/// `None`. Walks sugar and follows rule references transitively.
+/// `None`. Walks sugar and follows rule references transitively, depth
+/// first and in the order the elements are written, with a stack of its
+/// own: the references are the grammar author's, and a chain of them as
+/// long as the grammar would overflow a walk that recursed per rule.
 fn reaches_annotated(
     el: &Element,
     by_name: &IndexMap<&str, &Production>,
     seen: &mut IndexSet<String>,
 ) -> Option<String> {
-    match &el.kind {
-        Kind::Ref { name, .. } => {
-            let target = by_name.get(name.as_str())?;
-            if target.value.is_some() {
-                return Some(target.name.clone());
-            }
-            if seen.contains(&target.name) {
-                return None;
-            }
-            seen.insert(target.name.clone());
-            for alt in &target.alts {
-                for inner in alt {
-                    if let Some(hit) = reaches_annotated(inner, by_name, seen) {
-                        return Some(hit);
-                    }
+    let mut stack: Vec<&Element> = vec![el];
+    while let Some(el) = stack.pop() {
+        match &el.kind {
+            Kind::Ref { name, .. } => {
+                let Some(target) = by_name.get(name.as_str()) else {
+                    continue;
+                };
+                if target.value.is_some() {
+                    return Some(target.name.clone());
                 }
-            }
-            None
-        }
-        Kind::Opt { inner }
-        | Kind::Star { inner, .. }
-        | Kind::Plus { inner }
-        | Kind::Rep { inner, .. } => reaches_annotated(inner, by_name, seen),
-        Kind::Group { alts } => {
-            for alt in alts {
-                for inner in alt {
-                    if let Some(hit) = reaches_annotated(inner, by_name, seen) {
-                        return Some(hit);
-                    }
+                if !seen.insert(target.name.clone()) {
+                    continue;
                 }
+                // Pushed last first, so the first element is walked first.
+                stack.extend(target.alts.iter().flatten().rev().map(|inner| &**inner));
             }
-            None
+            Kind::Opt { inner }
+            | Kind::Star { inner, .. }
+            | Kind::Plus { inner }
+            | Kind::Rep { inner, .. } => stack.push(inner),
+            Kind::Group { alts } => stack.extend(alts.iter().flatten().rev()),
+            _ => {}
         }
-        _ => None,
     }
+    None
 }
 
 /// Whether left-recursion elimination will leave this production's

@@ -4,6 +4,7 @@ package bnf
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -154,7 +155,13 @@ func isHiddenLeftRecursive(alt Sequence, name string) bool {
 // Only alternatives that are actually hidden-left-recursive are touched,
 // so a grammar that compiles correctly today is unchanged. Mirrors the TS
 // `expandNullableLeftPrefixes`.
-func expandNullableLeftPrefixes(prods []*Production) []*Production {
+//
+// Each split copies the rest of the alternative, so k such elements in front
+// of the recursion write k alternatives holding about k²/2 elements between
+// them. Every split is charged to the grammar-wide budget (chargeExpansion)
+// before it is made, and added carries the total on to the substitution that
+// follows.
+func expandNullableLeftPrefixes(prods []*Production, added *int) []*Production {
 	out := make([]*Production, len(prods))
 	for i, p := range prods {
 		alts := p.Alts
@@ -178,6 +185,7 @@ func expandNullableLeftPrefixes(prods []*Production) []*Production {
 			}
 			alt := alts[idx]
 			present := nullableSugarPresent(alt[0])
+			*added = chargeExpansion(p, alt, present, *added)
 			next := make([]Sequence, 0, len(alts)+1)
 			next = append(next, alts[:idx]...)
 			next = append(next, append(append(Sequence{}, present...), alt[1:]...))
@@ -287,8 +295,12 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 	// processed before the rules that reference them. Paull's substitution
 	// inlines A_j's alts into A_i for j < i, so putting dependencies first is
 	// what makes nullable-prefixed hidden left recursion reachable by the
-	// substitution step.
-	prods := topoOrderForPaull(expandNullableLeftPrefixes(copies))
+	// substitution step. added is what elimination has added to the grammar
+	// so far, in elements and alternatives, held to MaxLeftRecursionElements
+	// before each step that adds is made: first the splitting of nullable
+	// prefixes, then each substitution.
+	added := 0
+	prods := topoOrderForPaull(expandNullableLeftPrefixes(copies, &added))
 
 	// Substitution normally runs for every production, even a cycle-free one.
 	// That is pragmatic rather than theoretical: the multi-token altPrefixes
@@ -349,6 +361,7 @@ func eliminateLeftRecursionKeeping(grammar *Grammar, keep map[string]bool) *Gram
 						prods[i] = substituteLeadingRefByToken(prods[i], prods[j].Name)
 					} else {
 						gained = chargeSubstitution(prods[i], prods[j], gained)
+						added = chargeElements(prods[i], prods[j], added)
 						prods[i] = substituteLeadingRef(prods[i], prods[j])
 					}
 					changed = true
@@ -416,53 +429,78 @@ func findLeadingRefCycleMembers(prods []*Production) map[string]bool {
 	lowlinks := map[string]int{}
 	cyclic := map[string]bool{}
 
-	var strongConnect func(name string)
-	strongConnect = func(name string) {
+	// Tarjan's algorithm with the depth-first search carried on a stack of
+	// its own rather than the call stack: the reference graph is as deep as
+	// the grammar's author made it. The visits, the lowlink updates and the
+	// components popped are exactly the recursive ones.
+	type frame struct {
+		name    string
+		targets []string
+		next    int
+	}
+	open := func(name string) *frame {
 		indices[name] = index
 		lowlinks[name] = index
 		index++
 		stack = append(stack, name)
 		onStack[name] = true
-
+		f := &frame{name: name}
 		if prod := byName[name]; prod != nil {
-			for _, target := range leadingRefs(prod) {
-				if _, seen := indices[target]; !seen {
-					strongConnect(target)
-					if lowlinks[target] < lowlinks[name] {
-						lowlinks[name] = lowlinks[target]
-					}
-				} else if onStack[target] {
-					if indices[target] < lowlinks[name] {
-						lowlinks[name] = indices[target]
-					}
-				}
-			}
+			f.targets = leadingRefs(prod)
 		}
-
-		if lowlinks[name] == indices[name] {
-			// Pop the SCC. More than one member, or one member with a
-			// self-loop, means a cycle.
-			scc := []string{}
-			for {
-				w := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				delete(onStack, w)
-				scc = append(scc, w)
-				if w == name {
-					break
+		return f
+	}
+	strongConnect := func(root string) {
+		frames := []*frame{open(root)}
+		for len(frames) > 0 {
+			f := frames[len(frames)-1]
+			if f.next < len(f.targets) {
+				target := f.targets[f.next]
+				f.next++
+				if _, seen := indices[target]; !seen {
+					frames = append(frames, open(target))
+				} else if onStack[target] {
+					if indices[target] < lowlinks[f.name] {
+						lowlinks[f.name] = indices[target]
+					}
 				}
+				continue
 			}
-			isCycle := len(scc) > 1
-			if len(scc) == 1 {
-				for _, t := range leadingRefs(byName[scc[0]]) {
-					if t == scc[0] {
-						isCycle = true
+			frames = frames[:len(frames)-1]
+			name := f.name
+			if lowlinks[name] == indices[name] {
+				// Pop the SCC. More than one member, or one member with a
+				// self-loop, means a cycle.
+				scc := []string{}
+				for {
+					w := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					delete(onStack, w)
+					scc = append(scc, w)
+					if w == name {
+						break
+					}
+				}
+				isCycle := len(scc) > 1
+				if len(scc) == 1 {
+					for _, t := range leadingRefs(byName[scc[0]]) {
+						if t == scc[0] {
+							isCycle = true
+						}
+					}
+				}
+				if isCycle {
+					for _, n := range scc {
+						cyclic[n] = true
 					}
 				}
 			}
-			if isCycle {
-				for _, n := range scc {
-					cyclic[n] = true
+			// What the recursive call did on return: carry the child's
+			// lowlink up to the parent that pushed it.
+			if len(frames) > 0 {
+				parent := frames[len(frames)-1]
+				if lowlinks[name] < lowlinks[parent.name] {
+					lowlinks[parent.name] = lowlinks[name]
 				}
 			}
 		}
@@ -484,25 +522,44 @@ func topoOrderForPaull(prods []*Production) []*Production {
 	}
 	colour := map[string]int{} // 0 unseen, 1 in-progress, 2 done
 	order := []*Production{}
-	var visit func(name string)
-	visit = func(name string) {
-		if colour[name] != 0 {
-			return
-		}
-		colour[name] = 1
-		p := byName[name]
-		if p != nil {
+	// Depth first, on a stack of its own: the graph is as deep as the
+	// grammar's author made it. An exit step is what the recursive walk did
+	// after its children returned, so the post-order is unchanged.
+	type step struct {
+		name string
+		exit bool
+	}
+	visit := func(root string) {
+		steps := []step{{name: root}}
+		for len(steps) > 0 {
+			st := steps[len(steps)-1]
+			steps = steps[:len(steps)-1]
+			p := byName[st.name]
+			if st.exit {
+				colour[st.name] = 2
+				order = append(order, p)
+				continue
+			}
+			if colour[st.name] != 0 {
+				continue
+			}
+			colour[st.name] = 1
+			if p == nil {
+				colour[st.name] = 2
+				continue
+			}
+			steps = append(steps, step{name: st.name, exit: true})
+			targets := []string{}
 			for _, alt := range p.Alts {
 				if len(alt) > 0 && alt[0].Kind == KindRef {
 					if _, ok := byName[alt[0].Name]; ok {
-						visit(alt[0].Name)
+						targets = append(targets, alt[0].Name)
 					}
 				}
 			}
-			colour[name] = 2
-			order = append(order, p)
-		} else {
-			colour[name] = 2
+			for t := len(targets) - 1; t >= 0; t-- {
+				steps = append(steps, step{name: targets[t]})
+			}
 		}
 	}
 	for _, p := range prods {
@@ -555,6 +612,145 @@ func chargeSubstitution(target, source *Production, gained int) int {
 		})
 	}
 	return gained + led*each
+}
+
+// deepSize is the deep size of a run of elements: each element counts 1 and
+// everything nested in it, all the way down: 1 for each alternative of a
+// group and the deep sizes of the elements in it, and the deep size of the
+// inner element of an option or a repetition. It walks with a stack of its
+// own, since the passes before this one can nest elements deeper than the
+// grammar did, and gives up as soon as the count reaches limit, which it
+// then returns: a caller asks only whether a size passes what is left of
+// the bound, so a walk never costs more than that. Mirrors the TS
+// `deepSize`.
+func deepSize(elements []*Element, limit int) int {
+	stack := append([]*Element(nil), elements...)
+	size := 0
+	for len(stack) > 0 {
+		el := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if el == nil {
+			continue
+		}
+		size++
+		if el.Kind == KindGroup {
+			size += len(el.Alts)
+		}
+		if size >= limit {
+			return limit
+		}
+		switch el.Kind {
+		case KindOpt, KindStar, KindPlus, KindRep:
+			if el.Inner != nil {
+				stack = append(stack, el.Inner)
+			}
+		case KindGroup:
+			for _, alt := range el.Alts {
+				stack = append(stack, alt...)
+			}
+		}
+	}
+	return size
+}
+
+// chargeElements charges a substitution of source into target against what
+// the whole grammar may gain (MaxLeftRecursionElements), BEFORE it is made,
+// and returns the new total; added is what the substitutions so far have
+// added. An alternative costs 1 for itself and the deep size of each of its
+// elements (deepSize). Each alternative of target that begins with source is
+// replaced by one alternative per alternative of source, a_1 … a_m, each
+// followed by the replaced alternative's tail, which adds
+// (m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1, floored at zero. Past the bound
+// it panics with an *EmitError, which emitGrammarSpec returns as its error.
+// Mirrors the TS `chargeElements`.
+func chargeElements(target, source *Production, added int) int {
+	remaining := MaxLeftRecursionElements - added
+	led := []Sequence{}
+	for _, alt := range target.Alts {
+		if len(alt) > 0 && alt[0].Kind == KindRef && alt[0].Name == source.Name {
+			led = append(led, alt)
+		}
+	}
+	refuse := func() {
+		panic(&EmitError{
+			Message: fmt.Sprintf("%s: rule '%s' exceeds the left-recursion element limit "+
+				"of %d elements while inlining '%s', which begins %d of its "+
+				"alternatives and would add more than %d elements to the %d already "+
+				"added to the grammar. Factor '%s' out of the alternatives it begins.",
+				diagName(), target.Name, MaxLeftRecursionElements, source.Name, len(led),
+				remaining, added, source.Name),
+			Rule: target.Name,
+			Sp:   target.Sp,
+		})
+	}
+	m := len(source.Alts)
+	// Each alternative replaced adds at least held - 1, so a source whose
+	// alternatives hold more than remaining + 1 is refused before a tail is
+	// read.
+	all := []*Element{}
+	for _, alt := range source.Alts {
+		all = append(all, alt...)
+	}
+	held := deepSize(all, remaining+2)
+	if len(led) > 0 && held > remaining+1 {
+		refuse()
+	}
+	gain := 0
+	for _, alt := range led {
+		// A tail is copied once per alternative of the source after the
+		// first, so it counts only when there are several, and then adds at
+		// least its own size.
+		tail := 0
+		if m > 1 {
+			tail = deepSize(alt[1:], remaining-gain+2)
+		}
+		// What the new alternatives cost, m·(1 + tail) + held, less what the
+		// one they replace cost, 1 + 1 + tail.
+		if more := m*(1+tail) + held - (2 + tail); more > 0 {
+			gain += more
+		}
+		if gain > remaining {
+			refuse()
+		}
+	}
+	return added + gain
+}
+
+// chargeExpansion charges splitting alt, whose leading element s can match
+// nothing, into present+rest and rest (expandNullableLeftPrefixes) against
+// what the whole grammar may gain (MaxLeftRecursionElements), BEFORE the two
+// alternatives are made, and returns the new total. They cost
+// (1 + deep|present| + deep|rest|) + (1 + deep|rest|), and the one they
+// replace cost 1 + deep|s| + deep|rest|, so the split adds
+// 1 + deep|present| + deep|rest| − deep|s|, floored at zero. Past the bound
+// it panics with an *EmitError. Mirrors the TS `chargeExpansion`.
+func chargeExpansion(prod *Production, alt, present Sequence, added int) int {
+	remaining := MaxLeftRecursionElements - added
+	lead := deepSize(alt[:1], math.MaxInt)
+	// Counted until it passes what could still fit once lead is taken off,
+	// so the decision is exact.
+	both := make([]*Element, 0, len(present)+len(alt)-1)
+	both = append(both, present...)
+	both = append(both, alt[1:]...)
+	written := deepSize(both, remaining+lead+2)
+	gain := written + 1 - lead
+	if gain < 0 {
+		gain = 0
+	}
+	if gain > remaining {
+		panic(&EmitError{
+			Message: fmt.Sprintf("%s: rule '%s' exceeds the left-recursion element limit "+
+				"of %d elements while splitting the elements that can match nothing "+
+				"before '%s' in one of its alternatives, which would add more than %d "+
+				"elements to the %d already added to the grammar. Write that alternative "+
+				"with fewer elements that can match nothing before '%s'.",
+				diagName(), prod.Name, MaxLeftRecursionElements, prod.Name, remaining,
+				added, prod.Name),
+			Rule: prod.Name,
+			Sp:   prod.Sp,
+		})
+	}
+	return added + gain
 }
 
 func substituteLeadingRef(target, source *Production) *Production {

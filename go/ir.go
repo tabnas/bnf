@@ -164,6 +164,34 @@ const MaxRepeatExpansion = 8192
 // records the measurement.
 const MaxLeftRecursionExpansion = 512
 
+// MaxLeftRecursionElements is what left-recursion elimination may add to the
+// whole grammar, counted in elements and alternatives, before it refuses the
+// grammar. An element counts 1 and everything nested in it, all the way down:
+// 1 for each alternative of a group and the deep sizes of the elements in it,
+// and the deep size of the inner element of an option or a repetition. That
+// is its deep size. An alternative counts the same way: 1 for itself and the
+// deep size of each of its elements. Two steps of the pass write more than
+// they replace, and each is charged before it allocates, as what it writes
+// less what it replaces, floored at zero; this bound holds the sum over every
+// one of them in the grammar. Substituting a rule into an alternative that
+// begins with it replaces that alternative by one per alternative of the
+// rule, a_1 … a_m, each followed by the replaced alternative's tail, which
+// adds (m − 1)·(1 + deep|tail|) + Σ deep|a_i| − 1. Splitting a hidden left
+// recursion's leading element s, which can match nothing, off an alternative
+// s rest writes present(s) rest and rest, which adds
+// 1 + deep|present(s)| + deep|rest| − deep|s|: deep|rest| for an option,
+// deep|s| + deep|rest| for a repetition. MaxLeftRecursionExpansion bounds the
+// alternatives one rule gains; this bounds what all of them hold. A chain of
+// n rules, each one alternative that begins with the next, gains no
+// alternatives at all, but ends with every rule holding the rest of the
+// chain: (n − 2)(n − 1)/2 added. A = [x1] … [xk] A "y" / "z" needs no
+// substitution, and its split adds k(k + 1). No grammar in the downstream
+// corpora adds more than 6,615 (dhall.abnf), and none that compiles more than
+// 2,600; the chain is refused from n = 514 on, and the options from k = 362
+// on. MAX_LEFT_RECURSION_ELEMENTS in ts/src/compiler.ts records the
+// measurement.
+const MaxLeftRecursionElements = 131072
+
 type Sequence []*Element
 
 // ProbeDispatchSpec configures a synthesised dispatcher production for
@@ -793,41 +821,50 @@ const srcField = "src"
 func reachesAnnotated(
 	el *Element, byName map[string]*Production, seen map[string]bool,
 ) string {
-	switch el.Kind {
-	case KindRef:
-		target, ok := byName[el.Name]
-		if !ok {
-			return ""
+	// Depth first and in the order the elements are written, on a stack of
+	// its own: the references are the grammar author's, and a chain of them
+	// as long as the grammar would take a walk that recursed per rule as
+	// deep. A hit with an empty name counts as none, as it always has here.
+	stack := []*Element{el}
+	push := func(alts []Sequence) {
+		inner := []*Element{}
+		for _, alt := range alts {
+			inner = append(inner, alt...)
 		}
-		if target.Value != nil {
-			return target.Name
+		for i := len(inner) - 1; i >= 0; i-- {
+			stack = append(stack, inner[i])
 		}
-		if seen[target.Name] {
-			return ""
+	}
+	for len(stack) > 0 {
+		e := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if e == nil {
+			continue
 		}
-		seen[target.Name] = true
-		for _, alt := range target.Alts {
-			for _, inner := range alt {
-				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
-					return hit
-				}
+		switch e.Kind {
+		case KindRef:
+			target, ok := byName[e.Name]
+			if !ok {
+				continue
 			}
-		}
-		return ""
-	case KindOpt, KindStar, KindPlus, KindRep:
-		if el.Inner == nil {
-			return ""
-		}
-		return reachesAnnotated(el.Inner, byName, seen)
-	case KindGroup:
-		for _, alt := range el.Alts {
-			for _, inner := range alt {
-				if hit := reachesAnnotated(inner, byName, seen); hit != "" {
-					return hit
+			if target.Value != nil {
+				if target.Name != "" {
+					return target.Name
 				}
+				continue
 			}
+			if seen[target.Name] {
+				continue
+			}
+			seen[target.Name] = true
+			push(target.Alts)
+		case KindOpt, KindStar, KindPlus, KindRep:
+			if e.Inner != nil {
+				stack = append(stack, e.Inner)
+			}
+		case KindGroup:
+			push(e.Alts)
 		}
-		return ""
 	}
 	return ""
 }
