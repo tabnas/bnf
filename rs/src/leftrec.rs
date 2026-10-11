@@ -5,6 +5,8 @@
 //! rewrite. Mirrors `eliminateLeftRecursion` and `rewriteTailRepeats` in
 //! `ts/src/compiler.ts`.
 
+use std::collections::HashMap;
+
 use indexmap::{IndexMap, IndexSet};
 
 use crate::annotate::exempt_alias;
@@ -482,16 +484,29 @@ pub(crate) fn eliminate_left_recursion_keeping(
     }
 
     // Restore the caller's declared order, so the start rule still ends
-    // up first.
-    let mut by_name: IndexMap<String, Production> =
-        prods.into_iter().map(|p| (p.name.clone(), p)).collect();
-    let mut ordered = Vec::new();
+    // up first. Taken from slots rather than removed from an ordered map,
+    // whose removal shifts every later entry: once per production, that
+    // was quadratic in the size of the grammar. The slots keep the map's
+    // semantics: a repeated name keeps its first place and its last
+    // production, and is taken once.
+    let mut slot_of: HashMap<String, usize> = HashMap::with_capacity(prods.len());
+    let mut slots: Vec<Option<Production>> = Vec::with_capacity(prods.len());
+    for p in prods {
+        match slot_of.get(&p.name) {
+            Some(&at) => slots[at] = Some(p),
+            None => {
+                slot_of.insert(p.name.clone(), slots.len());
+                slots.push(Some(p));
+            }
+        }
+    }
+    let mut ordered = Vec::with_capacity(slots.len());
     for name in &original_order {
-        if let Some(p) = by_name.shift_remove(name) {
+        if let Some(p) = slot_of.get(name).and_then(|&at| slots[at].take()) {
             ordered.push(p);
         }
     }
-    ordered.extend(by_name.into_values());
+    ordered.extend(slots.into_iter().flatten());
 
     Ok(EliminatedGrammar {
         grammar: Grammar {

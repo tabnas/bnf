@@ -58,6 +58,13 @@ type contestCtx struct {
 	// predicate's prefix test.
 	literalByToken map[string]contestLiteral
 	wordKeywords   bool
+	// literalHeads names every token a literal head can be (each literal's
+	// token and each token class's set), and classHeads every token a
+	// character class can be. Filled once, when the token tables are
+	// complete: rebuilt for every production, as they were, they made the
+	// keyword-shadow ordering quadratic in the size of the grammar.
+	literalHeads map[string]bool
+	classHeads   map[string]bool
 
 	rangeCache   map[string][]charRange
 	rangeKnown   map[string]bool
@@ -620,21 +627,11 @@ func reorderKeywordShadow(prod *Production, entries []dispatchEntry, grammar *Gr
 	literals, regexTokens map[string]string, followSets map[string]map[string]bool,
 	cc *contestCtx) []map[string]any {
 
-	// A token class's set is a literal head here: its members are
-	// literals and engine tokens, never a character class
+	// A token class's set is a literal head here (cc.literalHeads): its
+	// members are literals and engine tokens, never a character class
 	// (tokenClassNames), and with the option off those members are
 	// literal heads this ordering places, each one.
-	litToks := map[string]bool{}
-	for _, t := range literals {
-		litToks[t] = true
-	}
-	for _, t := range cc.classSets {
-		litToks[t] = true
-	}
-	classToks := map[string]bool{}
-	for _, t := range regexTokens {
-		classToks[t] = true
-	}
+	litToks, classToks := cc.literalHeads, cc.classHeads
 
 	// Head token and lookahead length, resolved ONCE per entry. A
 	// dispatch list can hold hundreds of entries whose `s` is a
@@ -820,13 +817,9 @@ func maxFloat(a, b float64) float64 {
 //
 // Ported from ts/src/compiler.ts (specificityPermute), which is
 // canonical.
-func specificityPermute(entries []dispatchEntry, cc *contestCtx,
-	grammar *Grammar, regexTokens map[string]string) {
+func specificityPermute(entries []dispatchEntry, cc *contestCtx, grammar *Grammar) {
 
-	classToks := map[string]bool{}
-	for _, t := range regexTokens {
-		classToks[t] = true
-	}
+	classToks := cc.classHeads
 
 	// Head token and lookahead length once per entry — the loop below is
 	// quadratic, and re-splitting multi-token `s` strings inside it is

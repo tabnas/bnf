@@ -4705,6 +4705,11 @@ function emitGrammarSpec(
   // assignment runs the Object.prototype setter, so the rule silently
   // vanishes and the generated parser fails with "unknown rule: __proto__".
   const ruleSpec: NonNullable<GrammarSpec['rule']> = Object.create(null)
+  // Nothing allocates a token from here on, so the head sets are final.
+  const heads: HeadTokens = {
+    literal: new Set([...literals.values(), ...classSets.values()]),
+    charClass: new Set(regexTokens.values()),
+  }
   for (const prod of grammar.productions) {
     // Productions synthesised by the rewrite passes (sugar helpers,
     // factored tails, probe branches) are emitted under their own names.
@@ -4726,7 +4731,7 @@ function emitGrammarSpec(
     emitProduction(
       prod, grammar, literals, regexTokens, knownRules, tag, ruleSpec,
       firstSets, nullable, refs, followSets, followPairs, tokenRangesOf,
-      tokensOverlap, headsContest, classSets, classMembers, valuePlan,
+      tokensOverlap, headsContest, classSets, classMembers, heads, valuePlan,
       arrayHelpers, valueRules, prov,
     )
   }
@@ -5183,6 +5188,14 @@ function emitTailRepeat(
 }
 
 
+// The token names a literal head can be (every literal's token and every
+// token class's set) and those a character class can be. emitGrammarSpec
+// collects them once, when every token is allocated, and every production
+// reads the same two sets: built per production, as they were, they made
+// the keyword-shadow ordering quadratic in the size of the grammar.
+type HeadTokens = { literal: Set<string>; charClass: Set<string> }
+
+
 function emitProduction(
   prod: Production,
   grammar: Grammar,
@@ -5205,6 +5218,8 @@ function emitProduction(
   classSets: Map<string, string>,
   // Each class's set name to the tokens it holds.
   classMembers: Map<string, string[]>,
+  // The token names a literal head and a character class can be.
+  heads: HeadTokens,
   valuePlan: Map<string, boolean[]>,
   // The helpers of an annotated array, and the rules that build a value.
   // Together they say, for any link that pushes: does the pushed rule
@@ -5324,16 +5339,16 @@ function emitProduction(
   // decision, whichever way they get there.
   const descentOf = (o: any): string | undefined => o.p ?? o.r
 
+  // A token class's set is a literal head here (`heads.literal`): its
+  // members are literals and engine tokens, never a character class
+  // (tokenClassNames), and with the option off those members are literal
+  // heads this ordering places, each one.
+  const litToks = heads.literal
+  const classToks = heads.charClass
+
   const reorderKeywordShadow = (
     entries: Array<{ o: any; alt: Sequence | null }>,
   ): any[] => {
-    // A token class's set is a literal head here: its members are
-    // literals and engine tokens, never a character class
-    // (tokenClassNames), and with the option off those members are
-    // literal heads this ordering places, each one.
-    const litToks = new Set([...literals.values(), ...classSets.values()])
-    const classToks = new Set(regexTokens.values())
-
     // Head token and lookahead length, resolved ONCE per entry. A
     // dispatch list can hold hundreds of entries whose `s` is a
     // four-token prefix, and this loop is quadratic in them — splitting
@@ -5449,7 +5464,6 @@ function emitProduction(
   const specificityPermute = (
     entries: Array<{ o: any; alt: Sequence | null }>,
   ): void => {
-    const classToks = new Set(regexTokens.values())
     // Head token and lookahead length once per entry — the loop below
     // is quadratic, and re-splitting multi-token `s` strings inside it
     // is what made large grammars slow.
@@ -5582,7 +5596,7 @@ function emitProduction(
   // `%x31-39` share three of the four atoms they are built from. That is
   // the case this exists for, so overlap still counts when both sides
   // are classes.
-  const classHeadToks = new Set(regexTokens.values())
+  const classHeadToks = heads.charClass
   const altHeadSharesToken = (alt: Sequence, all: Sequence[]): boolean => {
     const mine = firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
     if (null == mine) return false
