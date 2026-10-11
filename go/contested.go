@@ -933,7 +933,7 @@ func specificityPermute(entries []dispatchEntry, cc *contestCtx, grammar *Gramma
 			spans[i] = 0
 			continue
 		}
-		v := seqTokenSpan(entries[i].alt, grammar, map[string]bool{})
+		v := seqTokenSpan(entries[i].alt, grammar)
 		if math.IsInf(v, 0) {
 			v = 1e9
 		}

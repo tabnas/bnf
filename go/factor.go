@@ -87,12 +87,13 @@ func unwrapAlt(alt Sequence) Sequence {
 }
 
 // seqTokenSpan is the most tokens a sequence can span, for deciding
-// whether the dispatcher's K-token lookahead can see past it. It runs
-// on the RAW IR — left factoring precedes desugaring, so the sugar
-// kinds are still here and each has to be counted on its own terms.
-// Returns +Inf for anything unbounded (a star/plus, an unbounded rep, a
-// cycle) or unknown (prose), which is what makes factoring the only
-// remedy.
+// whether the dispatcher's K-token lookahead can see past it: the span
+// itself while it is at most lookaheadKSpan, and +Inf past that, or for
+// anything unbounded (a star/plus, an unbounded rep, a rule that refers
+// back to a rule on the way to it) or unknown (prose), which is what makes
+// factoring the only remedy. It runs on the RAW IR — left factoring
+// precedes desugaring, so the sugar kinds are still here and each has to
+// be counted on its own terms. A repetition of at most none spans none.
 //
 // This must NOT be approximated by asking altPrefixesRaw: that walker
 // treats every element it does not recognise as a truncation, and
@@ -100,65 +101,136 @@ func unwrapAlt(alt Sequence) Sequence {
 // or `["-"]` would read as unbounded and get factored, collapsing
 // alternatives the dispatcher separates perfectly well (and, with
 // marks enabled, silently merging their user-visible marks).
-func seqTokenSpan(seq Sequence, grammar *Grammar, visited map[string]bool) float64 {
-	total := 0.0
-	for _, el := range seq {
-		total += elementTokenSpan(el, grammar, visited)
-		if float64(lookaheadKSpan) < total {
-			return math.Inf(1)
+//
+// The walk keeps its own stack and one set of the rules on its way, which
+// a rule joins when the walk enters it and leaves when the walk is done
+// with it. Each sequence it sums is given only the room lookaheadKSpan
+// leaves it, and stops as soon as it passes that, so a chain of rules each
+// ending in the next is followed for five rules, not to its end. Mirrors
+// the TS seqTokenSpan.
+func seqTokenSpan(seq Sequence, grammar *Grammar) float64 {
+	inf := math.Inf(1)
+	onWay := map[string]bool{}
+	stack := []spanFrame{{kind: spanSeq, seq: seq, room: lookaheadKSpan}}
+
+	// begin starts the span of el in room: what it spans when that is known
+	// at once, or known false once the frames that will work it out are
+	// pushed.
+	begin := func(el *Element, room int) (span float64, known bool) {
+		for {
+			switch el.Kind {
+			case KindTerm, KindRegex, KindToken:
+				return 1, true
+			case KindOpt:
+				// Absent spans nothing and present spans the inner element,
+				// so the MOST it can span is what the inner element spans.
+				el = el.Inner
+			case KindRep:
+				if el.Max == MaxInfinity {
+					return inf, true
+				}
+				if el.Max == 0 {
+					return 0, true
+				}
+				stack = append(stack, spanFrame{kind: spanRep, times: float64(el.Max)})
+				room /= el.Max
+				el = el.Inner
+			case KindGroup:
+				stack = append(stack, spanFrame{kind: spanAlts, alts: el.Alts, room: room})
+				return 0, false
+			case KindRef:
+				if onWay[el.Name] {
+					return inf, true
+				}
+				target := findProd(grammar, el.Name)
+				if target == nil || len(target.Alts) == 0 {
+					return inf, true
+				}
+				onWay[el.Name] = true
+				stack = append(stack, spanFrame{kind: spanAlts, alts: target.Alts, room: room,
+					rule: el.Name, isRule: true})
+				return 0, false
+			default:
+				// Prose, a star or a plus.
+				return inf, true
+			}
 		}
 	}
-	return total
+
+	// back is what the frame on top was waiting for, when waiting is set:
+	// the span of the element or the alternative it began.
+	back, waiting := 0.0, false
+	for {
+		top := &stack[len(stack)-1]
+		var span float64
+		switch top.kind {
+		case spanSeq:
+			if waiting {
+				top.total += back
+				waiting = false
+			}
+			if float64(top.room) < top.total {
+				span = inf
+			} else if top.at < len(top.seq) {
+				el := top.seq[top.at]
+				top.at++
+				back, waiting = begin(el, top.room-int(top.total))
+				continue
+			} else {
+				span = top.total
+			}
+		case spanAlts:
+			if waiting {
+				if top.total < back {
+					top.total = back
+				}
+				waiting = false
+			}
+			if !math.IsInf(top.total, 1) && top.at < len(top.alts) {
+				alt := top.alts[top.at]
+				top.at++
+				stack = append(stack, spanFrame{kind: spanSeq, seq: alt, room: top.room})
+				continue
+			}
+			span = top.total
+		default:
+			span = top.times * back
+			waiting = false
+		}
+		done := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if done.isRule {
+			delete(onWay, done.rule)
+		}
+		if len(stack) == 0 {
+			return span
+		}
+		back, waiting = span, true
+	}
 }
 
-func elementTokenSpan(el *Element, grammar *Grammar, visited map[string]bool) float64 {
-	switch el.Kind {
-	case KindTerm, KindRegex, KindToken:
-		return 1
-	case KindProse:
-		return math.Inf(1)
-	case KindOpt:
-		// Absent contributes 0, present contributes the inner span; the
-		// MOST it can span is the inner span.
-		return elementTokenSpan(el.Inner, grammar, visited)
-	case KindStar, KindPlus:
-		return math.Inf(1)
-	case KindRep:
-		if el.Max == MaxInfinity {
-			return math.Inf(1)
-		}
-		return float64(el.Max) * elementTokenSpan(el.Inner, grammar, visited)
-	case KindGroup:
-		most := 0.0
-		for _, alt := range el.Alts {
-			if n := seqTokenSpan(alt, grammar, visited); most < n {
-				most = n
-			}
-		}
-		return most
-	case KindRef:
-		if visited[el.Name] {
-			return math.Inf(1)
-		}
-		target := findProd(grammar, el.Name)
-		if target == nil || len(target.Alts) == 0 {
-			return math.Inf(1)
-		}
-		sub := map[string]bool{}
-		for k := range visited {
-			sub[k] = true
-		}
-		sub[el.Name] = true
-		most := 0.0
-		for _, alt := range target.Alts {
-			if n := seqTokenSpan(alt, grammar, sub); most < n {
-				most = n
-			}
-		}
-		return most
-	}
-	return math.Inf(1)
+// spanFrame is one step of seqTokenSpan's walk: a sequence being summed
+// (spanSeq: its next element, what the elements before it span, and the
+// room it has), the most any alternative spans (spanAlts, of a group or of
+// a rule, the rule on the way while its alternatives are walked), or a
+// bounded repetition of what its element spans (spanRep).
+type spanFrame struct {
+	kind   int
+	seq    Sequence
+	alts   []Sequence
+	at     int
+	total  float64 // spanSeq: the span so far; spanAlts: the most so far
+	room   int
+	rule   string
+	isRule bool
+	times  float64
 }
+
+const (
+	spanSeq = iota
+	spanAlts
+	spanRep
+)
 
 // firstCharRangesOfElement is the first-character coverage of an
 // element, from the raw IR (token allocation has not happened when left
@@ -424,7 +496,7 @@ func factorOnce(prodName, prodOrigin string, alts []Sequence,
 		}
 
 		prefix := append(Sequence{}, run[0][:plen]...)
-		if float64(lookaheadKSpan) >= seqTokenSpan(prefix, grammar, map[string]bool{}) {
+		if float64(lookaheadKSpan) >= seqTokenSpan(prefix, grammar) {
 			// Dispatch lookahead already separates these — leave them be.
 			continue
 		}
