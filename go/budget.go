@@ -272,6 +272,9 @@ func commitRule(ruleSpec map[string]*tabnas.GrammarRuleSpec, name string,
 			"the %d charged for its alternates", diagName(), name, units, pre))
 	}
 	budget.charge(units - pre)
+	// The first write is where the rule stands in the spec, as it is in
+	// TypeScript's object; a rule written again keeps its place.
+	trace.noteRule(name)
 	ruleSpec[name] = rs
 }
 

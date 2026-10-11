@@ -58,75 +58,88 @@ var optionsHandled = map[string]bool{
 }
 
 // optionsToData converts typed Options into the map form
-// tabnas.MapToOptions reads. Returns nil when nothing is set.
-func optionsToData(opt *tabnas.Options) (map[string]any, error) {
+// tabnas.MapToOptions reads, as an ordered object in the order TypeScript
+// writes it: the emitter's own options in the order its emitter makes
+// them (fixed, rule, lex, match, tokenSet), then the lexing a front-end
+// switches off in the order gbnf's TypeScript front-end sets it, then the
+// rest. The tokens are in the order they were allocated: the match tokens
+// in TokenOrder's, the fixed tokens and the token sets in what the emitter
+// recorded for the spec (ord, nil for a spec it did not emit), and the
+// rest of each in name order. An empty object when nothing is set.
+func optionsToData(opt *tabnas.Options, ord *specOrder) (*tabnas.OrderedMap, error) {
+	out := tabnas.NewOrderedMap()
 	if opt == nil {
-		return map[string]any{}, nil
+		return out, nil
 	}
 	if err := refuseUnhandled(opt); err != nil {
 		return nil, err
 	}
 
-	out := map[string]any{}
 	var funcs []string
-
-	if opt.Tag != "" {
-		out["tag"] = opt.Tag
-	}
-	if len(opt.Ender) > 0 {
-		out["ender"] = strsToAny(opt.Ender)
-	}
-	if opt.TokenSet != nil {
-		ts := map[string]any{}
-		for name, tins := range opt.TokenSet {
-			ts[name] = strsToAny(tins)
-		}
-		out["tokenSet"] = ts
-	}
-	if len(opt.Error) > 0 {
-		out["error"] = strMapToAny(opt.Error)
-	}
-	if len(opt.Hint) > 0 {
-		out["hint"] = strMapToAny(opt.Hint)
-	}
-	if o := opt.Safe; o != nil {
-		m := map[string]any{}
-		putBool(m, "key", o.Key)
-		put(out, "safe", m)
+	var fixedOrder, setOrder []string
+	if ord != nil {
+		fixedOrder, setOrder = ord.fixed, ord.sets
 	}
 
 	if o := opt.Fixed; o != nil {
-		m := map[string]any{}
-		putBool(m, "lex", o.Lex)
+		m := tabnas.NewOrderedMap()
 		if o.Token != nil {
-			tok := map[string]any{}
-			for name, src := range o.Token {
-				if src == nil {
-					tok[name] = nil
+			tok := tabnas.NewOrderedMap()
+			for _, name := range inOrder(mapKeys(o.Token), fixedOrder) {
+				if src := o.Token[name]; src == nil {
+					tok.Set(name, nil)
 				} else {
-					tok[name] = *src
+					tok.Set(name, *src)
 				}
 			}
-			m["token"] = tok
+			m.Set("token", tok)
 		}
+		putBool(m, "lex", o.Lex)
 		funcs = appendIfFunc(funcs, "fixed.check", o.Check)
 		put(out, "fixed", m)
 	}
 
+	if o := opt.Rule; o != nil {
+		m := tabnas.NewOrderedMap()
+		putStr(m, "start", o.Start)
+		putBool(m, "finish", o.Finish)
+		putStr(m, "include", o.Include)
+		putStr(m, "exclude", o.Exclude)
+		if o.MaxMul != nil {
+			m.Set("maxmul", *o.MaxMul)
+		}
+		put(out, "rule", m)
+	}
+
+	if o := opt.Lex; o != nil {
+		m := tabnas.NewOrderedMap()
+		putBool(m, "empty", o.Empty)
+		putBool(m, "relex", o.Relex)
+		if o.EmptyResult != nil {
+			m.Set("emptyResult", o.EmptyResult)
+		}
+		if len(o.Match) > 0 {
+			funcs = append(funcs, "lex.match")
+		}
+		put(out, "lex", m)
+	}
+
 	if o := opt.Match; o != nil {
-		m := map[string]any{}
-		putBool(m, "lex", o.Lex)
+		m := tabnas.NewOrderedMap()
 		if o.Token != nil {
-			tok := map[string]any{}
-			for name, re := range o.Token {
-				tok[name] = regexHolder{
-					re: re, eager: o.TokenEager != nil && o.TokenEager[name]}
+			// In TokenOrder, the order the emitter allocated them in, which
+			// is their precedence: written in it, the order needs no list of
+			// its own, and the spec is TypeScript's. (This wrote the tokens
+			// in name order and the order as `tokenOrder`, which no other
+			// runtime writes and the notations' renders refuse.)
+			tok := tabnas.NewOrderedMap()
+			for _, name := range inOrder(mapKeys(o.Token), o.TokenOrder) {
+				tok.Set(name, regexHolder{
+					re: o.Token[name], eager: o.TokenEager != nil && o.TokenEager[name]})
 			}
-			m["token"] = tok
+			m.Set("token", tok)
 		}
-		if len(o.TokenOrder) > 0 {
-			m["tokenOrder"] = strsToAny(o.TokenOrder)
-		}
+		putBool(m, "lex", o.Lex)
 		funcs = appendIfFunc(funcs, "match.check", o.Check)
 		if len(o.TokenFn) > 0 {
 			funcs = append(funcs, "match.tokenFn")
@@ -137,20 +150,16 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 		put(out, "match", m)
 	}
 
-	if o := opt.Rule; o != nil {
-		m := map[string]any{}
-		putStr(m, "start", o.Start)
-		putBool(m, "finish", o.Finish)
-		putStr(m, "include", o.Include)
-		putStr(m, "exclude", o.Exclude)
-		if o.MaxMul != nil {
-			m["maxmul"] = *o.MaxMul
+	if opt.TokenSet != nil {
+		ts := tabnas.NewOrderedMap()
+		for _, name := range inOrder(mapKeys(opt.TokenSet), setOrder) {
+			ts.Set(name, strsToAny(opt.TokenSet[name]))
 		}
-		put(out, "rule", m)
+		out.Set("tokenSet", ts)
 	}
 
 	if o := opt.Space; o != nil {
-		m := map[string]any{}
+		m := tabnas.NewOrderedMap()
 		putBool(m, "lex", o.Lex)
 		putStr(m, "chars", o.Chars)
 		funcs = appendIfFunc(funcs, "space.check", o.Check)
@@ -158,7 +167,7 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 	}
 
 	if o := opt.Line; o != nil {
-		m := map[string]any{}
+		m := tabnas.NewOrderedMap()
 		putBool(m, "lex", o.Lex)
 		putStr(m, "chars", o.Chars)
 		putStr(m, "rowChars", o.RowChars)
@@ -167,39 +176,18 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 		put(out, "line", m)
 	}
 
-	if o := opt.Text; o != nil {
-		m := map[string]any{}
-		putBool(m, "lex", o.Lex)
-		funcs = appendIfFunc(funcs, "text.check", o.Check)
-		if len(o.Modify) > 0 {
-			funcs = append(funcs, "text.modify")
-		}
-		put(out, "text", m)
-	}
-
-	if o := opt.Number; o != nil {
-		m := map[string]any{}
-		putBool(m, "lex", o.Lex)
-		putBool(m, "hex", o.Hex)
-		putBool(m, "oct", o.Oct)
-		putBool(m, "bin", o.Bin)
-		putStr(m, "sep", o.Sep)
-		funcs = appendIfFunc(funcs, "number.check", o.Check)
-		funcs = appendIfFunc(funcs, "number.exclude", o.Exclude)
-		put(out, "number", m)
-	}
-
 	if o := opt.Comment; o != nil {
-		m := map[string]any{}
+		m := tabnas.NewOrderedMap()
 		putBool(m, "lex", o.Lex)
 		if o.Def != nil {
-			def := map[string]any{}
-			for name, d := range o.Def {
+			def := tabnas.NewOrderedMap()
+			for _, name := range inOrder(mapKeys(o.Def), nil) {
+				d := o.Def[name]
 				if d == nil {
-					def[name] = nil
+					def.Set(name, nil)
 					continue
 				}
-				dm := map[string]any{}
+				dm := tabnas.NewOrderedMap()
 				putStr(dm, "start", d.Start)
 				putStr(dm, "end", d.End)
 				// Line is a *bool since parser 0.12.0 (tabnas/parser#210),
@@ -212,16 +200,16 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 				// redefined as a block comment (tabnas/parser#208) stays
 				// one after serialisation.
 				putBool(dm, "line", d.Line)
-				def[name] = dm
+				def.Set(name, dm)
 			}
-			m["def"] = def
+			m.Set("def", def)
 		}
 		funcs = appendIfFunc(funcs, "comment.check", o.Check)
 		put(out, "comment", m)
 	}
 
 	if o := opt.String; o != nil {
-		m := map[string]any{}
+		m := tabnas.NewOrderedMap()
 		putBool(m, "lex", o.Lex)
 		putStr(m, "chars", o.Chars)
 		putStr(m, "multiChars", o.MultiChars)
@@ -231,25 +219,47 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 		putBool(m, "allowControl", o.AllowControl)
 		putBool(m, "abandon", o.Abandon)
 		if o.Escape != nil {
-			esc := map[string]any{}
-			for k, v := range o.Escape {
-				esc[k] = v
+			esc := tabnas.NewOrderedMap()
+			for _, k := range inOrder(mapKeys(o.Escape), nil) {
+				esc.Set(k, o.Escape[k])
 			}
-			m["escape"] = esc
+			m.Set("escape", esc)
 		}
 		if len(o.Replace) > 0 {
 			rep := map[string]any{}
 			for r, v := range o.Replace {
 				rep[string(r)] = v
 			}
-			m["replace"] = rep
+			m.Set("replace", rep)
 		}
 		funcs = appendIfFunc(funcs, "string.check", o.Check)
 		put(out, "string", m)
 	}
 
+	if o := opt.Number; o != nil {
+		m := tabnas.NewOrderedMap()
+		putBool(m, "lex", o.Lex)
+		putBool(m, "hex", o.Hex)
+		putBool(m, "oct", o.Oct)
+		putBool(m, "bin", o.Bin)
+		putStr(m, "sep", o.Sep)
+		funcs = appendIfFunc(funcs, "number.check", o.Check)
+		funcs = appendIfFunc(funcs, "number.exclude", o.Exclude)
+		put(out, "number", m)
+	}
+
+	if o := opt.Text; o != nil {
+		m := tabnas.NewOrderedMap()
+		putBool(m, "lex", o.Lex)
+		funcs = appendIfFunc(funcs, "text.check", o.Check)
+		if len(o.Modify) > 0 {
+			funcs = append(funcs, "text.modify")
+		}
+		put(out, "text", m)
+	}
+
 	if o := opt.Value; o != nil {
-		m := map[string]any{}
+		m := tabnas.NewOrderedMap()
 		putBool(m, "lex", o.Lex)
 		if len(o.Def) > 0 {
 			// A ValueDef carries the native value a keyword becomes,
@@ -261,17 +271,22 @@ func optionsToData(opt *tabnas.Options) (map[string]any, error) {
 		put(out, "value", m)
 	}
 
-	if o := opt.Lex; o != nil {
-		m := map[string]any{}
-		putBool(m, "empty", o.Empty)
-		putBool(m, "relex", o.Relex)
-		if o.EmptyResult != nil {
-			m["emptyResult"] = o.EmptyResult
-		}
-		if len(o.Match) > 0 {
-			funcs = append(funcs, "lex.match")
-		}
-		put(out, "lex", m)
+	if opt.Tag != "" {
+		out.Set("tag", opt.Tag)
+	}
+	if len(opt.Ender) > 0 {
+		out.Set("ender", strsToAny(opt.Ender))
+	}
+	if len(opt.Error) > 0 {
+		out.Set("error", strMapToOrdered(opt.Error))
+	}
+	if len(opt.Hint) > 0 {
+		out.Set("hint", strMapToOrdered(opt.Hint))
+	}
+	if o := opt.Safe; o != nil {
+		m := tabnas.NewOrderedMap()
+		putBool(m, "key", o.Key)
+		put(out, "safe", m)
 	}
 
 	if len(funcs) > 0 {
@@ -313,28 +328,37 @@ func refuseUnhandled(opt *tabnas.Options) error {
 	}
 }
 
-func put(out map[string]any, key string, m map[string]any) {
-	if len(m) > 0 {
-		out[key] = m
+func put(out *tabnas.OrderedMap, key string, m *tabnas.OrderedMap) {
+	if m.Len() > 0 {
+		out.Set(key, m)
 	}
 }
 
-func putBool(m map[string]any, key string, v *bool) {
+func putBool(m *tabnas.OrderedMap, key string, v *bool) {
 	if v != nil {
-		m[key] = *v
+		m.Set(key, *v)
 	}
 }
 
-func putStr(m map[string]any, key, v string) {
+func putStr(m *tabnas.OrderedMap, key, v string) {
 	if v != "" {
-		m[key] = v
+		m.Set(key, v)
 	}
 }
 
-func strMapToAny(m map[string]string) map[string]any {
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = v
+func strMapToOrdered(m map[string]string) *tabnas.OrderedMap {
+	out := tabnas.NewOrderedMap()
+	for _, k := range inOrder(mapKeys(m), nil) {
+		out.Set(k, m[k])
+	}
+	return out
+}
+
+// mapKeys is a map's keys, in no order.
+func mapKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
 	return out
 }

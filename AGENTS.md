@@ -298,7 +298,9 @@ order of authority:
 2. **All of this repo's runtimes pass their own suites.** TypeScript is
    canonical; when TS and Go or Rust disagree, TS wins. The Rust suite
    additionally replays `rs/tests/oracle/*.json`, fixtures generated from
-   the TypeScript compiler, and fails on any byte of emitted difference.
+   the TypeScript compiler, and fails on any byte of emitted difference;
+   the Go suite holds its own text to the same fixtures
+   (`go/oracle_text_test.go`), with its registered exceptions.
 3. **The version constants agree** — `VERSION` in `ts/src/bnf.ts`,
    `go/bnf.go` and `rs/src/lib.rs`, and `version` in `rs/Cargo.toml`,
    MUST equal `ts/package.json` `"version"`. `ts/test/bnf.test.js`,
@@ -504,7 +506,8 @@ message-pinning or bare — exist here. The cross-runtime parity contract
 is carried instead by `rs/tests/oracle/*.json`, which hold the
 TypeScript compiler's own emitted text, and its refusals, whose messages
 the Rust oracle test, `go/oracle_refusal_test.go` and
-`ts/test/oracle-refusal.test.js` each hold to byte for byte. Compiler diagnostics are thrown errors with prose
+`ts/test/oracle-refusal.test.js` each hold to byte for byte. The Go port's
+emitted text is held to them as well, by `go/oracle_text_test.go`. Compiler diagnostics are thrown errors with prose
 messages, not coded parse errors; the front-ends own the wording their own
 tests pin.
 

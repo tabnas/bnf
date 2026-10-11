@@ -9,8 +9,10 @@ Rust emitter to TypeScript's serialised output byte for byte and
 registers the ENGINE-level entries below. `rs/tests/divergence_test.rs`
 is the register for the Rust port's own entries, one test per entry, so
 repairing an entry means deleting its section here and its test there.
-`go/bnf_test.go` carries the Go entries the same way. A row with no test
-is a defect, not a record.
+`go/bnf_test.go` carries the Go entries the same way, and
+`go/oracle_text_test.go` holds the Go port's text to the same fixtures
+the Rust oracle replays, with its exceptions registered. A row with no
+test is a defect, not a record.
 
 ## Rust
 
@@ -146,9 +148,35 @@ cannot pass or regress silently.
 
 ## Go
 
-The Go port registers its entries in `go/bnf_test.go`. It also reads an
+The Go port registers its entries in `go/bnf_test.go` and
+`go/oracle_text_test.go`. It also reads an
 escape in its own engine's dialect, RE2, as the Rust entry above records
 for all three ports; `TestEscapeIsReadInTheRE2Dialect` pins its side.
+
+### A FIRST or FOLLOW set's alternates are listed in token-name order
+
+Where the emitter fans an alternate out over a set of tokens (one
+alternate per token a reference can begin with, per token that can
+follow a repetition, per pair of its FOLLOW₂ set, per second token of a
+keyword guard), TypeScript lists the alternates in the order its analysis
+met the tokens, which is the order a JavaScript `Set` keeps, and the Go
+port in token-name order, because its sets are maps. The alternates of
+one fan-out come from one template and differ only in the token they
+peek, so two of them that match the same input do the same thing, and
+the order changes no parse; `go/doc/differences.md` has the argument and
+the measurement over `c.gbnf`. It changes the text. Over 1,169 IRs
+captured from the front-ends' suites, 808 of which compile, 78 grammars
+list such a fan-out in another order, each group holding the same
+alternates as TypeScript's, and so do the shared fixtures
+`ir-loop-array-terminal-guarded` and `ir-loop-array-terminal-guarded-lead`;
+every other byte of their text is TypeScript's.
+
+The repair is the Go port's: keep each set in the order it is filled,
+where the analysis now keeps a map, in FIRST, FOLLOW, FOLLOW₂ and the
+sets read from them. Every pass that reads one moves with it.
+
+Registered by `textDivergent` in `go/oracle_text_test.go`, which fails
+once either fixture's text is TypeScript's.
 
 ### Closure-mode action refs are named `@abnf_a<n>`
 

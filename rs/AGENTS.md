@@ -114,6 +114,13 @@ that refusal message is graded byte for byte like the emitted text. The
 refusals are shared by all three runtimes: `ts/test/oracle-refusal.test.js`
 holds the canonical compiler to each refusal it recorded, and
 `go/oracle_refusal_test.go` grades the Go port against them the same way.
+`ir-order-keywords-classes` pins the order the canonical compiler writes
+a spec in: keywords and character classes, so fixed and match tokens
+allocated out of name order, in rules committed out of name order (a
+dispatch's chains before the rule). `go/oracle_text_test.go` holds the
+Go port's text to it, and to every other fixture whose IR spells no code
+point in JavaScript's escape, byte for byte, as the oracle test holds
+this port's.
 `ir-leftrec-limit` is the cycle of twenty rules that the left-recursion
 expansion limit refuses, and the six `ir-leftrec-elements-*` fixtures are
 the shapes the element limit refuses: the chain of 514 rules (`-chain`), a

@@ -557,8 +557,8 @@ func pairExitGuards(prod *Production, baseO map[string]any,
 			}
 			seen[s] = true
 			g := copyMap(baseO)
-			g["s"] = s
-			g["b"] = 2
+			setKey(g, "s", s)
+			setKey(g, "b", 2)
 			out = append(out, made(g))
 		}
 	}
@@ -614,8 +614,8 @@ func synthKeywordGuards(prod *Production, o map[string]any, alt Sequence, f stri
 	out := []map[string]any{}
 	for _, u := range sortedKeys(seconds) {
 		g := copyMap(o)
-		g["s"] = f + " " + u
-		g["b"] = 2 - consumed
+		setKey(g, "s", f+" "+u)
+		setKey(g, "b", 2-consumed)
 		out = append(out, made(g))
 	}
 	return out

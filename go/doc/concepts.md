@@ -174,8 +174,10 @@ differs because Go does.
   TypeScript emits `(?![A-Za-z0-9_])`. The two are equivalent for the
   literals this applies to.
 - **Two serialisation surfaces.** TypeScript returns its `GrammarSpec`
-  object; Go returns the generic pure-data tree (`map[string]any`,
-  `[]any`, scalars) from `ToRecognitionSpec` and `ToPureSpec`.
+  object; Go returns the generic pure-data tree from
+  `ToRecognitionSpec` and `ToPureSpec`: a `map[string]any` whose objects
+  are `*tabnas.OrderedMap`, holding their keys in the order TypeScript
+  writes them, with `[]any` and scalars below.
 - **`SpecToData` and `SpecToJSON` swallow failures**, returning an empty
   result, because their signatures predate the error return and callers
   depend on them. `SpecToDataErr` and `SpecToJSONErr` are the same

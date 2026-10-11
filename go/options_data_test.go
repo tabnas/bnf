@@ -40,7 +40,7 @@ func exactLexing() *tabnas.Options {
 }
 
 func TestExactLexingSurvivesSerialisation(t *testing.T) {
-	data, err := optionsToData(exactLexing())
+	data, err := optionsToData(exactLexing(), nil)
 	if err != nil {
 		t.Fatalf("optionsToData: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestFunctionValuedOptionsAreRefused(t *testing.T) {
 	opt := exactLexing()
 	opt.Number.Exclude = func(string) bool { return false }
 
-	if _, err := optionsToData(opt); err == nil {
+	if _, err := optionsToData(opt, nil); err == nil {
 		t.Fatal("a func-valued option was accepted; it must be refused")
 	} else if !strings.Contains(err.Error(), "number.exclude") {
 		t.Errorf("error should name the offending field, got: %v", err)
@@ -101,7 +101,7 @@ func TestUnhandledOptionFieldIsRefused(t *testing.T) {
 		},
 	}
 
-	_, err := optionsToData(opt)
+	_, err := optionsToData(opt, nil)
 	if err == nil {
 		t.Fatal("an unhandled option field was accepted silently")
 	}
@@ -118,7 +118,7 @@ func TestDiagnosticOptionsAreCarriedNotRefused(t *testing.T) {
 	opt.Error = map[string]string{"unexpected": "custom message"}
 	opt.Hint = map[string]string{"unexpected": "try a comma"}
 
-	data, err := optionsToData(opt)
+	data, err := optionsToData(opt, nil)
 	if err != nil {
 		t.Fatalf("plain-data diagnostics were refused: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestControlCharactersSurviveSerialisation(t *testing.T) {
 	for _, ch := range []string{"\t", "\r", "\n", "\x01", "\x1f"} {
 		opt := exactLexing()
 		opt.Space.Chars = ch
-		data, err := optionsToData(opt)
+		data, err := optionsToData(opt, nil)
 		if err != nil {
 			t.Fatalf("chars=%q: %v", ch, err)
 		}
@@ -199,12 +199,14 @@ func TestCommentDefLineSurvivesSerialisation(t *testing.T) {
 			"novel": {Start: "%%", End: "%%"},
 		},
 	}}
-	data, err := optionsToData(opt)
+	data, err := optionsToData(opt, nil)
 	if err != nil {
 		t.Fatalf("optionsToData: %v", err)
 	}
-	def := data["comment"].(map[string]any)["def"].(map[string]any)
-	if line, ok := def["novel"].(map[string]any)["line"]; ok {
+	comment, _ := data.Get("comment")
+	def, _ := comment.(*tabnas.OrderedMap).Get("def")
+	novel, _ := def.(*tabnas.OrderedMap).Get("novel")
+	if line, ok := novel.(*tabnas.OrderedMap).Get("line"); ok {
 		t.Errorf("a nil Line was emitted as %v; it must be absent", line)
 	}
 
@@ -247,8 +249,8 @@ func TestCommentDefLineSurvivesSerialisation(t *testing.T) {
 }
 
 func TestNilOptionsIsEmptyNotAnError(t *testing.T) {
-	data, err := optionsToData(nil)
-	if err != nil || len(data) != 0 {
+	data, err := optionsToData(nil, nil)
+	if err != nil || data.Len() != 0 {
 		t.Errorf("nil Options should be an empty block: %v %v", data, err)
 	}
 }
