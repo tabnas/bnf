@@ -82,12 +82,15 @@ func mapsToAlts(ms []map[string]any) []*tabnas.GrammarAltSpec {
 // the token set it compiles to (ConvertOptions.TokenClasses): FIRST of
 // such a production is its set, one name, wherever it is referenced.
 func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string,
-	classSets map[string]string) (map[string]map[string]bool, map[string]bool) {
+	classSets map[string]string, budget *emitBudget) (map[string]map[string]bool, map[string]bool) {
+	// Each entry is charged as it is added (MaxEmitUnits).
 	firstSets := map[string]map[string]bool{}
 	nullable := map[string]bool{}
 	for _, p := range grammar.Productions {
 		firstSets[p.Name] = map[string]bool{}
 		if set, ok := classSets[p.Name]; ok {
+			budget.begin(ruleSubject(originOf(p)), originOf(p), p.Sp, emitStepFirst)
+			budget.charge(1)
 			firstSets[p.Name][set] = true
 		}
 	}
@@ -100,12 +103,14 @@ func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string,
 				continue
 			}
 			first := firstSets[prod.Name]
+			budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.Sp, emitStepFirst)
 			for _, alt := range prod.Alts {
 				altNullable := true
 				for _, el := range alt {
 					if el.Kind == KindTerm || el.Kind == KindRegex || el.Kind == KindToken {
 						tok := tokenForTerminal(el, literals, regexTokens)
 						if !first[tok] {
+							budget.charge(1)
 							first[tok] = true
 							changed = true
 						}
@@ -116,6 +121,7 @@ func computeFirstSets(grammar *Grammar, literals, regexTokens map[string]string,
 						refFirst := firstSets[el.Name]
 						for tok := range refFirst {
 							if !first[tok] {
+								budget.charge(1)
 								first[tok] = true
 								changed = true
 							}
@@ -514,18 +520,43 @@ func tokenClassNames(grammar *Grammar) map[string]bool {
 // than one path per member. Mirrors the TS altPrefixesRaw.
 func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[string]string,
 	maxK int, visited map[string]bool, headFilter func(string) bool,
-	classSets map[string]string) []prefixPath {
+	classSets map[string]string, budget *emitBudget) []prefixPath {
+	// Each path is held as it is made, 1 and 1 for each token it holds
+	// (MaxEmitUnits), until the decision that asked is made.
+	budget.hold(1)
 	paths := []prefixPath{{tokens: []string{}, done: false}}
-
-	// A path that already carries a token has had its head admitted; only
-	// a path still at length zero can be pruned by what it gains next.
-	admit := func(before prefixPath, tokens []string) bool {
-		return headFilter == nil || 0 < len(before.tokens) || 0 == len(tokens) ||
-			headFilter(tokens[0])
-	}
 
 	for _, el := range alt {
 		next := []prefixPath{}
+		// Whether some path in next can still grow; once none can, the
+		// walk is over.
+		open := false
+		put := func(tokens []string, done bool) {
+			budget.hold(1 + len(tokens))
+			next = append(next, prefixPath{tokens: tokens, done: done})
+			if !done && len(tokens) < maxK {
+				open = true
+			}
+		}
+		// A path that already carries a token has had its head admitted;
+		// only a path still at length zero can be pruned by the token it
+		// gains.
+		extend := func(p prefixPath, tok string) {
+			if headFilter != nil && 0 == len(p.tokens) && !headFilter(tok) {
+				return
+			}
+			put(appendStr(p.tokens, tok), false)
+		}
+		// What a reference contributes depends on how many tokens the path
+		// that reaches it holds, and on nothing else about that path: the
+		// window left, and whether the head filter still applies. So its
+		// alternatives are enumerated once for each such length, rather
+		// than once for every path that reaches it. Mirrors the TS
+		// altPrefixesRaw.
+		var target *Production
+		looked := false
+		var childVisited map[string]bool
+		var byLength map[int][][]prefixPath
 		for _, p := range paths {
 			if p.done || len(p.tokens) >= maxK {
 				next = append(next, p)
@@ -533,66 +564,71 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 			}
 			switch el.Kind {
 			case KindTerm:
-				tokens := appendStr(p.tokens, literals[termKey(el)])
-				if admit(p, tokens) {
-					next = append(next, prefixPath{tokens: tokens, done: false})
-				}
+				extend(p, literals[termKey(el)])
 			case KindRegex:
-				tokens := appendStr(p.tokens, regexTokens[regexKey(el)])
-				if admit(p, tokens) {
-					next = append(next, prefixPath{tokens: tokens, done: false})
-				}
+				extend(p, regexTokens[regexKey(el)])
 			case KindToken:
-				tokens := appendStr(p.tokens, el.Name)
-				if admit(p, tokens) {
-					next = append(next, prefixPath{tokens: tokens, done: false})
-				}
+				extend(p, el.Name)
 			case KindRef:
 				if set, ok := classSets[el.Name]; ok {
-					tokens := appendStr(p.tokens, set)
-					if admit(p, tokens) {
-						next = append(next, prefixPath{tokens: tokens, done: false})
-					}
+					extend(p, set)
 					continue
 				}
 				if visited[el.Name] {
-					next = append(next, prefixPath{tokens: p.tokens, done: true})
+					put(p.tokens, true)
 					continue
 				}
-				childVisited := copyBoolSet(visited)
-				childVisited[el.Name] = true
-				target := findProd(grammar, el.Name)
+				if !looked {
+					looked = true
+					target = findProd(grammar, el.Name)
+					childVisited = copyBoolSet(visited)
+					childVisited[el.Name] = true
+				}
 				if target == nil || len(target.Alts) == 0 {
-					next = append(next, prefixPath{tokens: p.tokens, done: true})
+					put(p.tokens, true)
 					continue
 				}
-				// The head of the outer path is the head of the sub-path
-				// while nothing has been consumed yet.
-				var subFilter func(string) bool
-				if 0 == len(p.tokens) {
-					subFilter = headFilter
+				held := len(p.tokens)
+				subs, ok := byLength[held]
+				if !ok {
+					// The head of the outer path is the head of the
+					// sub-path while nothing has been consumed yet.
+					var subFilter func(string) bool
+					if 0 == held {
+						subFilter = headFilter
+					}
+					subs = make([][]prefixPath, 0, len(target.Alts))
+					for _, sub := range target.Alts {
+						subs = append(subs, altPrefixesRaw(sub, grammar, literals, regexTokens,
+							maxK-held, childVisited, subFilter, classSets, budget))
+					}
+					if byLength == nil {
+						byLength = map[int][][]prefixPath{}
+					}
+					byLength[held] = subs
 				}
-				for _, sub := range target.Alts {
-					subPaths := altPrefixesRaw(sub, grammar, literals, regexTokens,
-						maxK-len(p.tokens), childVisited, subFilter, classSets)
+				for _, subPaths := range subs {
 					for _, sp := range subPaths {
-						next = append(next, prefixPath{
-							tokens: appendStrs(p.tokens, sp.tokens), done: sp.done})
+						// A path's tokens are never changed once it is
+						// made, so either side's slice serves when the other
+						// is empty. done goes with the sub-path, so the
+						// outer loop never extends a cycle-truncated
+						// sub-prefix.
+						tokens := sp.tokens
+						if 0 == len(sp.tokens) {
+							tokens = p.tokens
+						} else if 0 < len(p.tokens) {
+							tokens = appendStrs(p.tokens, sp.tokens)
+						}
+						put(tokens, sp.done)
 					}
 				}
 			default:
-				next = append(next, prefixPath{tokens: p.tokens, done: true})
+				put(p.tokens, true)
 			}
 		}
 		paths = next
-		allDone := true
-		for _, p := range paths {
-			if !p.done && len(p.tokens) < maxK {
-				allDone = false
-				break
-			}
-		}
-		if allDone {
+		if !open {
 			break
 		}
 	}
@@ -600,8 +636,9 @@ func altPrefixesRaw(alt Sequence, grammar *Grammar, literals, regexTokens map[st
 }
 
 func altPrefixes(alt Sequence, grammar *Grammar, literals, regexTokens map[string]string, maxK int,
-	classSets map[string]string) [][]string {
-	raw := altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{}, nil, classSets)
+	classSets map[string]string, budget *emitBudget) [][]string {
+	raw := altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{}, nil,
+		classSets, budget)
 	seen := map[string]bool{}
 	out := [][]string{}
 	for _, p := range raw {
@@ -611,6 +648,8 @@ func altPrefixes(alt Sequence, grammar *Grammar, literals, regexTokens map[strin
 			out = append(out, p.tokens)
 		}
 	}
+	// What the enumeration held is released once the prefixes are known.
+	budget.release()
 	return out
 }
 
@@ -638,8 +677,17 @@ type dispatchPrefixSet struct {
 
 func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens map[string]string,
 	maxK int, contest func(a, b string) bool, exitPaths [][]string,
-	classSets map[string]string) []dispatchPrefixSet {
+	classSets map[string]string, budget *emitBudget) []dispatchPrefixSet {
 	n := len(alts)
+	// One alternative's paths, of which only those it returns stay held
+	// once it has returned (MaxEmitUnits).
+	enumerate := func(alt Sequence, k int, filter func(string) bool) []prefixPath {
+		base := budget.held
+		paths := altPrefixesRaw(alt, grammar, literals, regexTokens, k, map[string]bool{},
+			filter, classSets, budget)
+		budget.settle(base, paths)
+		return paths
+	}
 	one := make([][]prefixPath, n)
 	nullable := make([]bool, n)
 	heads := make([][]string, n)
@@ -647,7 +695,7 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 		if len(alt) == 0 {
 			continue
 		}
-		one[i] = altPrefixesRaw(alt, grammar, literals, regexTokens, 1, map[string]bool{}, nil, classSets)
+		one[i] = enumerate(alt, 1, nil)
 		seen := map[string]bool{}
 		for _, p := range one[i] {
 			if len(p.tokens) == 0 && !p.done {
@@ -697,8 +745,7 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 			continue
 		}
 		c := contested[i]
-		for _, p := range altPrefixesRaw(alt, grammar, literals, regexTokens, maxK, map[string]bool{},
-			func(t string) bool { return c[t] }, classSets) {
+		for _, p := range enumerate(alt, maxK, func(t string) bool { return c[t] }) {
 			if 0 < len(p.tokens) {
 				deep[i] = append(deep[i], p)
 			}
@@ -828,6 +875,8 @@ func dispatchPrefixes(alts []Sequence, grammar *Grammar, literals, regexTokens m
 		}
 		out[i] = dispatchPrefixSet{prefixes: prefixes, nullable: nullable[i]}
 	}
+	// What the enumeration held is released once the prefixes are known.
+	budget.release()
 	return out
 }
 
@@ -843,7 +892,7 @@ func findProd(grammar *Grammar, name string) *Production {
 // ---- probe-dispatch emitters ---------------------------------------
 
 func emitProbeHelper(prod *Production, tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec,
-	literals, regexTokens map[string]string) {
+	literals, regexTokens map[string]string, budget *emitBudget) {
 	elems := prod.ProbeHelper.VocabElements
 	opens := []map[string]any{}
 	for _, el := range elems {
@@ -861,11 +910,14 @@ func emitProbeHelper(prod *Production, tag string, ruleSpec map[string]*tabnas.G
 	}
 	// Empty fallback — pops without consuming anything. Must be last.
 	opens = append(opens, map[string]any{"g": tag})
-	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)}
+	// Charged with the list it is made from (rewriteProbeDispatches).
+	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)},
+		budget, probeRuleUnits(len(elems)))
 }
 
 func emitProbeDispatch(prod *Production, tag string, ruleSpec map[string]*tabnas.GrammarRuleSpec,
-	refs *refRegistry, literals, regexTokens map[string]string, useBuiltins bool) {
+	refs *refRegistry, literals, regexTokens map[string]string, useBuiltins bool,
+	budget *emitBudget) {
 	pd := prod.ProbeDisp
 	var disambiguatorToken string
 	if pd.Disambiguator.Kind == KindTerm {
@@ -891,10 +943,10 @@ func emitProbeDispatch(prod *Production, tag string, ruleSpec map[string]*tabnas
 		close0 := map[string]any{"c": "@probePhase0$", "a": "@probeDecide$", "r": prod.Name, "g": tag}
 		close1 := copyMap(bubbleFields)
 		close1["g"] = tag
-		ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
+		commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 			Open:  mapsToAlts(open),
 			Close: mapsToAlts([]map[string]any{close0, close1}),
-		}
+		}, budget, 0)
 		return
 	}
 
@@ -937,10 +989,10 @@ func emitProbeDispatch(prod *Production, tag string, ruleSpec map[string]*tabnas
 	close0 := map[string]any{"c": string(phase0), "a": string(decide), "r": prod.Name, "g": tag}
 	close1 := copyMap(bubbleFields)
 	close1["g"] = tag
-	ruleSpec[prod.Name] = &tabnas.GrammarRuleSpec{
+	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 		Open:  mapsToAlts(open),
 		Close: mapsToAlts([]map[string]any{close0, close1}),
-	}
+	}, budget, 0)
 }
 
 func (rr *refRegistry) registerCond(fn tabnas.AltCond) tabnas.FuncRef {

@@ -19,6 +19,7 @@
 //
 //   node rs/tests/oracle/generate.cjs corpus rs/tests/oracle
 //   node rs/tests/oracle/generate.cjs file <grammar.abnf> <out.json>
+//   node rs/tests/oracle/generate.cjs limits rs/tests/oracle
 
 const Fs = require('node:fs')
 const Path = require('node:path')
@@ -191,20 +192,74 @@ function file(grammarFile, out) {
 // and the sources of its `cases` are replayed through TypeScript again.
 // Needs no front-end, only this repository's ts/ and the engine.
 function regen(fixtureFile) {
-  const fx = JSON.parse(Fs.readFileSync(fixtureFile, 'utf8'))
+  const text = Fs.readFileSync(fixtureFile, 'utf8')
+  const fx = JSON.parse(text)
   const sources = (fx.cases || []).map((c) => c.source)
   const out = fixtureFor(fx.name, fx.ir, fx.opts || {}, sources)
   if (null != fx.grammar) out.grammar = fx.grammar
-  Fs.writeFileSync(fixtureFile, JSON.stringify(out, null, 1))
+  // A fixture written on one line (see `limits`) stays on one line.
+  const compact = !text.trimEnd().includes('\n')
+  Fs.writeFileSync(fixtureFile,
+    compact ? JSON.stringify(out) : JSON.stringify(out, null, 1))
   console.log(`regenerated ${fixtureFile}`)
+}
+
+// The emit limit's refusal fixtures (MAX_EMIT_UNITS in ts/src/compiler.ts),
+// built here rather than captured from a front-end, with their strings
+// case-insensitive as abnf hands them over (no `caseSensitive` field). Their
+// IRs are large, so they are written on one line.
+//
+//   ir-emit-units-probes   one rule of 500 alternatives, each an optional
+//                          prefix ["a" "d"] before "a" v, over the 1,750
+//                          tokens of v: 500 probes, the last refused
+//   ir-emit-units-options  A = [x0] … [x39] "y" / [x1] … [x39] "y" / … /
+//                          "z", refused while its lookahead is enumerated
+function limits(outdir) {
+  const lit = (literal) => ({ kind: 'term', literal })
+  const ref = (name) => ({ kind: 'ref', name })
+  const opt = (inner) => ({ kind: 'opt', inner })
+  const probes = (p, v) => ({
+    productions: [
+      {
+        name: 't',
+        alts: Array.from({ length: p }, () => [
+          opt({ kind: 'group', alts: [[lit('a'), lit('d')]] }), lit('a'), ref('v'),
+        ]),
+      },
+      { name: 'v', alts: Array.from({ length: v }, (_, i) => [lit('w' + i)]) },
+    ],
+  })
+  const options = (k) => ({
+    productions: [{
+      name: 'A',
+      alts: [
+        ...Array.from({ length: k }, (_, j) => [
+          ...Array.from({ length: k - j }, (_, i) => opt(lit('x' + (i + j)))),
+          lit('y'),
+        ]),
+        [lit('z')],
+      ],
+    }],
+  })
+  Fs.mkdirSync(outdir, { recursive: true })
+  for (const [name, ir] of [
+    ['ir-emit-units-probes', probes(500, 1750)],
+    ['ir-emit-units-options', options(40)],
+  ]) {
+    const fx = fixtureFor(name, ir, { tag: 'demo' }, [])
+    if (null == fx.pureError) throw new Error(`${name} compiled`)
+    Fs.writeFileSync(Path.join(outdir, name + '.json'), JSON.stringify(fx))
+    console.log(`wrote ${name}: ${fx.pureError}`)
+  }
 }
 
 const [mode, arg, arg2] = process.argv.slice(2)
 if (mode === 'corpus') corpus(arg)
 else if (mode === 'file') file(arg, arg2)
 else if (mode === 'regen') regen(arg)
+else if (mode === 'limits') limits(arg)
 else {
   console.error('usage: generate.cjs corpus <outdir> | file <grammar.abnf> <out.json>' +
-    ' | regen <fixture.json>')
+    ' | regen <fixture.json> | limits <outdir>')
   process.exit(2)
 }

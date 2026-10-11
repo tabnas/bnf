@@ -104,7 +104,7 @@ func mapsOverlap(a, b map[string]*Element) bool {
 
 // rewriteProbeDispatches rewrites every ambiguous `[X D] Y` subsequence
 // into a probe-dispatch pattern. Runs before token allocation.
-func rewriteProbeDispatches(grammar *Grammar) *Grammar {
+func rewriteProbeDispatches(grammar *Grammar, budget *emitBudget) *Grammar {
 	reports := grammar.Ambiguities
 	if reports == nil {
 		reports = []AmbiguityReport{}
@@ -152,6 +152,34 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 				}
 
 				// Joint vocab minus the disambiguator.
+				var dKey string
+				if disamb.Kind == KindTerm {
+					dKey = termKey(disamb)
+				} else if disamb.Kind == KindRegex {
+					dKey = regexKey(disamb)
+				} else if disamb.Kind == KindToken {
+					dKey = disamb.Name
+				}
+				// The list is charged before it is made (MaxEmitUnits), with
+				// the rule it becomes: an entry for each token either side
+				// reaches, less the disambiguator, and that rule's
+				// alternates, three units for each token (probeRuleUnits).
+				listed := len(xVocab)
+				for k := range yVocab {
+					if _, ok := xVocab[k]; !ok {
+						listed++
+					}
+				}
+				if dKey != "" {
+					_, inX := xVocab[dKey]
+					_, inY := yVocab[dKey]
+					if inX || inY {
+						listed--
+					}
+				}
+				budget.begin(ruleSubject(originOf(prod)), originOf(prod), prod.Sp,
+					emitStepProbe)
+				budget.charge(listed + probeRuleUnits(listed))
 				vocab := map[string]*Element{}
 				vocabOrder := []string{}
 				addVocab := func(m map[string]*Element, order *[]string) {
@@ -164,14 +192,6 @@ func rewriteProbeDispatches(grammar *Grammar) *Grammar {
 				}
 				addVocab(xVocab, &vocabOrder)
 				addVocab(yVocab, &vocabOrder)
-				var dKey string
-				if disamb.Kind == KindTerm {
-					dKey = termKey(disamb)
-				} else if disamb.Kind == KindRegex {
-					dKey = regexKey(disamb)
-				} else if disamb.Kind == KindToken {
-					dKey = disamb.Name
-				}
 				if dKey != "" {
 					delete(vocab, dKey)
 				}

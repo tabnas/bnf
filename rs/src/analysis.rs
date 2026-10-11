@@ -12,8 +12,9 @@ use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ir::{diag_name, regex_key, term_key_of, Element, Kind};
-use crate::shared::{refs_in, tokens_in, Grammar, Sequence};
+use crate::budget::{EmitBudget, STEP_FIRST, STEP_FOLLOW, STEP_PAIRS};
+use crate::ir::{diag_name, regex_key, term_key_of, Element, EmitError, Kind};
+use crate::shared::{origin_of, refs_in, tokens_in, Grammar, Production, Sequence};
 
 /// The allocated token tables: literal key -> token name and regex key
 /// -> token name.
@@ -55,22 +56,23 @@ pub(crate) type FollowPairs = IndexMap<String, IndexMap<String, IndexSet<String>
 /// `class_sets` maps a token-class production to the token set it
 /// compiles to (`ConvertOptions::token_classes`): FIRST of such a
 /// production is its set, one name, wherever it is referenced.
+/// Each entry is charged as it is added ([`crate::MAX_EMIT_UNITS`]).
 pub(crate) fn compute_first_sets(
     grammar: &Grammar,
     tokens: &Tokens,
     class_sets: &IndexMap<String, String>,
-) -> (FirstSets, Nullable) {
-    let mut first_sets: FirstSets = grammar
-        .productions
-        .iter()
-        .map(|p| {
-            let mut first = IndexSet::new();
-            if let Some(set) = class_sets.get(&p.name) {
-                first.insert(set.clone());
-            }
-            (p.name.clone(), first)
-        })
-        .collect();
+    budget: &EmitBudget,
+) -> Result<(FirstSets, Nullable), EmitError> {
+    let mut first_sets: FirstSets = IndexMap::new();
+    for p in &grammar.productions {
+        let mut first = IndexSet::new();
+        if let Some(set) = class_sets.get(&p.name) {
+            budget.begin_rule(origin_of(p), p.sp, &STEP_FIRST);
+            budget.charge(1)?;
+            first.insert(set.clone());
+        }
+        first_sets.insert(p.name.clone(), first);
+    }
     let mut nullable: Nullable = IndexSet::new();
 
     let mut changed = true;
@@ -80,13 +82,16 @@ pub(crate) fn compute_first_sets(
             if class_sets.contains_key(&prod.name) {
                 continue;
             }
+            budget.begin_rule(origin_of(prod), prod.sp, &STEP_FIRST);
             for alt in &prod.alts {
                 let mut alt_nullable = true;
                 for el in alt {
                     match &el.kind {
                         Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
                             let tok = tokens.name(el);
-                            if first_sets[&prod.name].insert(tok) {
+                            if !first_sets[&prod.name].contains(&tok) {
+                                budget.charge(1)?;
+                                first_sets[&prod.name].insert(tok);
                                 changed = true;
                             }
                             alt_nullable = false;
@@ -98,7 +103,9 @@ pub(crate) fn compute_first_sets(
                                 .map(|s| s.iter().cloned().collect())
                                 .unwrap_or_default();
                             for tok in ref_first {
-                                if first_sets[&prod.name].insert(tok) {
+                                if !first_sets[&prod.name].contains(&tok) {
+                                    budget.charge(1)?;
+                                    first_sets[&prod.name].insert(tok);
                                     changed = true;
                                 }
                             }
@@ -120,7 +127,7 @@ pub(crate) fn compute_first_sets(
             }
         }
     }
-    (first_sets, nullable)
+    Ok((first_sets, nullable))
 }
 
 pub(crate) fn kind_name(el: &Element) -> &'static str {
@@ -192,20 +199,34 @@ pub(crate) fn first_of_seq(
 /// active rule, so a repetition helper's empty terminating alternative
 /// has to NAME the tokens that may follow it, or the lexer never offers
 /// them there.
+/// Each entry is charged as it is added ([`crate::MAX_EMIT_UNITS`]).
 pub(crate) fn compute_follow_sets(
     grammar: &Grammar,
     tokens: &Tokens,
     first_sets: &FirstSets,
     nullable: &Nullable,
     start: &str,
-) -> FollowSets {
+    budget: &EmitBudget,
+) -> Result<FollowSets, EmitError> {
     let mut follow: FollowSets = grammar
         .productions
         .iter()
         .map(|p| (p.name.clone(), IndexSet::new()))
         .collect();
+    let prods: IndexMap<&str, &Production> = grammar
+        .productions
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+    // A refusal names the rule whose set was growing.
+    let begin = |name: &str| {
+        let p = prods[name];
+        budget.begin_rule(origin_of(p), p.sp, &STEP_FOLLOW);
+    };
     // End-of-source can follow the start rule.
     if let Some(f) = follow.get_mut(start) {
+        begin(start);
+        budget.charge(1)?;
         f.insert("#ZZ".to_string());
     }
 
@@ -221,6 +242,7 @@ pub(crate) fn compute_follow_sets(
                     if !follow.contains_key(name) {
                         continue;
                     }
+                    begin(name);
                     let (rest, rest_nullable) =
                         first_of_seq(&alt[i + 1..], tokens, first_sets, nullable);
                     let mut add: Vec<String> = rest.into_iter().collect();
@@ -232,7 +254,9 @@ pub(crate) fn compute_follow_sets(
                     }
                     let target = follow.get_mut(name).expect("checked above");
                     for tok in add {
-                        if target.insert(tok) {
+                        if !target.contains(&tok) {
+                            budget.charge(1)?;
+                            target.insert(tok);
                             changed = true;
                         }
                     }
@@ -240,31 +264,50 @@ pub(crate) fn compute_follow_sets(
             }
         }
     }
-    follow
+    Ok(follow)
 }
 
 /// FOLLOW₂ pairs: for each production R, the pairs (t, u) such that R
 /// may be followed by token t and then token u. Deliberately
 /// approximate in one direction: pairs whose t would come from inside a
 /// following REFERENCE are not collected.
+/// Each pair is charged as it is added ([`crate::MAX_EMIT_UNITS`]).
 pub(crate) fn compute_follow_pairs(
     grammar: &Grammar,
     tokens: &Tokens,
     first_sets: &FirstSets,
     nullable: &Nullable,
     follow: &FollowSets,
-) -> FollowPairs {
+    budget: &EmitBudget,
+) -> Result<FollowPairs, EmitError> {
     let mut pairs: FollowPairs = grammar
         .productions
         .iter()
         .map(|p| (p.name.clone(), IndexMap::new()))
         .collect();
+    let prods: IndexMap<&str, &Production> = grammar
+        .productions
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
 
-    fn add_pair(pairs: &mut FollowPairs, r: &str, t: &str, u: &str) -> bool {
+    fn add_pair(
+        pairs: &mut FollowPairs,
+        r: &str,
+        t: &str,
+        u: &str,
+        budget: &EmitBudget,
+    ) -> Result<bool, EmitError> {
         let Some(m) = pairs.get_mut(r) else {
-            return false;
+            return Ok(false);
         };
-        m.entry(t.to_string()).or_default().insert(u.to_string())
+        let us = m.entry(t.to_string()).or_default();
+        if us.contains(u) {
+            return Ok(false);
+        }
+        budget.charge(1)?;
+        us.insert(u.to_string());
+        Ok(true)
     }
 
     let mut changed = true;
@@ -283,6 +326,9 @@ pub(crate) fn compute_follow_pairs(
                     if !pairs.contains_key(name) {
                         continue;
                     }
+                    // A refusal names the rule whose set was growing.
+                    let target = prods[name.as_str()];
+                    budget.begin_rule(origin_of(target), target.sp, &STEP_PAIRS);
 
                     let mut j = i + 1;
                     let mut blocked = false;
@@ -305,13 +351,13 @@ pub(crate) fn compute_follow_pairs(
                         let (rest, rest_nullable) =
                             first_of_seq(&alt[j + 1..], tokens, first_sets, nullable);
                         for u in &rest {
-                            if add_pair(&mut pairs, name, &t, u) {
+                            if add_pair(&mut pairs, name, &t, u, budget)? {
                                 changed = true;
                             }
                         }
                         if rest_nullable {
                             for u in &prod_follow {
-                                if add_pair(&mut pairs, name, &t, u) {
+                                if add_pair(&mut pairs, name, &t, u, budget)? {
                                     changed = true;
                                 }
                             }
@@ -328,7 +374,7 @@ pub(crate) fn compute_follow_pairs(
                             .collect();
                         for (t, us) in prod_pairs {
                             for u in us {
-                                if add_pair(&mut pairs, name, &t, &u) {
+                                if add_pair(&mut pairs, name, &t, &u, budget)? {
                                     changed = true;
                                 }
                             }
@@ -338,7 +384,7 @@ pub(crate) fn compute_follow_pairs(
             }
         }
     }
-    pairs
+    Ok(pairs)
 }
 
 /// Settle the contested left-recursion tail loops flagged during
@@ -497,9 +543,11 @@ fn ref_callers_of(grammar: &Grammar, target: &str) -> IndexSet<String> {
     seen
 }
 
+/// A token path of the enumeration. Its tokens are shared, so a path that
+/// extends another copies the references and not the names.
 #[derive(Debug, Clone)]
 pub(crate) struct PrefixPath {
-    pub tokens: Vec<String>,
+    pub tokens: Vec<Rc<str>>,
     pub done: bool,
 }
 
@@ -515,6 +563,7 @@ pub(crate) struct PrefixPath {
 /// is the cost tabnas/bnf#71 measured in seconds. `class_sets` maps a
 /// token-class production to its set: a reference to one is one token,
 /// its set, rather than one path per member.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn alt_prefixes_raw(
     alt: &[Rc<Element>],
     grammar: &Grammar,
@@ -523,23 +572,58 @@ pub(crate) fn alt_prefixes_raw(
     visited: &IndexSet<String>,
     head_filter: Option<&dyn Fn(&str) -> bool>,
     class_sets: Option<&IndexMap<String, String>>,
-) -> Vec<PrefixPath> {
+    // Each path is held as it is made, 1 and 1 for each token it holds
+    // (`MAX_EMIT_UNITS`), until the decision that asked is made.
+    budget: &EmitBudget,
+) -> Result<Vec<PrefixPath>, EmitError> {
+    budget.hold(1)?;
     let mut paths: Vec<PrefixPath> = vec![PrefixPath {
         tokens: Vec::new(),
         done: false,
     }];
 
-    // A path that already carries a token has had its head admitted; only
-    // a path still at length zero can be pruned by what it gains next.
-    let admit = |before: &PrefixPath, tokens: &[String]| -> bool {
-        match head_filter {
-            None => true,
-            Some(f) => !before.tokens.is_empty() || tokens.is_empty() || f(&tokens[0]),
-        }
-    };
-
     for el in alt {
         let mut next: Vec<PrefixPath> = Vec::new();
+        // Whether some path in `next` can still grow; once none can, the
+        // walk is over.
+        let mut open = false;
+        let mut put = |next: &mut Vec<PrefixPath>, tokens: Vec<Rc<str>>, done: bool| {
+            budget.hold(1 + tokens.len())?;
+            if !done && tokens.len() < max_k {
+                open = true;
+            }
+            next.push(PrefixPath { tokens, done });
+            Ok::<(), EmitError>(())
+        };
+        // A path that already carries a token has had its head admitted;
+        // only a path still at length zero can be pruned by the token it
+        // gains.
+        let admit = |p: &PrefixPath, tok: &str| -> bool {
+            match head_filter {
+                None => true,
+                Some(f) => !p.tokens.is_empty() || f(tok),
+            }
+        };
+        // What a reference contributes depends on how many tokens the path
+        // that reaches it holds, and on nothing else about that path: the
+        // window left, and whether the head filter still applies. So its
+        // alternatives are enumerated once for each such length, rather
+        // than once for every path that reaches it. Mirrors the TypeScript
+        // `altPrefixesRaw`.
+        let mut target: Option<Option<&crate::shared::Production>> = None;
+        // The token this element adds, when it adds one, named once for
+        // every path it extends.
+        let added: Option<Rc<str>> = match &el.kind {
+            Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
+                Some(Rc::from(tokens.name(el)))
+            }
+            Kind::Ref { name, .. } => class_sets
+                .and_then(|c| c.get(name))
+                .map(|set| Rc::from(set.as_str())),
+            _ => None,
+        };
+        let mut child_visited: IndexSet<String> = IndexSet::new();
+        let mut by_length: IndexMap<usize, Vec<Vec<PrefixPath>>> = IndexMap::new();
         for p in &paths {
             if p.done || p.tokens.len() >= max_k {
                 next.push(p.clone());
@@ -547,86 +631,75 @@ pub(crate) fn alt_prefixes_raw(
             }
             match &el.kind {
                 Kind::Term { .. } | Kind::Regex { .. } | Kind::Token { .. } => {
-                    let mut t = p.tokens.clone();
-                    t.push(tokens.name(el));
-                    if admit(p, &t) {
-                        next.push(PrefixPath {
-                            tokens: t,
-                            done: false,
-                        });
+                    let tok = added.as_ref().expect("a terminal adds its token");
+                    if admit(p, tok) {
+                        let mut t = p.tokens.clone();
+                        t.push(tok.clone());
+                        put(&mut next, t, false)?;
                     }
                 }
                 Kind::Ref { name, .. } => {
-                    if let Some(set) = class_sets.and_then(|c| c.get(name)) {
-                        let mut t = p.tokens.clone();
-                        t.push(set.clone());
-                        if admit(p, &t) {
-                            next.push(PrefixPath {
-                                tokens: t,
-                                done: false,
-                            });
+                    if let Some(set) = &added {
+                        if admit(p, set) {
+                            let mut t = p.tokens.clone();
+                            t.push(set.clone());
+                            put(&mut next, t, false)?;
                         }
                         continue;
                     }
                     if visited.contains(name) {
-                        next.push(PrefixPath {
-                            tokens: p.tokens.clone(),
-                            done: true,
-                        });
+                        put(&mut next, p.tokens.clone(), true)?;
                         continue;
                     }
-                    let mut child_visited = visited.clone();
-                    child_visited.insert(name.clone());
-                    let target = grammar.find(name);
-                    let Some(target) = target.filter(|t| !t.alts.is_empty()) else {
-                        next.push(PrefixPath {
-                            tokens: p.tokens.clone(),
-                            done: true,
-                        });
+                    let found = *target.get_or_insert_with(|| {
+                        child_visited = visited.clone();
+                        child_visited.insert(name.clone());
+                        grammar.find(name)
+                    });
+                    let Some(found) = found.filter(|t| !t.alts.is_empty()) else {
+                        put(&mut next, p.tokens.clone(), true)?;
                         continue;
                     };
-                    // The head of the outer path is the head of the sub-path
-                    // while nothing has been consumed yet.
-                    let sub_filter = if p.tokens.is_empty() {
-                        head_filter
-                    } else {
-                        None
-                    };
-                    for sub in &target.alts {
-                        let sub_paths = alt_prefixes_raw(
-                            sub,
-                            grammar,
-                            tokens,
-                            max_k - p.tokens.len(),
-                            &child_visited,
-                            sub_filter,
-                            class_sets,
-                        );
+                    let held = p.tokens.len();
+                    if !by_length.contains_key(&held) {
+                        // The head of the outer path is the head of the
+                        // sub-path while nothing has been consumed yet.
+                        let sub_filter = if held == 0 { head_filter } else { None };
+                        let mut subs = Vec::with_capacity(found.alts.len());
+                        for sub in &found.alts {
+                            subs.push(alt_prefixes_raw(
+                                sub,
+                                grammar,
+                                tokens,
+                                max_k - held,
+                                &child_visited,
+                                sub_filter,
+                                class_sets,
+                                budget,
+                            )?);
+                        }
+                        by_length.insert(held, subs);
+                    }
+                    for sub_paths in &by_length[&held] {
                         for sp in sub_paths {
                             let mut t = p.tokens.clone();
-                            t.extend(sp.tokens);
-                            next.push(PrefixPath {
-                                tokens: t,
-                                done: sp.done,
-                            });
+                            t.extend(sp.tokens.iter().cloned());
+                            put(&mut next, t, sp.done)?;
                         }
                     }
                 }
                 _ => {
                     // Desugaring has eliminated the sugar kinds.
-                    next.push(PrefixPath {
-                        tokens: p.tokens.clone(),
-                        done: true,
-                    });
+                    put(&mut next, p.tokens.clone(), true)?;
                 }
             }
         }
         paths = next;
-        if paths.iter().all(|p| p.done || p.tokens.len() >= max_k) {
+        if !open {
             break;
         }
     }
-    paths
+    Ok(paths)
 }
 
 /// The distinct token prefixes of an alternative, in first-seen order.
@@ -636,7 +709,8 @@ pub(crate) fn alt_prefixes(
     tokens: &Tokens,
     max_k: usize,
     class_sets: Option<&IndexMap<String, String>>,
-) -> Vec<Vec<String>> {
+    budget: &EmitBudget,
+) -> Result<Vec<Vec<String>>, EmitError> {
     let raw = alt_prefixes_raw(
         alt,
         grammar,
@@ -645,16 +719,19 @@ pub(crate) fn alt_prefixes(
         &IndexSet::new(),
         None,
         class_sets,
-    );
+        budget,
+    )?;
     let mut seen: IndexSet<String> = IndexSet::new();
     let mut out: Vec<Vec<String>> = Vec::new();
     for p in raw {
         let key = p.tokens.join(" ");
         if seen.insert(key) {
-            out.push(p.tokens);
+            out.push(p.tokens.iter().map(|t| t.to_string()).collect());
         }
     }
-    out
+    // What the enumeration held is released once the prefixes are known.
+    budget.release();
+    Ok(out)
 }
 
 /// A sequence with every element a terminal or reference: what the
@@ -779,6 +856,7 @@ const MEMO_PAIRS: usize = 1 << 22;
 /// path is then emitted whole. `exit_paths` are the ways OUT of a choice
 /// that has an empty alternative: each FOLLOW token as an open one-token
 /// path, and each FOLLOW₂ pair.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_prefixes(
     alts: &[Sequence],
     grammar: &Grammar,
@@ -787,8 +865,29 @@ pub(crate) fn dispatch_prefixes(
     contest: &dyn Fn(&str, &str) -> bool,
     exit_paths: &[Vec<String>],
     class_sets: &IndexMap<String, String>,
-) -> Vec<DispatchPrefixes> {
+    budget: &EmitBudget,
+) -> Result<Vec<DispatchPrefixes>, EmitError> {
     let n = alts.len();
+    // One alternative's paths, of which only those it returns stay held
+    // once it has returned (`MAX_EMIT_UNITS`).
+    let enumerate = |alt: &Sequence,
+                     k: usize,
+                     filter: Option<&dyn Fn(&str) -> bool>|
+     -> Result<Vec<PrefixPath>, EmitError> {
+        let base = budget.held();
+        let paths = alt_prefixes_raw(
+            alt,
+            grammar,
+            tokens,
+            k,
+            &IndexSet::new(),
+            filter,
+            Some(class_sets),
+            budget,
+        )?;
+        budget.settle(base, &paths);
+        Ok(paths)
+    };
     let mut one: Vec<Vec<PrefixPath>> = Vec::with_capacity(n);
     let mut nullable: Vec<bool> = Vec::with_capacity(n);
     let mut heads: Vec<Vec<String>> = Vec::with_capacity(n);
@@ -796,15 +895,7 @@ pub(crate) fn dispatch_prefixes(
         let paths = if alt.is_empty() {
             Vec::new()
         } else {
-            alt_prefixes_raw(
-                alt,
-                grammar,
-                tokens,
-                1,
-                &IndexSet::new(),
-                None,
-                Some(class_sets),
-            )
+            enumerate(alt, 1, None)?
         };
         nullable.push(paths.iter().any(|p| p.tokens.is_empty() && !p.done));
         let mut seen: IndexSet<String> = IndexSet::new();
@@ -813,8 +904,8 @@ pub(crate) fn dispatch_prefixes(
             if p.tokens.len() != 1 {
                 continue;
             }
-            if seen.insert(p.tokens[0].clone()) {
-                hs.push(p.tokens[0].clone());
+            if seen.insert(p.tokens[0].to_string()) {
+                hs.push(p.tokens[0].to_string());
             }
         }
         heads.push(hs);
@@ -856,18 +947,10 @@ pub(crate) fn dispatch_prefixes(
         let c = &contested[i];
         let filter = |t: &str| c.contains(t);
         deep.push(
-            alt_prefixes_raw(
-                alt,
-                grammar,
-                tokens,
-                max_k,
-                &IndexSet::new(),
-                Some(&filter),
-                Some(class_sets),
-            )
-            .into_iter()
-            .filter(|p| !p.tokens.is_empty())
-            .collect(),
+            enumerate(alt, max_k, Some(&filter))?
+                .into_iter()
+                .filter(|p| !p.tokens.is_empty())
+                .collect(),
         );
     }
 
@@ -883,10 +966,10 @@ pub(crate) fn dispatch_prefixes(
     // output, are the ones `contest` gives. A decision too wide for the
     // table asks `contest` directly, as before. Mirrors TS
     // `dispatchPrefixes`.
-    fn intern<'a>(interned: &mut IndexSet<&'a str>, tokens: &'a [String]) -> Vec<usize> {
+    fn intern<'a, T: AsRef<str>>(interned: &mut IndexSet<&'a str>, tokens: &'a [T]) -> Vec<usize> {
         tokens
             .iter()
-            .map(|t| interned.insert_full(t.as_str()).0)
+            .map(|t| interned.insert_full(t.as_ref()).0)
             .collect()
     }
     let mut interned: IndexSet<&str> = IndexSet::new();
@@ -972,11 +1055,11 @@ pub(crate) fn dispatch_prefixes(
                 continue;
             }
             for (at, p) in deep[i].iter().enumerate() {
-                if &p.tokens[0] != h {
+                if &*p.tokens[0] != h.as_str() {
                     continue;
                 }
                 let d = depth_of(&deep_ids[i][at], i);
-                let prefix: Vec<String> = p.tokens[..d].to_vec();
+                let prefix: Vec<String> = p.tokens[..d].iter().map(|t| t.to_string()).collect();
                 if seen.insert(prefix.join(" ")) {
                     prefixes.push(prefix);
                 }
@@ -988,5 +1071,7 @@ pub(crate) fn dispatch_prefixes(
         });
     }
     let _ = one;
-    out
+    // What the enumeration held is released once the prefixes are known.
+    budget.release();
+    Ok(out)
 }

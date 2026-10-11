@@ -123,7 +123,12 @@ group in a tail, copied once per alternative of the rule inlined before it
 every rule it begins (`-source-group`), an inlined rule of empty
 alternatives (`-empty-alternatives`), and 362 options in front of a
 hidden left recursion, split before any substitution runs
-(`-optional-prefix`).
+(`-optional-prefix`). The two `ir-emit-units-*` fixtures are the emit
+limit's (`MAX_EMIT_UNITS`): 500 probes over 1,750 tokens, the last of them
+refused (`-probes`), and forty alternatives of up to forty options, refused
+while their lookahead is enumerated (`-options`). `node
+tests/oracle/generate.cjs limits tests/oracle` writes them, each on one
+line, since their IRs are large, and `regen` keeps them so.
 
 ## Untrusted IR, and where the stack still runs out
 
@@ -146,7 +151,7 @@ and 30000 levels. Reaching that needs a front-end that can itself build
 a tree that deep; an IR that arrives as JSON cannot, since `serde_json`
 stops at 128.
 
-Three bounds keep a small IR from making a large compiler product, in
+Four bounds keep a small IR from making a large compiler product, in
 this port and in TypeScript and Go alike. `MAX_REPEAT_EXPANSION` holds
 what numeric repetition may expand into, so `0*1000000a` is refused before
 its helpers are allocated. `MAX_LEFT_RECURSION_EXPANSION` holds the
@@ -163,7 +168,20 @@ and the splitting of nullable prefixes, so `A = [x1] … [xk] A "y"` is
 refused from k = 362 on before it writes k alternatives of about k/2
 elements each. Without it, 5,000 rules of the chain held hundreds of
 megabytes in each runtime, and a host's deadline bounds the time that
-takes, not the memory. All three refuse with the rule named.
+takes, not the memory. `MAX_EMIT_UNITS` (`src/budget.rs`) holds what the
+emitter writes after that: every rule, alternate and token or rule an
+alternate names, every token-set member, every probe-list entry and every
+FIRST, FOLLOW and FOLLOW₂ entry, each charged before it is made, and, while
+a choice is decided, the token paths its enumeration holds. A thousand
+optional prefixes over a vocabulary of a thousand tokens, and forty
+alternatives of up to forty optional elements, are refused within a
+second of an optimised build. It bounds memory, not time: a grammar can
+still spend seconds on the choices it decides under it. All four refuse
+with the rule named, or for a token set the class. The memos of token pairs `ContestCtx` and the
+keyword-shadow ordering keep are limited to `MAX_MEMO_ENTRIES` answers
+each, and answer past it without keeping, which changes no output: a rule
+of four thousand alternatives with distinct heads kept a gigabyte of
+answers without it.
 
 ## Elements are shared, as TypeScript and Go share them
 
