@@ -8,11 +8,12 @@
 //! `resolveSuffixDebts`, `refCallersOf`, `altPrefixesRaw` and
 //! `altPrefixes` in `ts/src/compiler.ts`.
 
+use std::rc::Rc;
+
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ir::{
-    diag_name, refs_in, regex_key, term_key_of, tokens_in, Element, Grammar, Kind, Sequence,
-};
+use crate::ir::{diag_name, regex_key, term_key_of, Element, Kind};
+use crate::shared::{refs_in, tokens_in, Grammar, Sequence};
 
 /// The allocated token tables: literal key -> token name and regex key
 /// -> token name.
@@ -140,7 +141,7 @@ pub(crate) fn kind_name(el: &Element) -> &'static str {
 /// FIRST set for one alternative, or `None` if the alternative is
 /// nullable (the caller treats that case separately).
 pub(crate) fn first_of_alt(
-    alt: &[Element],
+    alt: &[Rc<Element>],
     tokens: &Tokens,
     first_sets: &FirstSets,
     nullable: &Nullable,
@@ -156,7 +157,7 @@ pub(crate) fn first_of_alt(
 /// FIRST of a sequence, reporting nullability separately: the tokens a
 /// suffix can start with, AND whether that suffix can vanish.
 pub(crate) fn first_of_seq(
-    seq: &[Element],
+    seq: &[Rc<Element>],
     tokens: &Tokens,
     first_sets: &FirstSets,
     nullable: &Nullable,
@@ -447,7 +448,10 @@ pub(crate) fn resolve_suffix_debts(
         grammar.productions[loop_idx].debt_owed = Some(owed.into_iter().collect());
 
         for (pi, ai, i, delta) in pending {
-            let el = &mut grammar.productions[pi].alts[ai][i];
+            // Copied on write, as TypeScript writes a new element into
+            // the sequence (`alt[i] = { ...el, debt }`): every other
+            // sequence holding this reference keeps the one it had.
+            let el = Rc::make_mut(&mut grammar.productions[pi].alts[ai][i]);
             if let Kind::Ref { debt, .. } = &mut el.kind {
                 let mut d = debt.clone().unwrap_or_default();
                 d.insert(counter.clone(), delta);
@@ -512,7 +516,7 @@ pub(crate) struct PrefixPath {
 /// token-class production to its set: a reference to one is one token,
 /// its set, rather than one path per member.
 pub(crate) fn alt_prefixes_raw(
-    alt: &[Element],
+    alt: &[Rc<Element>],
     grammar: &Grammar,
     tokens: &Tokens,
     max_k: usize,
@@ -627,7 +631,7 @@ pub(crate) fn alt_prefixes_raw(
 
 /// The distinct token prefixes of an alternative, in first-seen order.
 pub(crate) fn alt_prefixes(
-    alt: &[Element],
+    alt: &[Rc<Element>],
     grammar: &Grammar,
     tokens: &Tokens,
     max_k: usize,

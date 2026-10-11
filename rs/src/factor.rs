@@ -16,14 +16,13 @@
 //! `P = α β1 / α β2   ⇒   P = α P$factN ; P$factN = β1 / β2`
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ir::{
-    diag_name, is_effectively_case_sensitive, origin_of, term_key_of, Element, EmitError, Grammar,
-    Kind, Production, Sequence,
-};
+use crate::ir::{diag_name, is_effectively_case_sensitive, term_key_of, Element, EmitError, Kind};
 use crate::ranges::{char_ranges_overlap, code_unit_reach, pattern_char_ranges, CharRange};
+use crate::shared::{origin_of, owned, AsElement, Grammar, Production, Sequence};
 
 /// How many concrete tokens the multi-alt dispatcher fans each
 /// alternative's prefix out to. Left factoring uses the same bound to
@@ -97,8 +96,11 @@ pub(crate) fn elem_equal(a: &Element, b: &Element) -> bool {
     }
 }
 
-pub(crate) fn seq_equal(a: &[Element], b: &[Element]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| elem_equal(x, y))
+pub(crate) fn seq_equal<E: AsElement>(a: &[E], b: &[E]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| elem_equal(x.element(), y.element()))
 }
 
 /// The most tokens a sequence can span, for deciding whether the
@@ -106,14 +108,14 @@ pub(crate) fn seq_equal(a: &[Element], b: &[Element]) -> bool {
 /// so each sugar kind is counted on its own terms. `None` stands for
 /// infinity: anything unbounded (a star/plus, an unbounded rep, a cycle)
 /// or unknown (prose).
-pub(crate) fn seq_token_span(
-    seq: &[Element],
+pub(crate) fn seq_token_span<E: AsElement>(
+    seq: &[E],
     grammar: &Grammar,
     visited: &IndexSet<String>,
 ) -> Option<usize> {
     let mut total = 0usize;
     for el in seq {
-        total = total.checked_add(element_token_span(el, grammar, visited)?)?;
+        total = total.checked_add(element_token_span(el.element(), grammar, visited)?)?;
         if total > LOOKAHEAD_K {
             return None;
         }
@@ -238,13 +240,13 @@ fn first_char_ranges_of_element(
 
 /// See through a single-alternative group: `( a b )` as an entire
 /// alternative is just `a b`.
-fn unwrap_alt(alt: &[Element]) -> Sequence {
+fn unwrap_alt(alt: &[Rc<Element>]) -> Sequence {
     let mut a: Sequence = alt.to_vec();
     loop {
         if a.len() == 1 {
             if let Kind::Group { alts } = &a[0].kind {
                 if alts.len() == 1 {
-                    a = alts[0].clone();
+                    a = alts[0].iter().map(AsElement::share).collect();
                     continue;
                 }
             }
@@ -327,7 +329,7 @@ fn factor_once(
     grammar: &Grammar,
 ) -> Result<Option<Vec<Sequence>>, EmitError> {
     let views: Vec<Sequence> = alts.iter().map(|a| unwrap_alt(a)).collect();
-    let prefix_beyond_lookahead = |prefix: &[Element]| -> bool {
+    let prefix_beyond_lookahead = |prefix: &[Rc<Element>]| -> bool {
         match seq_token_span(prefix, grammar, &IndexSet::new()) {
             None => true,
             Some(n) => n > LOOKAHEAD_K,
@@ -456,7 +458,7 @@ fn factor_once(
             }
             queue.push_back(helper_prod);
             let mut f = prefix.clone();
-            f.push(Element::reference(helper));
+            f.push(Rc::new(Element::reference(helper)));
             f
         };
 
@@ -467,7 +469,7 @@ fn factor_once(
             .iter()
             .all(|m| alts[*m].len() == 1 && matches!(alts[*m][0].kind, Kind::Group { .. }));
         let replacement: Sequence = if wrapped {
-            vec![Element::group(vec![factored])]
+            vec![Rc::new(Element::group(vec![owned(&factored)]))]
         } else {
             factored
         };
@@ -495,7 +497,7 @@ fn factor_once(
 /// replaced by that body, and the name of that production when it
 /// builds a value (the caller refuses only once factoring is committed).
 fn inline_head_ref(
-    v: &[Element],
+    v: &[Rc<Element>],
     head_el: &Element,
     grammar: &Grammar,
 ) -> Option<(Sequence, Option<String>)> {

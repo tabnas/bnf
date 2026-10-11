@@ -47,6 +47,7 @@ mod leftrec;
 mod probe;
 mod prose;
 mod ranges;
+mod shared;
 mod spec;
 
 /// The README's Rust examples run as doctests, so a stale one fails the

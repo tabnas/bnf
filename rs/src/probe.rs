@@ -16,12 +16,15 @@
 //! that greedily consumes the joint vocabulary; on return, peek the next
 //! token, rewind, and commit to the `X D Y` or the `Y` branch.
 
+use std::rc::Rc;
+
 use indexmap::{IndexMap, IndexSet};
 
 use crate::ir::{
-    diag_name, origin_of, regex_key, term_key_of, AmbiguityReport, Element, EmitError, Grammar,
-    Kind, ProbeDispatchSpec, ProbeHelperSpec, Production, Sequence,
+    diag_name, regex_key, term_key_of, AmbiguityReport, Element, EmitError, Kind,
+    ProbeDispatchSpec, ProbeHelperSpec,
 };
+use crate::shared::{origin_of, AsElement, Grammar, Production, Sequence};
 
 /// Element is `[ X D ]` where X is one or more elements and D is a
 /// terminal: returns X and D.
@@ -43,7 +46,10 @@ fn is_probeable_opt(el: &Element) -> Option<(Sequence, Element)> {
     if !last.is_terminal() {
         return None;
     }
-    Some((seq[..seq.len() - 1].to_vec(), last.clone()))
+    Some((
+        seq[..seq.len() - 1].iter().map(AsElement::share).collect(),
+        last.clone(),
+    ))
 }
 
 /// The key a terminal is collected under.
@@ -98,7 +104,7 @@ fn collect_terminal_vocab_elements(
     }
 }
 
-fn collect_seq_vocab_elements(seq: &[Element], grammar: &Grammar) -> IndexMap<String, Element> {
+fn collect_seq_vocab_elements(seq: &[Rc<Element>], grammar: &Grammar) -> IndexMap<String, Element> {
     let mut out = IndexMap::new();
     let mut visited = IndexSet::new();
     for el in seq {
@@ -185,7 +191,7 @@ pub(crate) fn rewrite_probe_dispatches(grammar: &Grammar) -> Result<Grammar, Emi
                 extra.push(probe);
                 // The committed branches: `with` = X D Y, `no` = Y.
                 let mut with_alt: Sequence = x_seq.clone();
-                with_alt.push(disambiguator.clone());
+                with_alt.push(Rc::new(disambiguator.clone()));
                 with_alt.extend(y_seq.iter().cloned());
                 extra.push(Production::helper(&with_name, vec![with_alt], origin));
                 extra.push(Production::helper(&no_name, vec![y_seq.clone()], origin));
@@ -195,8 +201,8 @@ pub(crate) fn rewrite_probe_dispatches(grammar: &Grammar) -> Result<Grammar, Emi
                 let mut dispatch = Production::helper(
                     &dispatch_name,
                     vec![
-                        vec![Element::reference(with_name.clone())],
-                        vec![Element::reference(no_name.clone())],
+                        vec![Rc::new(Element::reference(with_name.clone()))],
+                        vec![Rc::new(Element::reference(no_name.clone()))],
                     ],
                     origin,
                 );
@@ -236,7 +242,7 @@ pub(crate) fn rewrite_probe_dispatches(grammar: &Grammar) -> Result<Grammar, Emi
                         prod.sp,
                     ));
                 }
-                result_alt.push(Element::reference(dispatch_name));
+                result_alt.push(Rc::new(Element::reference(dispatch_name)));
                 // Everything that followed the opt is now inside the
                 // dispatcher, so skip the rest of the alt.
                 i = alt.len();

@@ -485,7 +485,7 @@ pub struct ClassAnalysis {
     pub atom_tokens: IndexMap<String, String>,
 }
 
-pub fn class_analysis(terminals: &[Element]) -> ClassAnalysis {
+pub fn class_analysis<'a>(terminals: impl IntoIterator<Item = &'a Element>) -> ClassAnalysis {
     let mut coverage: IndexMap<String, Vec<CharRange>> = IndexMap::new();
     // The classes the canonical matcher reads in UTF-16 code units: no
     // `u` or `v`.

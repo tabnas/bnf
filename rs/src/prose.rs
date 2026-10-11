@@ -6,13 +6,15 @@
 //! `resolveProseTerminals`, `liftLiteralTokens`, `normalizeBuiltinTokens`
 //! and `nullableRules` in `ts/src/compiler.ts`.
 
+use std::rc::Rc;
+
 use indexmap::{IndexMap, IndexSet};
 
 use crate::ir::{
-    builtin_token, diag_name, is_prose_name, origin_of, regex_key, term_key, term_key_of, Element,
-    EmitError, Grammar, Kind, NodeKind, Production, Sequence, BUILTIN_TOKENS, MAX_REPEAT_EXPANSION,
-    REMOVE_ALL, REMOVE_PROSE,
+    builtin_token, diag_name, is_prose_name, regex_key, term_key, term_key_of, Element, EmitError,
+    Kind, NodeKind, BUILTIN_TOKENS, MAX_REPEAT_EXPANSION, REMOVE_ALL, REMOVE_PROSE,
 };
+use crate::shared::{origin_of, AsElement, Grammar, Production, Sequence};
 
 /// Resolve RFC 5234 `prose-val` terminals (`<free text>`).
 ///
@@ -287,7 +289,11 @@ pub(crate) fn lift_literal_tokens(grammar: &mut Grammar, start: &str) -> Vec<Ele
             p.alts = p
                 .alts
                 .iter()
-                .map(|alt| alt.iter().map(|e| walk(e, &lifted)).collect::<Sequence>())
+                .map(|alt| {
+                    alt.iter()
+                        .map(|e| Rc::new(walk(e, &lifted)))
+                        .collect::<Sequence>()
+                })
                 .collect();
             p
         })
@@ -350,7 +356,7 @@ pub(crate) fn normalize_builtin_tokens(grammar: &mut Grammar) {
         prod.alts = prod
             .alts
             .iter()
-            .map(|alt| alt.iter().map(|e| walk(e, &defined)).collect())
+            .map(|alt| alt.iter().map(|e| Rc::new(walk(e, &defined))).collect())
             .collect();
     }
 }
@@ -570,8 +576,9 @@ pub(crate) fn non_consuming_rules(prods: &[Production]) -> IndexSet<String> {
     nullable
 }
 
-fn sequence_derives_empty(alt: &[Element], nullable: &IndexSet<String>) -> bool {
-    alt.iter().all(|el| element_derives_empty(el, nullable))
+fn sequence_derives_empty<E: AsElement>(alt: &[E], nullable: &IndexSet<String>) -> bool {
+    alt.iter()
+        .all(|el| element_derives_empty(el.element(), nullable))
 }
 
 /// The rules that derive the empty string: a least fixed point.
@@ -846,7 +853,7 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
             }
         }
         if let Some(tail) = &prod.tail_repeat {
-            let cycle = tail.sep.iter().chain(prod.alts[0].iter());
+            let cycle = tail.sep.iter().chain(prod.alts[0].iter().map(|el| &**el));
             if cycle.clone().next().is_some()
                 && cycle
                     .clone()
@@ -855,7 +862,12 @@ pub(crate) fn validate_repetitions(grammar: &Grammar) -> Result<(), EmitError> {
                 let fallback = tail
                     .sep
                     .first()
-                    .or_else(|| prod.alts.first().and_then(|alt| alt.first()))
+                    .or_else(|| {
+                        prod.alts
+                            .first()
+                            .and_then(|alt| alt.first())
+                            .map(|el| &**el)
+                    })
                     .expect("a non-empty tail cycle has an element");
                 let witness = cycle
                     .filter_map(|el| non_consuming_witness(el, &nullable))

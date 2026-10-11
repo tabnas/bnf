@@ -449,32 +449,6 @@ impl Production {
             ..Default::default()
         }
     }
-
-    /// The production rebuilt from its author-facing fields only, with
-    /// new alternatives. The TypeScript passes that rebuild a production
-    /// copy exactly `name`, `alts`, `nodeKind`, `origin`, `sp` and
-    /// `value`; every rewrite flag is left behind.
-    pub(crate) fn rebuilt(&self, alts: Vec<Sequence>) -> Self {
-        Self {
-            name: self.name.clone(),
-            alts,
-            node_kind: self.node_kind,
-            origin: self.origin.clone(),
-            sp: self.sp,
-            value: self.value.clone(),
-            ..Default::default()
-        }
-    }
-
-    pub(crate) fn helper(name: impl Into<String>, alts: Vec<Sequence>, origin: &str) -> Self {
-        Self {
-            name: name.into(),
-            alts,
-            node_kind: NodeKind::Helper,
-            origin: Some(origin.to_string()),
-            ..Default::default()
-        }
-    }
 }
 
 /// The author-written production a (possibly synthesised) production
@@ -520,10 +494,6 @@ impl Grammar {
             productions,
             ..Default::default()
         }
-    }
-
-    pub(crate) fn find(&self, name: &str) -> Option<&Production> {
-        self.productions.iter().find(|p| p.name == name)
     }
 }
 
@@ -797,47 +767,9 @@ pub fn is_prose_name(name: &str) -> bool {
     name.starts_with('<') && name.ends_with('>')
 }
 
-/// Collect every token element's name in a sequence, nested ones
-/// included. Mirrors the TypeScript `tokensIn`.
-pub fn tokens_in(alt: &[Element], out: &mut IndexSet<String>) {
-    for el in alt {
-        match &el.kind {
-            Kind::Token { name, .. } => {
-                out.insert(name.clone());
-            }
-            Kind::Opt { inner }
-            | Kind::Star { inner, .. }
-            | Kind::Plus { inner }
-            | Kind::Rep { inner, .. } => tokens_in(std::slice::from_ref(inner), out),
-            Kind::Group { alts } => {
-                for a in alts {
-                    tokens_in(a, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Collect the rule references in a sequence, sugar included.
 pub fn refs_in(alt: &[Element], out: &mut IndexSet<String>) {
-    for el in alt {
-        match &el.kind {
-            Kind::Ref { name, .. } => {
-                out.insert(name.clone());
-            }
-            Kind::Opt { inner }
-            | Kind::Star { inner, .. }
-            | Kind::Plus { inner }
-            | Kind::Rep { inner, .. } => refs_in(std::slice::from_ref(inner), out),
-            Kind::Group { alts } => {
-                for a in alts {
-                    refs_in(a, out);
-                }
-            }
-            _ => {}
-        }
-    }
+    crate::shared::refs_in(alt, out)
 }
 
 /// A quoted-string literal is effectively case-sensitive either when the
