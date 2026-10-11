@@ -80,14 +80,14 @@ type CompileOptions struct {
 // A/C fields.
 func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 	offenders := map[string]bool{}
-	ord := orderOf(spec)
+	rec := recordOf(spec)
 
 	// The options block carries the WHOLE of the front-end's typed
 	// Options, not just the three keys the converter sets itself. See
 	// options_data.go: a front-end's lexing configuration IS part of the
 	// accepted language, and a spec emitted without it produced a
 	// grammar that parsed differently from a natively installed one.
-	options, err := optionsToData(spec.Options, ord)
+	options, err := optionsToData(spec.Options, rec)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -115,10 +115,10 @@ func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 		}
 		rm := tabnas.NewOrderedMap()
 		if rspec.Open != nil {
-			rm.Set("open", altsToData(rspec.Open, name, offenders, ord))
+			rm.Set("open", altsToData(rspec.Open, name, offenders, rec))
 		}
 		if rspec.Close != nil {
-			rm.Set("close", altsToData(rspec.Close, name, offenders, ord))
+			rm.Set("close", altsToData(rspec.Close, name, offenders, rec))
 		}
 		rules.Set(name, rm)
 	}
@@ -197,10 +197,30 @@ func carryMeta(from *tabnas.GrammarSpec, to map[string]any) {
 	to["meta"] = meta
 }
 
-// regexHolder wraps a regexp with its eager flag for serialisation.
+// regexHolder wraps a match token's regexp for serialisation, with its
+// eager flag and, where the emitter recorded it, the matcher as the
+// canonical compiler writes it.
 type regexHolder struct {
 	re    *regexp.Regexp
 	eager bool
+	js    *jsRegex
+}
+
+// jsRegex is a match token's matcher as the canonical compiler writes it,
+// in JavaScript's dialect: its source, and its flags in the order
+// JavaScript reports them. RE2 compiles a class from its own spelling of
+// a code point (`\x{1F600}`) and keeps no flag but `i`, so the compiled
+// regexp gives back neither. Dropping `u` changes what JavaScript matches:
+// without it a negated class takes half of an astral character, and a
+// braced escape is not an escape at all.
+type jsRegex struct {
+	// re is the compiled matcher the record describes. A matcher put in
+	// its place after the emit is written from its own source instead.
+	re *regexp.Regexp
+	// source is the whole source TypeScript writes, `^` included, or ""
+	// when it is the compiled one's, respelled (jsRegexSource).
+	source string
+	flags  string
 }
 
 // SpecToData converts a *GrammarSpec into a plain data tree: a
@@ -261,7 +281,7 @@ func SpecToJSONErr(spec *tabnas.GrammarSpec, indent int) (string, error) {
 	return ToJsonic(data, true, indent), nil
 }
 
-func altsToData(alts any, rule string, offenders map[string]bool, ord *specOrder) []any {
+func altsToData(alts any, rule string, offenders map[string]bool, rec *specRecord) []any {
 	gas, ok := alts.([]*tabnas.GrammarAltSpec)
 	if !ok {
 		return []any{}
@@ -269,8 +289,8 @@ func altsToData(alts any, rule string, offenders map[string]bool, ord *specOrder
 	out := make([]any, 0, len(gas))
 	for _, ga := range gas {
 		var keys []string
-		if ord != nil {
-			keys = ord.alts[ga]
+		if rec != nil {
+			keys = rec.alts[ga]
 		}
 		out = append(out, altToData(ga, rule, offenders, keys))
 	}
@@ -766,7 +786,8 @@ func ToJsonic(value any, strict bool, indent int) string {
 			if x.eager {
 				sentinel = "@~/"
 			}
-			return str(sentinel + jsRegexSource(x.re) + "/" + jsRegexFlags(x.re))
+			source, flags := jsMatcher(x)
+			return str(sentinel + source + "/" + flags)
 		case bool:
 			if x {
 				return "true"
@@ -855,34 +876,119 @@ func sortedMapKeys(m map[string]any) []string {
 	return keys
 }
 
-// jsRegexSource returns a JS-flavoured source for the Go regex (strips
-// the leading (?i) flag group and anchor as needed). The converter's
-// match-token regexes are `(?i)^…` or `^[\x{..}-\x{..}]`.
-func jsRegexSource(re *regexp.Regexp) string {
-	s := re.String()
-	s = strings.TrimPrefix(s, "(?i)")
-	// Keep the anchor; TS emitted `^` + pattern too.
-	// Translate Go \x{HHHH} back to JS \uHHHH where 4 hex digits.
-	s = goHexToJsUnicode(s)
-	return s
-}
-
-func jsRegexFlags(re *regexp.Regexp) string {
-	if strings.HasPrefix(re.String(), "(?i)") {
-		return "i"
-	}
-	return ""
-}
-
-var goHexRe = regexp.MustCompile(`\\x\{([0-9a-fA-F]+)\}`)
-
-func goHexToJsUnicode(s string) string {
-	return goHexRe.ReplaceAllStringFunc(s, func(m string) string {
-		sub := goHexRe.FindStringSubmatch(m)
-		h := sub[1]
-		for len(h) < 4 {
-			h = "0" + h
+// jsMatcher is the source and the flags a match token is written with:
+// what the emitter recorded, or else the compiled regexp's own, respelled.
+// A braced escape is read as one only under `u`, so a respelled source
+// that has one carries the flag whatever the regexp was compiled with.
+func jsMatcher(x regexHolder) (string, string) {
+	if x.js != nil && x.js.re == x.re {
+		source, flags := x.js.source, x.js.flags
+		if source == "" {
+			var braced bool
+			source, braced = jsRegexSource(x.re)
+			if braced && !strings.ContainsAny(flags, "uv") {
+				flags = canonicalJSFlags(flags + "u")
+			}
 		}
-		return "\\u" + h
-	})
+		return source, flags
+	}
+	source, braced := jsRegexSource(x.re)
+	flags := ""
+	if strings.HasPrefix(x.re.String(), "(?i)") {
+		flags = "i"
+	}
+	if braced {
+		flags = canonicalJSFlags(flags + "u")
+	}
+	return source, flags
+}
+
+// jsRegexSource is a compiled regexp's source as JavaScript reads it:
+// without the `(?i)` group the `i` flag stands for, and with each of RE2's
+// code point escapes, `\x{…}`, spelled as JavaScript spells it. A source
+// that names a code point past U+FFFF spells every one in braces,
+// `\u{1F600}`, which JavaScript reads only under `u`, and reports that it
+// did; any other is `\uHHHH`, read alike with `u` and without. `\uHHHH`
+// cannot reach past U+FFFF: JavaScript reads `\u1F600` as U+1F60 and a
+// `0`. Switching a whole source to braces is how the canonical compiler's
+// class atoms are spelled, and the front-ends' classes but GBNF's, which
+// switch a code point at a time.
+func jsRegexSource(re *regexp.Regexp) (string, bool) {
+	return jsCodePoints(strings.TrimPrefix(re.String(), "(?i)"))
+}
+
+// jsCodePoints respells the `\x{…}` escapes of an RE2 source as
+// JavaScript's, as jsRegexSource describes, and reports whether it wrote
+// them in braces. Any other escape is copied as it is, the escaped
+// character with it, so `\\x{41}` stays a backslash and `x{41}`.
+func jsCodePoints(s string) (string, bool) {
+	type escape struct {
+		start, end int
+		hex        string
+	}
+	var escapes []escape
+	astral := false
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			continue
+		}
+		if s[i+1] == 'x' && i+2 < len(s) && s[i+2] == '{' {
+			if j := strings.IndexByte(s[i+3:], '}'); j > 0 && isHexDigits(s[i+3:i+3+j]) {
+				hex := strings.TrimLeft(s[i+3:i+3+j], "0")
+				if hex == "" {
+					hex = "0"
+				}
+				if len(hex) > 4 {
+					astral = true
+				}
+				escapes = append(escapes, escape{i, i + 4 + j, hex})
+				i += 3 + j
+				continue
+			}
+		}
+		i++
+	}
+	if len(escapes) == 0 {
+		return s, false
+	}
+	var b strings.Builder
+	last := 0
+	for _, e := range escapes {
+		b.WriteString(s[last:e.start])
+		if astral {
+			b.WriteString(`\u{` + e.hex + `}`)
+		} else {
+			b.WriteString(`\u` + strings.Repeat("0", 4-len(e.hex)) + e.hex)
+		}
+		last = e.end
+	}
+	b.WriteString(s[last:])
+	return b.String(), astral
+}
+
+func isHexDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// jsFlagOrder is the order JavaScript reports a RegExp's flags in, which
+// is the order the canonical compiler writes them in.
+const jsFlagOrder = "dgimsuvy"
+
+// canonicalJSFlags is flags in JavaScript's order, each once. A letter
+// that is not a JavaScript flag is left out, as it always was here; the
+// canonical compiler refuses the IR that carries one.
+func canonicalJSFlags(flags string) string {
+	var b []byte
+	for i := 0; i < len(jsFlagOrder); i++ {
+		if strings.IndexByte(flags, jsFlagOrder[i]) >= 0 {
+			b = append(b, jsFlagOrder[i])
+		}
+	}
+	return string(b)
 }

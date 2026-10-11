@@ -64,9 +64,11 @@ var optionsHandled = map[string]bool{
 // switches off in the order gbnf's TypeScript front-end sets it, then the
 // rest. The tokens are in the order they were allocated: the match tokens
 // in TokenOrder's, the fixed tokens and the token sets in what the emitter
-// recorded for the spec (ord, nil for a spec it did not emit), and the
-// rest of each in name order. An empty object when nothing is set.
-func optionsToData(opt *tabnas.Options, ord *specOrder) (*tabnas.OrderedMap, error) {
+// recorded for the spec (rec, nil for a spec it did not emit), and the
+// rest of each in name order. Each match token carries its matcher as the
+// emitter recorded it, for ToJsonic to write. An empty object when nothing
+// is set.
+func optionsToData(opt *tabnas.Options, rec *specRecord) (*tabnas.OrderedMap, error) {
 	out := tabnas.NewOrderedMap()
 	if opt == nil {
 		return out, nil
@@ -77,8 +79,8 @@ func optionsToData(opt *tabnas.Options, ord *specOrder) (*tabnas.OrderedMap, err
 
 	var funcs []string
 	var fixedOrder, setOrder []string
-	if ord != nil {
-		fixedOrder, setOrder = ord.fixed, ord.sets
+	if rec != nil {
+		fixedOrder, setOrder = rec.fixed, rec.sets
 	}
 
 	if o := opt.Fixed; o != nil {
@@ -134,8 +136,13 @@ func optionsToData(opt *tabnas.Options, ord *specOrder) (*tabnas.OrderedMap, err
 			// runtime writes and the notations' renders refuse.)
 			tok := tabnas.NewOrderedMap()
 			for _, name := range inOrder(mapKeys(o.Token), o.TokenOrder) {
-				tok.Set(name, regexHolder{
-					re: o.Token[name], eager: o.TokenEager != nil && o.TokenEager[name]})
+				h := regexHolder{re: o.Token[name], eager: o.TokenEager != nil && o.TokenEager[name]}
+				if rec != nil {
+					if js, ok := rec.regex[name]; ok {
+						h.js = &js
+					}
+				}
+				tok.Set(name, h)
 			}
 			m.Set("token", tok)
 		}

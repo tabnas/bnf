@@ -173,6 +173,10 @@ differs because Go does.
 - **RE2, so no lookahead.** `WordKeywords` emits a `\b` guard where
   TypeScript emits `(?![A-Za-z0-9_])`. The two are equivalent for the
   literals this applies to.
+- **RE2 spells a code point `\x{…}`.** A Go front-end hands the
+  compiler its classes in that spelling, which Go's regexp compiles. A
+  serialised spec has them in JavaScript's, as TypeScript writes them,
+  with the flags RE2 has no use for, chiefly `u`.
 - **Two serialisation surfaces.** TypeScript returns its `GrammarSpec`
   object; Go returns the generic pure-data tree from
   `ToRecognitionSpec` and `ToPureSpec`: a `map[string]any` whose objects

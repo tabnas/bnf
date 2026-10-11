@@ -2,7 +2,8 @@
 
 package bnf
 
-// spec_order.go — the order a compiled spec is written in.
+// spec_order.go — what the emitter records so that a compiled spec is
+// written as TypeScript writes it: its order, and its matchers.
 //
 // TypeScript writes a spec in the order its emitter makes it: the rules in
 // the order they are committed, each token in the order it is allocated,
@@ -29,11 +30,20 @@ package bnf
 //     emitter has always filled.
 //   - The fixed tokens', the token sets' and each alternate's key order
 //     have no field in the engine's spec, so the emitter records them per
-//     spec here (specOrders), and the serialisers look them up.
+//     spec here (specRecords), and the serialisers look them up.
 //
 // What a serialiser writes in that order is a *tabnas.OrderedMap, the
 // engine's ordered object, which ToJsonic writes in key order and
 // encoding/json writes in key order too.
+//
+// A match token's matcher is the other half. TypeScript writes a matcher's
+// source and flags as its RegExp holds them. Go compiles RE2, which spells
+// a code point `\x{1F600}` and keeps no flag but `i` (it reads code points
+// already, so `u` has nothing to do), and the compiled regexp gives back
+// neither JavaScript's spelling nor its flags. The emitter records both for
+// each match token it allocates (jsRegex, in compile.go), and the
+// serialisers write them; a matcher with no record is respelled from its
+// RE2 source.
 
 import (
 	"runtime"
@@ -145,11 +155,11 @@ func copyMap(m map[string]any) map[string]any {
 
 // ---- what one emit records ----------------------------------------------
 
-// emitTrace is what one emit records of the order it writes in, for the
-// spec it returns. Package-level and set for the length of one emit, under
-// emitMu, as diagPrefix is: the recording sites (commitRule, mapToAlt, the
-// token allocation) are reached through twenty functions that have no
-// other business with it.
+// emitTrace is what one emit records of the order it writes in, and of
+// its matchers, for the spec it returns. Package-level and set for the
+// length of one emit, under emitMu, as diagPrefix is: the recording sites
+// (commitRule, mapToAlt, the token allocation) are reached through twenty
+// functions that have no other business with it.
 type emitTrace struct {
 	rules    []string
 	ruleSeen map[string]bool
@@ -159,6 +169,7 @@ type emitTrace struct {
 	alts     map[*tabnas.GrammarAltSpec][]string
 	// Interned key orders: an emit makes many alternates and few orders.
 	orders map[string][]string
+	regex  map[string]jsRegex
 }
 
 // trace is the emit under way's, nil outside one.
@@ -170,6 +181,7 @@ func newEmitTrace() *emitTrace {
 		setSeen:  map[string]bool{},
 		alts:     map[*tabnas.GrammarAltSpec][]string{},
 		orders:   map[string][]string{},
+		regex:    map[string]jsRegex{},
 	}
 }
 
@@ -219,6 +231,14 @@ func (t *emitTrace) noteAlt(alt *tabnas.GrammarAltSpec, m map[string]any) {
 	t.alts[alt] = ks
 }
 
+// noteRegex records a match token's matcher as the canonical compiler
+// writes it, when the token is allocated.
+func (t *emitTrace) noteRegex(name string, r jsRegex) {
+	if t != nil {
+		t.regex[name] = r
+	}
+}
+
 // altFieldOrder holds the keys an alternate map can carry into the spec.
 var altFieldOrder = map[string]bool{
 	"s": true, "b": true, "p": true, "r": true, "a": true, "c": true,
@@ -226,11 +246,13 @@ var altFieldOrder = map[string]bool{
 }
 
 // finish hands what the emit recorded to the spec it built: the rules'
-// order to its RuleOrder, and the rest to specOrders. Only the alternates
-// the spec holds are kept; one converted and then replaced is not.
+// order to its RuleOrder, and the rest to specRecords. Only the alternates
+// and the matchers the spec holds are kept; one made and then replaced is
+// not.
 func (t *emitTrace) finish(spec *tabnas.GrammarSpec) {
 	spec.RuleOrder = t.rules
-	o := &specOrder{fixed: t.fixed, sets: t.sets, alts: map[*tabnas.GrammarAltSpec][]string{}}
+	o := &specRecord{fixed: t.fixed, sets: t.sets,
+		alts: map[*tabnas.GrammarAltSpec][]string{}, regex: map[string]jsRegex{}}
 	for _, rs := range spec.Rule {
 		if rs == nil {
 			continue
@@ -243,43 +265,52 @@ func (t *emitTrace) finish(spec *tabnas.GrammarSpec) {
 			}
 		}
 	}
-	rememberOrder(spec, o)
+	if spec.Options != nil && spec.Options.Match != nil {
+		for name, re := range spec.Options.Match.Token {
+			if r, ok := t.regex[name]; ok && r.re == re {
+				o.regex[name] = r
+			}
+		}
+	}
+	rememberRecord(spec, o)
 }
 
 // ---- what a spec keeps ---------------------------------------------------
 
-// specOrder is the order of what a spec holds that the engine's
-// GrammarSpec has no field for: its fixed tokens, its token sets and each
-// alternate's keys.
-type specOrder struct {
+// specRecord is what the engine's GrammarSpec has no field for: the order
+// of a spec's fixed tokens, of its token sets and of each alternate's
+// keys, and each match token's matcher in JavaScript's dialect.
+type specRecord struct {
 	fixed []string
 	sets  []string
 	alts  map[*tabnas.GrammarAltSpec][]string
+	regex map[string]jsRegex
 }
 
-// specOrders holds each emitted spec's specOrder, for as long as the spec
+// specRecords holds each emitted spec's specRecord, for as long as the spec
 // itself lives. The key is a weak pointer, so holding an entry does not
 // keep its spec alive, and a cleanup removes the entry once the spec is
 // collected. A spec built by hand, loaded from JSON or copied has none,
 // and is written as it always was: what it records in its own fields in
-// that order, and the rest in name order.
-var specOrders sync.Map // weak.Pointer[tabnas.GrammarSpec] -> *specOrder
+// that order, the rest in name order, and each matcher respelled from its
+// RE2 source.
+var specRecords sync.Map // weak.Pointer[tabnas.GrammarSpec] -> *specRecord
 
-func rememberOrder(spec *tabnas.GrammarSpec, o *specOrder) {
+func rememberRecord(spec *tabnas.GrammarSpec, o *specRecord) {
 	key := weak.Make(spec)
-	specOrders.Store(key, o)
+	specRecords.Store(key, o)
 	runtime.AddCleanup(spec, func(k weak.Pointer[tabnas.GrammarSpec]) {
-		specOrders.Delete(k)
+		specRecords.Delete(k)
 	}, key)
 }
 
-// orderOf is the specOrder recorded for spec, or nil.
-func orderOf(spec *tabnas.GrammarSpec) *specOrder {
+// recordOf is the specRecord recorded for spec, or nil.
+func recordOf(spec *tabnas.GrammarSpec) *specRecord {
 	if spec == nil {
 		return nil
 	}
-	if v, ok := specOrders.Load(weak.Make(spec)); ok {
-		return v.(*specOrder)
+	if v, ok := specRecords.Load(weak.Make(spec)); ok {
+		return v.(*specRecord)
 	}
 	return nil
 }

@@ -506,10 +506,10 @@ message-pinning or bare — exist here. The cross-runtime parity contract
 is carried instead by `rs/tests/oracle/*.json`, which hold the
 TypeScript compiler's own emitted text, and its refusals, whose messages
 the Rust oracle test, `go/oracle_refusal_test.go` and
-`ts/test/oracle-refusal.test.js` each hold to byte for byte. The Go port's
-emitted text is held to them as well, by `go/oracle_text_test.go`. Compiler diagnostics are thrown errors with prose
-messages, not coded parse errors; the front-ends own the wording their own
-tests pin.
+`ts/test/oracle-refusal.test.js` each hold to byte for byte. The Go
+port's emitted text is held to them as well, by `go/oracle_text_test.go`.
+Compiler diagnostics are thrown errors with prose messages, not coded
+parse errors; the front-ends own the wording their own tests pin.
 
 The machine-readable list is [`tabnas.plugin.json`](tabnas.plugin.json)
 (`errorCodes`) — deliberately empty today, matching the catalogue-free

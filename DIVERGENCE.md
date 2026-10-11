@@ -165,18 +165,20 @@ one fan-out come from one template and differ only in the token they
 peek, so two of them that match the same input do the same thing, and
 the order changes no parse; `go/doc/differences.md` has the argument and
 the measurement over `c.gbnf`. It changes the text. Over 1,169 IRs
-captured from the front-ends' suites, 808 of which compile, 78 grammars
+captured from the front-ends' suites, 808 of which compile, 112 grammars
 list such a fan-out in another order, each group holding the same
-alternates as TypeScript's, and so do the shared fixtures
-`ir-loop-array-terminal-guarded` and `ir-loop-array-terminal-guarded-lead`;
-every other byte of their text is TypeScript's.
+alternates as TypeScript's, and so do five shared fixtures,
+`ir-loop-array-terminal-guarded`, `ir-loop-array-terminal-guarded-lead`,
+`abnf-2`, `abnf-grammar-arith` and `abnf-grammar-arith-leftrec`; every
+other byte of their text is TypeScript's, the names of the class tokens
+a Go front-end spells otherwise aside.
 
 The repair is the Go port's: keep each set in the order it is filled,
 where the analysis now keeps a map, in FIRST, FOLLOW, FOLLOW₂ and the
 sets read from them. Every pass that reads one moves with it.
 
 Registered by `textDivergent` in `go/oracle_text_test.go`, which fails
-once either fixture's text is TypeScript's.
+once any of the five fixtures' text is TypeScript's.
 
 ### Closure-mode action refs are named `@abnf_a<n>`
 

@@ -1,0 +1,235 @@
+{
+ "name": "abnf-grammar-astral",
+ "ir": {
+  "productions": [
+   {
+    "name": "pair",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "emoji",
+       "sp": {
+        "s": 9,
+        "e": 14,
+        "r": 1,
+        "c": 10
+       }
+      },
+      {
+       "kind": "term",
+       "literal": "!",
+       "sp": {
+        "s": 15,
+        "e": 18,
+        "r": 1,
+        "c": 16
+       }
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "animal",
+       "sp": {
+        "s": 21,
+        "e": 27,
+        "r": 1,
+        "c": 22
+       }
+      },
+      {
+       "kind": "term",
+       "literal": "?",
+       "sp": {
+        "s": 28,
+        "e": 31,
+        "r": 1,
+        "c": 29
+       }
+      }
+     ],
+     [
+      {
+       "kind": "ref",
+       "name": "other",
+       "sp": {
+        "s": 34,
+        "e": 39,
+        "r": 1,
+        "c": 35
+       }
+      },
+      {
+       "kind": "term",
+       "literal": ".",
+       "sp": {
+        "s": 40,
+        "e": 43,
+        "r": 1,
+        "c": 41
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 0,
+     "e": 4,
+     "r": 1,
+     "c": 1
+    }
+   },
+   {
+    "name": "emoji",
+    "alts": [
+     [
+      {
+       "kind": "regex",
+       "pattern": "[\\u{1f600}-\\u{1f64f}]",
+       "flags": "u",
+       "sp": {
+        "s": 53,
+        "e": 66,
+        "r": 2,
+        "c": 10
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 44,
+     "e": 49,
+     "r": 2,
+     "c": 1
+    }
+   },
+   {
+    "name": "animal",
+    "alts": [
+     [
+      {
+       "kind": "regex",
+       "pattern": "[\\u{1f640}-\\u{1f6ff}]",
+       "flags": "u",
+       "sp": {
+        "s": 76,
+        "e": 89,
+        "r": 3,
+        "c": 10
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 67,
+     "e": 73,
+     "r": 3,
+     "c": 1
+    }
+   },
+   {
+    "name": "other",
+    "alts": [
+     [
+      {
+       "kind": "regex",
+       "pattern": "[\\u{80}-\\u{1f5ff}]",
+       "flags": "u",
+       "sp": {
+        "s": 99,
+        "e": 109,
+        "r": 4,
+        "c": 10
+       }
+      }
+     ]
+    ],
+    "sp": {
+     "s": 90,
+     "e": 95,
+     "r": 4,
+     "c": 1
+    }
+   }
+  ]
+ },
+ "opts": {
+  "tag": "abnf"
+ },
+ "pure": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#T\": \"!\",\n        \"#T1\": \"?\",\n        \"#T2\": \".\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#RXA___U_1F600___U_1F63F\": \"@~/^[\\\\u{1F600}-\\\\u{1F63F}]/u\",\n        \"#RXA___U_1F640___U_1F64F\": \"@~/^[\\\\u{1F640}-\\\\u{1F64F}]/u\",\n        \"#RXA___U_1F650___U_1F6FF\": \"@~/^[\\\\u{1F650}-\\\\u{1F6FF}]/u\",\n        \"#RX___U_80___U_1F5FF\": \"@~/^[\\\\u{80}-\\\\u{1f5ff}]/u\"\n      }\n    },\n    \"tokenSet\": {\n      \"RX___U_1F600___U_1F64F\": [\n        \"#RXA___U_1F600___U_1F63F\",\n        \"#RXA___U_1F640___U_1F64F\"\n      ],\n      \"RX___U_1F640___U_1F6FF\": [\n        \"#RXA___U_1F640___U_1F64F\",\n        \"#RXA___U_1F650___U_1F6FF\"\n      ]\n    }\n  },\n  \"rule\": {\n    \"pair\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F600___U_1F64F #T\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"pair\",\n              \"kind\": \"user\",\n              \"nterms\": 2\n            }\n          }\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F640___U_1F6FF #T1\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"pair\",\n              \"kind\": \"user\",\n              \"nterms\": 2\n            }\n          }\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_80___U_1F5FF #T2\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"pair\",\n              \"kind\": \"user\",\n              \"nterms\": 2\n            }\n          }\n        }\n      ]\n    },\n    \"emoji\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F600___U_1F64F\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"emoji\",\n              \"kind\": \"user\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"animal\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F640___U_1F6FF\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"animal\",\n              \"kind\": \"user\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"other\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_80___U_1F5FF\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"other\",\n              \"kind\": \"user\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"pair\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"a\": \"@bubble$\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"pair\"\n    }\n  }\n}",
+ "pureError": null,
+ "recognition": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#T\": \"!\",\n        \"#T1\": \"?\",\n        \"#T2\": \".\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": false\n    },\n    \"match\": {\n      \"token\": {\n        \"#RXA___U_1F600___U_1F63F\": \"@~/^[\\\\u{1F600}-\\\\u{1F63F}]/u\",\n        \"#RXA___U_1F640___U_1F64F\": \"@~/^[\\\\u{1F640}-\\\\u{1F64F}]/u\",\n        \"#RXA___U_1F650___U_1F6FF\": \"@~/^[\\\\u{1F650}-\\\\u{1F6FF}]/u\",\n        \"#RX___U_80___U_1F5FF\": \"@~/^[\\\\u{80}-\\\\u{1f5ff}]/u\"\n      }\n    },\n    \"tokenSet\": {\n      \"RX___U_1F600___U_1F64F\": [\n        \"#RXA___U_1F600___U_1F63F\",\n        \"#RXA___U_1F640___U_1F64F\"\n      ],\n      \"RX___U_1F640___U_1F6FF\": [\n        \"#RXA___U_1F640___U_1F64F\",\n        \"#RXA___U_1F650___U_1F6FF\"\n      ]\n    }\n  },\n  \"rule\": {\n    \"pair\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F600___U_1F64F #T\"\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F640___U_1F6FF #T1\"\n        },\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_80___U_1F5FF #T2\"\n        }\n      ]\n    },\n    \"emoji\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F600___U_1F64F\"\n        }\n      ]\n    },\n    \"animal\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_1F640___U_1F6FF\"\n        }\n      ]\n    },\n    \"other\": {\n      \"open\": [\n        {\n          \"g\": \"abnf\",\n          \"s\": \"#RX___U_80___U_1F5FF\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"pair\",\n          \"g\": \"abnf\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"g\": \"abnf,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"pair\"\n    }\n  }\n}",
+ "recognitionError": null,
+ "cases": [
+  {
+   "source": "😀!",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "😀!",
+    "kids": []
+   }
+  },
+  {
+   "source": "🙀?",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "🙀?",
+    "kids": []
+   }
+  },
+  {
+   "source": "🙀!",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "🙀!",
+    "kids": []
+   }
+  },
+  {
+   "source": "🙐?",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "🙐?",
+    "kids": []
+   }
+  },
+  {
+   "source": "🙐!",
+   "accepted": false,
+   "code": "unexpected"
+  },
+  {
+   "source": "é.",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "é.",
+    "kids": []
+   }
+  },
+  {
+   "source": "ὠ!",
+   "accepted": false,
+   "code": "unexpected"
+  },
+  {
+   "source": "ὠ.",
+   "accepted": true,
+   "value": {
+    "rule": "pair",
+    "src": "ὠ.",
+    "kids": []
+   }
+  },
+  {
+   "source": "0!",
+   "accepted": false,
+   "code": "unexpected"
+  }
+ ],
+ "grammar": "pair   = emoji \"!\" / animal \"?\" / other \".\"\nemoji  = %x1F600-1F64F\nanimal = %x1F640-1F6FF\nother  = %x80-1F5FF\n"
+}

@@ -409,7 +409,11 @@ Serialises a function-free value as jsonic text, or as JSON when
 `strict` is set. A `*tabnas.OrderedMap` is written in its key order and
 a `map[string]any` in a fixed one, so a tree from `ToPureSpec`,
 `ToRecognitionSpec` or `SpecToData` is written in the order the
-TypeScript compiler writes it.
+TypeScript compiler writes it. A match token is written as
+`@/source/flags`, or `@~/source/flags` when it is eager, in JavaScript's
+dialect, as the TypeScript compiler writes it: a code point as `\uHHHH`,
+or as `\u{H}` under `u` when the pattern names one at U+10000 or beyond,
+and the flags the IR gave the class.
 
 ## Helpers
 

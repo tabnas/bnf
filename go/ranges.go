@@ -558,19 +558,29 @@ func partitionRanges(coverages [][]charRange) []charRange {
 	return out
 }
 
-// classPattern is a regex character class matching exactly one span.
-// Used for the atom matchers, whose spans come from classes the grammar
-// already wrote, so the only escaping that matters is making the bounds
-// unambiguous. Go's regexp is always Unicode-aware, so there is no
-// astral special case as there is in the TypeScript port.
+// classPattern is a regex character class matching exactly one span, in
+// RE2's spelling, which the atom matchers are compiled from. Their spans
+// come from classes the grammar already wrote, so the only escaping that
+// matters is making the bounds unambiguous. Go's regexp is always
+// Unicode-aware, so there is no astral special case here.
 func classPattern(lo, hi rune) string {
-	// `\x{%04x}`, matching the escape the ABNF front-end already emits
-	// for a `%x` range on this side, so an atom's token name reads like
-	// every other class token in a Go-emitted spec. (The TypeScript port
-	// spells the same span `\u0030`; the two runtimes have always named
-	// class tokens differently, because their regex dialects differ.)
 	esc := func(cp rune) string {
 		return fmt.Sprintf(`\x{%04x}`, cp)
+	}
+	return "[" + esc(lo) + "-" + esc(hi) + "]"
+}
+
+// jsClassPattern is the same class as the canonical compiler spells it,
+// which is how an atom is named and written: `\uHHHH` for each bound, or
+// `\u{H}` for both when the atom is compiled with `u` (unicode, from
+// atomReadsCodePoints). JavaScript reads `\uHHHH` alone only up to U+FFFF,
+// and a braced escape only under `u`. Mirrors TS classPattern.
+func jsClassPattern(lo, hi rune, unicode bool) string {
+	esc := func(cp rune) string {
+		if unicode {
+			return fmt.Sprintf(`\u{%X}`, cp)
+		}
+		return fmt.Sprintf(`\u%04X`, cp)
 	}
 	return "[" + esc(lo) + "-" + esc(hi) + "]"
 }

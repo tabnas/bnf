@@ -777,17 +777,22 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			}
 			return re
 		}
-		emit := func(n, pattern, flags string) {
-			matchTokens[n] = compile(n, pattern, flags)
+		// js is the matcher as the canonical compiler writes it, which RE2's
+		// regexp cannot give back: its flags, and an atom's spelling.
+		emit := func(n, pattern, flags string, js jsRegex) {
+			re := compile(n, pattern, flags)
+			matchTokens[n] = re
 			matchEager[n] = true
 			matchOrder = append(matchOrder, n)
 			if strings.ContainsAny(flags, "uv") {
 				codePointTokens[n] = true
 			}
+			js.re = re
+			trace.noteRegex(n, js)
 		}
 
 		if classes == nil || !classes.contested[key] {
-			emit(name, el.Pattern, el.Flags)
+			emit(name, el.Pattern, el.Flags, jsRegex{flags: canonicalJSFlags(el.Flags)})
 			return
 		}
 		// Compiled whether or not the partition replaces it, so a pattern
@@ -826,7 +831,17 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			spanKey := fmt.Sprintf("%d-%d", span.lo, span.hi)
 			atom, ok := classes.atomTokens[spanKey]
 			if !ok {
-				pattern := classPattern(span.lo, span.hi)
+				// The flag the canonical compiler compiles the atom with,
+				// which the contest checks read (codeUnitReach); RE2
+				// ignores it.
+				unicode := atomReadsCodePoints(span.lo, span.hi, codePoints)
+				flags := ""
+				if unicode {
+					flags = "u"
+				}
+				// Named and written as the canonical compiler spells it,
+				// and compiled from RE2's spelling of the same span.
+				js := jsClassPattern(span.lo, span.hi, unicode)
 				// `rxa_`, not `rx_`: an atom is synthetic, and a name
 				// minted from `rx_` collides with the natural name of any
 				// class spelling the same span. It did — `%x31-39`'s atom
@@ -834,15 +849,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				// suffixed one and every name derived from it moved, which
 				// is the instability the one-member set below exists to
 				// prevent.
-				atom = allocTokenName("rxa_"+pattern, usedNames, "")
-				// The flag the canonical compiler compiles the atom with,
-				// which the contest checks read (codeUnitReach); RE2
-				// ignores it.
-				flags := ""
-				if atomReadsCodePoints(span.lo, span.hi, codePoints) {
-					flags = "u"
-				}
-				emit(atom, pattern, flags)
+				atom = allocTokenName("rxa_"+js, usedNames, "")
+				emit(atom, classPattern(span.lo, span.hi), flags, jsRegex{source: "^" + js, flags: flags})
 				classes.atomTokens[spanKey] = atom
 			}
 			budget.charge(1)
