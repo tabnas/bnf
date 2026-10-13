@@ -133,7 +133,8 @@ func oracleGrammar(t *testing.T, ir map[string]any) *Grammar {
 		if va, ok := m["value"].(map[string]any); ok {
 			known(va, "kind members")
 			prod.Value = &ValueAnnotation{Kind: str(va, "kind")}
-			for _, member := range va["members"].([]any) {
+			// An array names no members.
+			for _, member := range asSlice(va["members"]) {
 				prod.Value.Members = append(prod.Value.Members, member.(string))
 			}
 		}

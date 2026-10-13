@@ -117,6 +117,9 @@ pure, err := bnf.ToPureSpec(spec)
 ```
 
 `pure` is a `map[string]any` of plain data, ready for `encoding/json`.
+The objects inside it are `*tabnas.OrderedMap`, in the order the
+TypeScript compiler writes them, and `bnf.ToJsonic(pure, true, 0)`
+writes them in that order too.
 Skipping the first step fails loudly rather than emitting something that
 cannot be serialised:
 

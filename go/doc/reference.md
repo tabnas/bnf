@@ -372,6 +372,14 @@ lines.
 JSON text, and the same content as a data tree. Both return an empty
 result on failure.
 
+The tree's root is a `map[string]any`, and every object inside it is a
+`*tabnas.OrderedMap`, which holds its keys in the order the TypeScript
+compiler writes them: the rules in the order the emitter commits them,
+the tokens in the order it allocates them, and each alternate's keys in
+the order it sets them. `ToRecognitionSpec` and `ToPureSpec` return the
+same kind of tree. The match tokens' order is in their keys, and is not
+written as a list of its own.
+
 ### `func SpecToJSONErr(...) (string, error)`
 ### `func SpecToDataErr(...) (map[string]any, error)`
 
@@ -397,7 +405,15 @@ pure-data output. Stray ref(s): @abnf_a0, @abnf_a1
 
 ### `func ToJsonic(value any, strict bool, indent int) string`
 
-Serialises a function-free value as jsonic text.
+Serialises a function-free value as jsonic text, or as JSON when
+`strict` is set. A `*tabnas.OrderedMap` is written in its key order and
+a `map[string]any` in a fixed one, so a tree from `ToPureSpec`,
+`ToRecognitionSpec` or `SpecToData` is written in the order the
+TypeScript compiler writes it. A match token is written as
+`@/source/flags`, or `@~/source/flags` when it is eager, in JavaScript's
+dialect, as the TypeScript compiler writes it: a code point as `\uHHHH`,
+or as `\u{H}` under `u` when the pattern names one at U+10000 or beyond,
+and the flags the IR gave the class.
 
 ## Helpers
 

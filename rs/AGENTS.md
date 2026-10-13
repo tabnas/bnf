@@ -67,8 +67,8 @@ node rs/tests/oracle/generate.cjs corpus rs/tests/oracle      # from the repo ro
 The committed set is the ten notation-corpus cases, the
 `abnf-grammar-*` fixtures made with the `file` mode from abnf's own
 `ts/test/grammar/*.abnf` (the two largest, `json-subset` and
-`rfc3986-uri`, are left out for size), and the hand-written `ir-*` ones
-below. Nothing from the third-party abnf conformance corpus is
+`rfc3986-uri`, are left out for size), `abnf-grammar-astral` from a
+grammar of its own (below), and the hand-written `ir-*` ones below. Nothing from the third-party abnf conformance corpus is
 committed: those grammars are separately licensed and abnf itself never
 vendors them.
 
@@ -114,6 +114,19 @@ that refusal message is graded byte for byte like the emitted text. The
 refusals are shared by all three runtimes: `ts/test/oracle-refusal.test.js`
 holds the canonical compiler to each refusal it recorded, and
 `go/oracle_refusal_test.go` grades the Go port against them the same way.
+`ir-order-keywords-classes` pins the order the canonical compiler writes
+a spec in: keywords and character classes, so fixed and match tokens
+allocated out of name order, in rules committed out of name order (a
+dispatch's chains before the rule). `abnf-grammar-astral` pins classes
+past U+FFFF, written `\u{H}` under `u`: two that overlap, which the
+partition splits into atoms, and one that runs from U+0080 past U+FFFF.
+Its grammar is in its `grammar` field; it was made with the `file` mode,
+its case sources added, and `regen` run. `go/oracle_text_test.go` holds
+the Go port's text to every fixture, byte for byte, as the oracle test
+holds this port's, with an IR that spells a code point in JavaScript's
+escape first spelled as a Go front-end spells it, and the class token
+names that spelling gives mapped back; and it runs `abnf-grammar-astral`'s
+cases on the Go engine against the spec it writes.
 `ir-leftrec-limit` is the cycle of twenty rules that the left-recursion
 expansion limit refuses, and the six `ir-leftrec-elements-*` fixtures are
 the shapes the element limit refuses: the chain of 514 rules (`-chain`), a

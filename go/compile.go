@@ -65,34 +65,43 @@ type CompileOptions struct {
 
 // specToData converts a typed *GrammarSpec (built with builtins:true,
 // so all action/cond fields are `@…$` strings) into a generic nested
-// data tree: map[string]any / []any / scalars / *regexp.Regexp. This is
-// the canonical form the clone/serialise functions operate on.
+// data tree: a map[string]any at the root, *tabnas.OrderedMap for every
+// object inside it, []any / scalars / regexHolder below. This is the
+// canonical form the clone/serialise functions operate on.
+//
+// The objects are ordered as TypeScript writes them (spec_order.go): the
+// rules in RuleOrder, the order the emitter committed them in, the match
+// tokens in TokenOrder, and the fixed tokens, token sets and each
+// alternate's keys in the order the emitter recorded for this spec. What
+// has no recorded order is written in name order, as everything was.
 //
 // Returns the offending rule names if any control closures remain (i.e.
 // a probe dispatcher compiled without builtins) — those have non-string
 // A/C fields.
 func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 	offenders := map[string]bool{}
+	rec := recordOf(spec)
 
 	// The options block carries the WHOLE of the front-end's typed
 	// Options, not just the three keys the converter sets itself. See
 	// options_data.go: a front-end's lexing configuration IS part of the
 	// accepted language, and a spec emitted without it produced a
 	// grammar that parsed differently from a natively installed one.
-	options, err := optionsToData(spec.Options)
+	options, err := optionsToData(spec.Options, rec)
 	if err != nil {
 		return nil, nil, err
 	}
 	// Map-form options fill in under the typed ones, so a spec carrying
 	// both keeps the typed side authoritative.
-	for k, v := range spec.OptionsMap {
-		if _, taken := options[k]; !taken {
-			options[k] = v
+	for _, k := range inOrder(mapKeys(spec.OptionsMap), nil) {
+		if !options.Has(k) {
+			options.Set(k, spec.OptionsMap[k])
 		}
 	}
 
-	rules := map[string]any{}
-	for name, rspec := range spec.Rule {
+	rules := tabnas.NewOrderedMap()
+	for _, name := range inOrder(mapKeys(spec.Rule), spec.RuleOrder) {
+		rspec := spec.Rule[name]
 		// A nil entry is the engine's documented representation of a REMOVAL —
 		// grammarspec.go: "a nil entry removes that rule" — so it must survive
 		// serialisation AS one. TypeScript carries it through as null (its
@@ -101,17 +110,17 @@ func specToData(spec *tabnas.GrammarSpec) (map[string]any, []string, error) {
 		// carried a removal: SpecToDataErr, ToRecognitionSpec and ToPureSpec
 		// alike.
 		if nil == rspec {
-			rules[name] = nil
+			rules.Set(name, nil)
 			continue
 		}
-		rm := map[string]any{}
+		rm := tabnas.NewOrderedMap()
 		if rspec.Open != nil {
-			rm["open"] = altsToData(rspec.Open, name, offenders)
+			rm.Set("open", altsToData(rspec.Open, name, offenders, rec))
 		}
 		if rspec.Close != nil {
-			rm["close"] = altsToData(rspec.Close, name, offenders)
+			rm.Set("close", altsToData(rspec.Close, name, offenders, rec))
 		}
-		rules[name] = rm
+		rules.Set(name, rm)
 	}
 
 	data := map[string]any{"options": options, "rule": rules}
@@ -168,19 +177,56 @@ func carryMeta(from *tabnas.GrammarSpec, to map[string]any) {
 	if err := json.Unmarshal(raw, &norm); err != nil {
 		return
 	}
-	if m, ok := cloneData(norm).(map[string]any); ok {
-		to["meta"] = m
+	// Ordered as TypeScript writes it: the provenance the emitter makes
+	// first, its names sorted as JavaScript sorts them (the emitter's own
+	// order), then anything else a caller keeps in meta, in name order.
+	meta := tabnas.NewOrderedMap()
+	for _, k := range inOrder(mapKeys(norm), []string{"provenance"}) {
+		v := cloneData(norm[k])
+		if pm, ok := norm[k].(map[string]any); ok && k == "provenance" {
+			names := mapKeys(pm)
+			sort.Slice(names, func(i, j int) bool { return jsLess(names[i], names[j]) })
+			prov := tabnas.NewOrderedMap()
+			for _, n := range names {
+				prov.Set(n, cloneData(pm[n]))
+			}
+			v = prov
+		}
+		meta.Set(k, v)
 	}
+	to["meta"] = meta
 }
 
-// regexHolder wraps a regexp with its eager flag for serialisation.
+// regexHolder wraps a match token's regexp for serialisation, with its
+// eager flag and, where the emitter recorded it, the matcher as the
+// canonical compiler writes it.
 type regexHolder struct {
 	re    *regexp.Regexp
 	eager bool
+	js    *jsRegex
 }
 
-// SpecToData converts a *GrammarSpec into a plain data tree
-// (map/slice/scalar/regexHolder). Action/condition refs are emitted as
+// jsRegex is a match token's matcher as the canonical compiler writes it,
+// in JavaScript's dialect: its source, and its flags in the order
+// JavaScript reports them. RE2 compiles a class from its own spelling of
+// a code point (`\x{1F600}`) and keeps no flag but `i`, so the compiled
+// regexp gives back neither. Dropping `u` changes what JavaScript matches:
+// without it a negated class takes half of an astral character, and a
+// braced escape is not an escape at all.
+type jsRegex struct {
+	// re is the compiled matcher the record describes. A matcher put in
+	// its place after the emit is written from its own source instead.
+	re *regexp.Regexp
+	// source is the whole source TypeScript writes, `^` included, or ""
+	// when it is the compiled one's, respelled (jsRegexSource).
+	source string
+	flags  string
+}
+
+// SpecToData converts a *GrammarSpec into a plain data tree: a
+// map[string]any at the root, *tabnas.OrderedMap for every object inside
+// it (in the order TypeScript writes it; see spec_order.go), and
+// []any / scalars / regexHolder below. Action/condition refs are emitted as
 // their `@`-name strings. Closures in spec.Ref are dropped — like the TS
 // CLI's JSON output, which serialises actions as FuncRef strings. Used by
 // the CLI's default (spec-dump) mode.
@@ -235,19 +281,26 @@ func SpecToJSONErr(spec *tabnas.GrammarSpec, indent int) (string, error) {
 	return ToJsonic(data, true, indent), nil
 }
 
-func altsToData(alts any, rule string, offenders map[string]bool) []any {
+func altsToData(alts any, rule string, offenders map[string]bool, rec *specRecord) []any {
 	gas, ok := alts.([]*tabnas.GrammarAltSpec)
 	if !ok {
 		return []any{}
 	}
 	out := make([]any, 0, len(gas))
 	for _, ga := range gas {
-		out = append(out, altToData(ga, rule, offenders))
+		var keys []string
+		if rec != nil {
+			keys = rec.alts[ga]
+		}
+		out = append(out, altToData(ga, rule, offenders, keys))
 	}
 	return out
 }
 
-func altToData(ga *tabnas.GrammarAltSpec, rule string, offenders map[string]bool) map[string]any {
+// altToData writes one alternate, its keys in the order given (the order
+// the emitter set them in), and any it does not name in the order an
+// alternate was always written in.
+func altToData(ga *tabnas.GrammarAltSpec, rule string, offenders map[string]bool, keys []string) *tabnas.OrderedMap {
 	m := map[string]any{}
 	if ga.S != nil {
 		m["s"] = ga.S
@@ -290,18 +343,30 @@ func altToData(ga *tabnas.GrammarAltSpec, rule string, offenders map[string]bool
 			// A non-ref-field string ref signals a control function.
 			m["c"] = c
 		case map[string]any:
-			m["c"] = c
+			m["c"] = orderedCopy(c, nil)
 		default:
 			offenders[rule] = true
 		}
 	}
 	if ga.K != nil {
-		m["k"] = copyAnyMap(ga.K)
+		k := tabnas.NewOrderedMap()
+		for _, name := range inOrder(mapKeys(ga.K), nil) {
+			v := ga.K[name]
+			// An engine builtin's config, in the order TypeScript's
+			// emitter builds it in.
+			if cfg, ok := v.(map[string]any); ok {
+				if order, known := builtinConfigOrder[name]; known {
+					v = orderedCopy(cfg, order)
+				}
+			}
+			k.Set(name, v)
+		}
+		m["k"] = k
 	}
 	if ga.N != nil {
-		nm := map[string]any{}
-		for k, v := range ga.N {
-			nm[k] = v
+		nm := tabnas.NewOrderedMap()
+		for _, k := range inOrder(mapKeys(ga.N), nil) {
+			nm.Set(k, ga.N[k])
 		}
 		m["n"] = nm
 	}
@@ -317,13 +382,31 @@ func altToData(ga *tabnas.GrammarAltSpec, rule string, offenders map[string]bool
 		um := copyAnyMap(ga.U)
 		delete(um, "m$")
 		if len(um) > 0 {
-			m["u"] = um
+			m["u"] = orderedCopy(um, nil)
 		}
 	}
 	if ga.G != "" {
 		m["g"] = ga.G
 	}
-	return m
+	out := tabnas.NewOrderedMap()
+	first := keys
+	if first == nil {
+		first = legacyAltOrder
+	}
+	for _, k := range inOrder(mapKeys(m), first) {
+		out.Set(k, m[k])
+	}
+	return out
+}
+
+// orderedCopy copies a map as an ordered object, the keys in first first,
+// then the rest in name order. The values are shared.
+func orderedCopy(m map[string]any, first []string) *tabnas.OrderedMap {
+	out := tabnas.NewOrderedMap()
+	for _, k := range inOrder(mapKeys(m), first) {
+		out.Set(k, m[k])
+	}
+	return out
 }
 
 func copyAnyMap(m map[string]any) map[string]any {
@@ -341,9 +424,16 @@ func copyAnyMap(m map[string]any) map[string]any {
 // structurally. In builtins mode the probe phase guards are
 // `@probePhase0$` etc. — engine builtins, NOT refs into spec.Ref — and
 // so are not offenders. Mirrors the TS controlRefRules (compile.ts).
-func controlRefRules(rules map[string]any, isRef func(string) bool) []string {
+func controlRefRules(rules any, isRef func(string) bool) []string {
 	offenders := map[string]bool{}
 	var scan func(v any, rule string)
+	field := func(k string, val any, rule string) {
+		if s, ok := val.(string); ok && !refFields[k] && isRef(s) {
+			offenders[rule] = true
+		} else {
+			scan(val, rule)
+		}
+	}
 	scan = func(v any, rule string) {
 		switch x := v.(type) {
 		case []any:
@@ -352,16 +442,23 @@ func controlRefRules(rules map[string]any, isRef func(string) bool) []string {
 			}
 		case map[string]any:
 			for k, val := range x {
-				if s, ok := val.(string); ok && !refFields[k] && isRef(s) {
-					offenders[rule] = true
-				} else {
-					scan(val, rule)
-				}
+				field(k, val, rule)
+			}
+		case *tabnas.OrderedMap:
+			for _, k := range x.Keys {
+				field(k, x.Vals[k], rule)
 			}
 		}
 	}
-	for name, rd := range rules {
-		scan(rd, name)
+	switch x := rules.(type) {
+	case map[string]any:
+		for name, rd := range x {
+			scan(rd, name)
+		}
+	case *tabnas.OrderedMap:
+		for _, name := range x.Keys {
+			scan(x.Vals[name], name)
+		}
 	}
 	out := make([]string, 0, len(offenders))
 	for r := range offenders {
@@ -378,7 +475,8 @@ func controlRefRules(rules map[string]any, isRef func(string) bool) []string {
 // BUILTIN_SCHEMA_VERSION. It is the Go counterpart of the TS
 // `toRecognitionSpec` export (ts/src/compile.ts); where TS returns a
 // GrammarSpec object, Go returns the generic pure-data tree
-// (map[string]any / []any / scalars — see SpecToData / ToJsonic).
+// (a map[string]any root whose objects are *tabnas.OrderedMap, in
+// TypeScript's order; []any / scalars — see SpecToData / ToJsonic).
 //
 // Grammars whose control logic is still closures (a probe dispatcher
 // converted without `Builtins: true`) cannot be emitted as pure
@@ -397,9 +495,7 @@ func ToRecognitionSpec(spec *tabnas.GrammarSpec) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if rules, ok := data["rule"].(map[string]any); ok {
-		offenders = mergeSortedRules(offenders, controlRefRules(rules, isRef))
-	}
+	offenders = mergeSortedRules(offenders, controlRefRules(data["rule"], isRef))
 	if len(offenders) > 0 {
 		return nil, &CompileError{
 			Message: diagName() + ": grammar needs control functions (probe / unbounded " +
@@ -442,7 +538,8 @@ func mergeSortedRules(a, b []string) []string {
 // BUILTIN_SCHEMA_VERSION. It is the Go counterpart of the TS
 // `toPureSpec` export (ts/src/compile.ts); where TS returns a
 // GrammarSpec object, Go returns the generic pure-data tree
-// (map[string]any / []any / scalars — see SpecToData / ToJsonic).
+// (a map[string]any root whose objects are *tabnas.OrderedMap, in
+// TypeScript's order; []any / scalars — see SpecToData / ToJsonic).
 //
 // Requires a `Builtins: true` conversion: if any closures remain in
 // spec.Ref it returns a *CompileError, matching the TS throw.
@@ -486,6 +583,12 @@ func cloneData(v any) any {
 	switch x := v.(type) {
 	case regexHolder:
 		return x
+	case *tabnas.OrderedMap:
+		o := tabnas.NewOrderedMap()
+		for _, k := range x.Keys {
+			o.Set(k, cloneData(x.Vals[k]))
+		}
+		return o
 	case map[string]any:
 		o := map[string]any{}
 		for k, val := range x {
@@ -529,49 +632,17 @@ func cloneRecognitionVal(v any, isDropped func(string) bool) any {
 	case map[string]any:
 		o := map[string]any{}
 		for k, val := range x {
-			if refFields[k] {
-				if s, ok := val.(string); ok && isDropped(s) {
-					continue
-				}
-				// Array-`a` composition: filter the dropped actions out of
-				// the list rather than keeping the whole list because it is
-				// not a string. Only checking the scalar case let every
-				// composed action through — the value builders are emitted
-				// that way (`a: ["@object$","@key$"]`), so a
-				// "recognition-only" spec still built values.
-				if list, ok := val.([]any); ok {
-					kept := []any{}
-					for _, e := range list {
-						if es, isStr := e.(string); isStr && isDropped(es) {
-							continue
-						}
-						kept = append(kept, e)
-					}
-					if len(kept) == 0 {
-						continue
-					}
-					if len(kept) == 1 {
-						o[k] = kept[0]
-					} else {
-						o[k] = kept
-					}
-					continue
-				}
+			if kept, keep := cloneRecognitionField(k, val, isDropped); keep {
+				o[k] = kept
 			}
-			if k == "k" {
-				if km, ok := val.(map[string]any); ok {
-					kc := cloneRecognitionVal(km, isDropped).(map[string]any)
-					for _, tk := range treeConfigKeys {
-						delete(kc, tk)
-					}
-					if len(kc) == 0 {
-						continue
-					}
-					o[k] = kc
-					continue
-				}
+		}
+		return o
+	case *tabnas.OrderedMap:
+		o := tabnas.NewOrderedMap()
+		for _, k := range x.Keys {
+			if kept, keep := cloneRecognitionField(k, x.Vals[k], isDropped); keep {
+				o.Set(k, kept)
 			}
-			o[k] = cloneRecognitionVal(val, isDropped)
 		}
 		return o
 	default:
@@ -579,11 +650,74 @@ func cloneRecognitionVal(v any, isDropped func(string) bool) any {
 	}
 }
 
+// cloneRecognitionField is one key of an object as recognition keeps it,
+// and whether it keeps the key at all.
+func cloneRecognitionField(k string, val any, isDropped func(string) bool) (any, bool) {
+	if refFields[k] {
+		if s, ok := val.(string); ok && isDropped(s) {
+			return nil, false
+		}
+		// Array-`a` composition: filter the dropped actions out of
+		// the list rather than keeping the whole list because it is
+		// not a string. Only checking the scalar case let every
+		// composed action through — the value builders are emitted
+		// that way (`a: ["@object$","@key$"]`), so a
+		// "recognition-only" spec still built values.
+		if list, ok := val.([]any); ok {
+			kept := []any{}
+			for _, e := range list {
+				if es, isStr := e.(string); isStr && isDropped(es) {
+					continue
+				}
+				kept = append(kept, e)
+			}
+			if len(kept) == 0 {
+				return nil, false
+			}
+			if len(kept) == 1 {
+				return kept[0], true
+			}
+			return kept, true
+		}
+	}
+	if k == "k" {
+		var kc any
+		switch km := val.(type) {
+		case map[string]any:
+			c := cloneRecognitionVal(km, isDropped).(map[string]any)
+			for _, tk := range treeConfigKeys {
+				delete(c, tk)
+			}
+			if len(c) == 0 {
+				return nil, false
+			}
+			kc = c
+		case *tabnas.OrderedMap:
+			c := cloneRecognitionVal(km, isDropped).(*tabnas.OrderedMap)
+			for _, tk := range treeConfigKeys {
+				c.Delete(tk)
+			}
+			if c.Len() == 0 {
+				return nil, false
+			}
+			kc = c
+		}
+		if kc != nil {
+			return kc, true
+		}
+	}
+	return cloneRecognitionVal(val, isDropped), true
+}
+
 // ---- jsonic serialisation ------------------------------------------
 
 var identRe = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
 
-// ToJsonic serialises a (function-free) data value as jsonic text.
+// ToJsonic serialises a (function-free) data value as jsonic text. A
+// *tabnas.OrderedMap is written in its own key order, which for a tree
+// the serialisers here build is the order TypeScript writes the spec in,
+// so the text is TypeScript's; a map[string]any has no order, and is
+// written in a canonical one (sortedMapKeys).
 func ToJsonic(value any, strict bool, indent int) string {
 	if indent == 0 {
 		indent = 2
@@ -652,7 +786,8 @@ func ToJsonic(value any, strict bool, indent int) string {
 			if x.eager {
 				sentinel = "@~/"
 			}
-			return str(sentinel + jsRegexSource(x.re) + "/" + jsRegexFlags(x.re))
+			source, flags := jsMatcher(x)
+			return str(sentinel + source + "/" + flags)
 		case bool:
 			if x {
 				return "true"
@@ -676,6 +811,17 @@ func ToJsonic(value any, strict bool, indent int) string {
 		case [][]int:
 			// S field can arrive typed; convert to a string list form.
 			return ser(tinMatrixToAny(x), depth)
+		case *tabnas.OrderedMap:
+			// Written in its own order: the order TypeScript writes the
+			// object in, which the serialisers built it in.
+			if len(x.Keys) == 0 {
+				return "{}"
+			}
+			items := make([]string, len(x.Keys))
+			for i, k := range x.Keys {
+				items[i] = pad(depth+1) + key(k) + ": " + ser(x.Vals[k], depth+1)
+			}
+			return "{\n" + strings.Join(items, sep) + "\n" + pad(depth) + "}"
 		case map[string]any:
 			keys := sortedMapKeys(x)
 			if len(keys) == 0 {
@@ -695,9 +841,12 @@ func ToJsonic(value any, strict bool, indent int) string {
 
 func tinMatrixToAny(_ [][]int) any { return nil }
 
-// sortedMapKeys returns map keys in a stable order. The converter emits
-// alts as maps; jsonic key order only affects formatting, not meaning.
-// Use the canonical field order where recognised, else alpha.
+// sortedMapKeys returns a plain map's keys in a stable order: the
+// canonical field order where recognised, else alpha. The objects the
+// serialisers here build are ordered (*tabnas.OrderedMap); a plain map
+// is what they carry over as it came (map-form options, meta beyond its
+// provenance, a builtin's config they do not know) or what a caller
+// hands ToJsonic.
 var fieldOrder = map[string]int{
 	"options": 0, "rule": 1, "v": 2,
 	"fixed": 0, "match": 1, "token": 0, "start": 0,
@@ -727,34 +876,119 @@ func sortedMapKeys(m map[string]any) []string {
 	return keys
 }
 
-// jsRegexSource returns a JS-flavoured source for the Go regex (strips
-// the leading (?i) flag group and anchor as needed). The converter's
-// match-token regexes are `(?i)^…` or `^[\x{..}-\x{..}]`.
-func jsRegexSource(re *regexp.Regexp) string {
-	s := re.String()
-	s = strings.TrimPrefix(s, "(?i)")
-	// Keep the anchor; TS emitted `^` + pattern too.
-	// Translate Go \x{HHHH} back to JS \uHHHH where 4 hex digits.
-	s = goHexToJsUnicode(s)
-	return s
-}
-
-func jsRegexFlags(re *regexp.Regexp) string {
-	if strings.HasPrefix(re.String(), "(?i)") {
-		return "i"
-	}
-	return ""
-}
-
-var goHexRe = regexp.MustCompile(`\\x\{([0-9a-fA-F]+)\}`)
-
-func goHexToJsUnicode(s string) string {
-	return goHexRe.ReplaceAllStringFunc(s, func(m string) string {
-		sub := goHexRe.FindStringSubmatch(m)
-		h := sub[1]
-		for len(h) < 4 {
-			h = "0" + h
+// jsMatcher is the source and the flags a match token is written with:
+// what the emitter recorded, or else the compiled regexp's own, respelled.
+// A braced escape is read as one only under `u`, so a respelled source
+// that has one carries the flag whatever the regexp was compiled with.
+func jsMatcher(x regexHolder) (string, string) {
+	if x.js != nil && x.js.re == x.re {
+		source, flags := x.js.source, x.js.flags
+		if source == "" {
+			var braced bool
+			source, braced = jsRegexSource(x.re)
+			if braced && !strings.ContainsAny(flags, "uv") {
+				flags = canonicalJSFlags(flags + "u")
+			}
 		}
-		return "\\u" + h
-	})
+		return source, flags
+	}
+	source, braced := jsRegexSource(x.re)
+	flags := ""
+	if strings.HasPrefix(x.re.String(), "(?i)") {
+		flags = "i"
+	}
+	if braced {
+		flags = canonicalJSFlags(flags + "u")
+	}
+	return source, flags
+}
+
+// jsRegexSource is a compiled regexp's source as JavaScript reads it:
+// without the `(?i)` group the `i` flag stands for, and with each of RE2's
+// code point escapes, `\x{…}`, spelled as JavaScript spells it. A source
+// that names a code point past U+FFFF spells every one in braces,
+// `\u{1F600}`, which JavaScript reads only under `u`, and reports that it
+// did; any other is `\uHHHH`, read alike with `u` and without. `\uHHHH`
+// cannot reach past U+FFFF: JavaScript reads `\u1F600` as U+1F60 and a
+// `0`. Switching a whole source to braces is how the canonical compiler's
+// class atoms are spelled, and the front-ends' classes but GBNF's, which
+// switch a code point at a time.
+func jsRegexSource(re *regexp.Regexp) (string, bool) {
+	return jsCodePoints(strings.TrimPrefix(re.String(), "(?i)"))
+}
+
+// jsCodePoints respells the `\x{…}` escapes of an RE2 source as
+// JavaScript's, as jsRegexSource describes, and reports whether it wrote
+// them in braces. Any other escape is copied as it is, the escaped
+// character with it, so `\\x{41}` stays a backslash and `x{41}`.
+func jsCodePoints(s string) (string, bool) {
+	type escape struct {
+		start, end int
+		hex        string
+	}
+	var escapes []escape
+	astral := false
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			continue
+		}
+		if s[i+1] == 'x' && i+2 < len(s) && s[i+2] == '{' {
+			if j := strings.IndexByte(s[i+3:], '}'); j > 0 && isHexDigits(s[i+3:i+3+j]) {
+				hex := strings.TrimLeft(s[i+3:i+3+j], "0")
+				if hex == "" {
+					hex = "0"
+				}
+				if len(hex) > 4 {
+					astral = true
+				}
+				escapes = append(escapes, escape{i, i + 4 + j, hex})
+				i += 3 + j
+				continue
+			}
+		}
+		i++
+	}
+	if len(escapes) == 0 {
+		return s, false
+	}
+	var b strings.Builder
+	last := 0
+	for _, e := range escapes {
+		b.WriteString(s[last:e.start])
+		if astral {
+			b.WriteString(`\u{` + e.hex + `}`)
+		} else {
+			b.WriteString(`\u` + strings.Repeat("0", 4-len(e.hex)) + e.hex)
+		}
+		last = e.end
+	}
+	b.WriteString(s[last:])
+	return b.String(), astral
+}
+
+func isHexDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// jsFlagOrder is the order JavaScript reports a RegExp's flags in, which
+// is the order the canonical compiler writes them in.
+const jsFlagOrder = "dgimsuvy"
+
+// canonicalJSFlags is flags in JavaScript's order, each once. A letter
+// that is not a JavaScript flag is left out, as it always was here; the
+// canonical compiler refuses the IR that carries one.
+func canonicalJSFlags(flags string) string {
+	var b []byte
+	for i := 0; i < len(jsFlagOrder); i++ {
+		if strings.IndexByte(flags, jsFlagOrder[i]) >= 0 {
+			b = append(b, jsFlagOrder[i])
+		}
+	}
+	return string(b)
 }

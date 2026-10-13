@@ -529,6 +529,10 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	// doc/differences.md.
 	emitMu.Lock()
 	defer emitMu.Unlock()
+	// What this emit records of the order it writes in, under the same
+	// lock (spec_order.go).
+	trace = newEmitTrace()
+	defer func() { trace = nil }()
 
 	// A grammar this compiler cannot compile is INVALID USER INPUT, and the
 	// contract for that in a Go library is an error return. TS throws a
@@ -719,6 +723,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		}
 		if isEffectivelyCaseSensitive(el) && boundary == "" {
 			lit := el.Literal
+			trace.noteFixed(name)
 			fixedTokens[name] = &lit
 		} else {
 			flags := "(?i)"
@@ -772,17 +777,22 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			}
 			return re
 		}
-		emit := func(n, pattern, flags string) {
-			matchTokens[n] = compile(n, pattern, flags)
+		// js is the matcher as the canonical compiler writes it, which RE2's
+		// regexp cannot give back: its flags, and an atom's spelling.
+		emit := func(n, pattern, flags string, js jsRegex) {
+			re := compile(n, pattern, flags)
+			matchTokens[n] = re
 			matchEager[n] = true
 			matchOrder = append(matchOrder, n)
 			if strings.ContainsAny(flags, "uv") {
 				codePointTokens[n] = true
 			}
+			js.re = re
+			trace.noteRegex(n, js)
 		}
 
 		if classes == nil || !classes.contested[key] {
-			emit(name, el.Pattern, el.Flags)
+			emit(name, el.Pattern, el.Flags, jsRegex{flags: canonicalJSFlags(el.Flags)})
 			return
 		}
 		// Compiled whether or not the partition replaces it, so a pattern
@@ -821,7 +831,17 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 			spanKey := fmt.Sprintf("%d-%d", span.lo, span.hi)
 			atom, ok := classes.atomTokens[spanKey]
 			if !ok {
-				pattern := classPattern(span.lo, span.hi)
+				// The flag the canonical compiler compiles the atom with,
+				// which the contest checks read (codeUnitReach); RE2
+				// ignores it.
+				unicode := atomReadsCodePoints(span.lo, span.hi, codePoints)
+				flags := ""
+				if unicode {
+					flags = "u"
+				}
+				// Named and written as the canonical compiler spells it,
+				// and compiled from RE2's spelling of the same span.
+				js := jsClassPattern(span.lo, span.hi, unicode)
 				// `rxa_`, not `rx_`: an atom is synthetic, and a name
 				// minted from `rx_` collides with the natural name of any
 				// class spelling the same span. It did — `%x31-39`'s atom
@@ -829,15 +849,8 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				// suffixed one and every name derived from it moved, which
 				// is the instability the one-member set below exists to
 				// prevent.
-				atom = allocTokenName("rxa_"+pattern, usedNames, "")
-				// The flag the canonical compiler compiles the atom with,
-				// which the contest checks read (codeUnitReach); RE2
-				// ignores it.
-				flags := ""
-				if atomReadsCodePoints(span.lo, span.hi, codePoints) {
-					flags = "u"
-				}
-				emit(atom, pattern, flags)
+				atom = allocTokenName("rxa_"+js, usedNames, "")
+				emit(atom, classPattern(span.lo, span.hi), flags, jsRegex{source: "^" + js, flags: flags})
 				classes.atomTokens[spanKey] = atom
 			}
 			budget.charge(1)
@@ -860,6 +873,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		// found by both — a `#`-keyed set is invisible to this engine,
 		// which resolved the name to nothing and left every alternate
 		// keyed on the class unmatchable.
+		trace.noteSet(strings.TrimPrefix(name, "#"))
 		tokenSets[strings.TrimPrefix(name, "#")] = members
 		setRanges[name] = codeUnitReach(mine, el.Flags)
 	}
@@ -949,6 +963,7 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 				members = append(members, tok)
 			}
 		}
+		trace.noteSet(strings.TrimPrefix(name, "#"))
 		tokenSets[strings.TrimPrefix(name, "#")] = members
 		cc.classSets[prod.Name] = name
 		cc.classMembers[name] = members
@@ -1063,14 +1078,14 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 	if prov != nil {
 		prov[startWrapper] = start
 	}
-	bubbleClose := refs.bubble()
-	bubbleClose["s"] = "#ZZ"
+	bubbleClose := altOf("s", "#ZZ")
+	merge(bubbleClose, refs.bubble())
 	// End of source: the one anchor every grammar has, and the last
 	// resort for a parse that cannot resynchronise anywhere else.
-	bubbleClose["g"] = syncG(tag, "end")
+	setKey(bubbleClose, "g", syncG(tag, "end"))
 	budget.begin(ruleSubject(start), start, nil, emitStepAlternates)
 	commitRule(ruleSpec, startWrapper, &tabnas.GrammarRuleSpec{
-		Open:  []*tabnas.GrammarAltSpec{mapToAlt(map[string]any{"p": start, "g": tag})},
+		Open:  []*tabnas.GrammarAltSpec{mapToAlt(altOf("p", start, "g", tag))},
 		Close: []*tabnas.GrammarAltSpec{mapToAlt(bubbleClose)},
 	}, budget, 0)
 
@@ -1133,11 +1148,17 @@ func emitGrammarSpec(grammar *Grammar, opts *ConvertOptions) (spec *tabnas.Gramm
 		budget.begin(removalSubject(len(removeNames)), "", nil, emitStepRemove)
 		for _, name := range removeNames {
 			budget.charge(1)
+			trace.noteRule(name)
 			ruleSpec[name] = nil
 			budget.charge(1)
+			if _, ok := fixedTokens["#"+name]; !ok {
+				trace.noteFixed("#" + name)
+			}
 			fixedTokens["#"+name] = nil
 		}
 	}
+	// The order of what the spec holds, for its serialisers.
+	trace.finish(spec)
 	return spec, nil
 }
 
@@ -1251,7 +1272,7 @@ func (rr *refRegistry) registerAction(fn tabnas.AltAction) tabnas.FuncRef {
 // node returns alt-spec fields for tree-node init/accumulate.
 func (rr *refRegistry) node(cfg map[string]any) map[string]any {
 	if rr.useBuiltins {
-		return map[string]any{"a": "@node$", "k": map[string]any{"node$": cfg}}
+		return altOf("a", "@node$", "k", map[string]any{"node$": cfg})
 	}
 	init, _ := cfg["init"].(bool)
 	rule, _ := cfg["rule"].(string)
@@ -1272,13 +1293,13 @@ func (rr *refRegistry) node(cfg map[string]any) map[string]any {
 			acc.append(n, r.O[i].Src)
 		}
 	})
-	return map[string]any{"a": string(ref)}
+	return altOf("a", string(ref))
 }
 
 // capture returns alt-spec fields for merging a returned child node.
 func (rr *refRegistry) capture(cfg map[string]any) map[string]any {
 	if rr.useBuiltins {
-		return map[string]any{"a": "@capture$", "k": map[string]any{"capture$": cfg}}
+		return altOf("a", "@capture$", "k", map[string]any{"capture$": cfg})
 	}
 	rule, _ := cfg["rule"].(string)
 	kind, _ := cfg["kind"].(string)
@@ -1314,20 +1335,20 @@ func (rr *refRegistry) capture(cfg map[string]any) map[string]any {
 			n["kids"] = append(asAnyKids(n["kids"]), ck...)
 		}
 	})
-	return map[string]any{"a": string(ref)}
+	return altOf("a", string(ref))
 }
 
 // bubble returns alt-spec fields that lift the committed child's node.
 func (rr *refRegistry) bubble() map[string]any {
 	if rr.useBuiltins {
-		return map[string]any{"a": "@bubble$"}
+		return altOf("a", "@bubble$")
 	}
 	ref := rr.registerAction(func(r *tabnas.Rule, _ *tabnas.Context) {
 		if r.Child != nil && r.Child.Node != tabnas.Undefined {
 			r.Node = r.Child.Node
 		}
 	})
-	return map[string]any{"a": string(ref)}
+	return altOf("a", string(ref))
 }
 
 // fold returns alt-spec fields for a tail-repeat iteration delivering
@@ -1340,7 +1361,7 @@ func (rr *refRegistry) fold(cN int) map[string]any {
 		if cN > 0 {
 			cfg["cN"] = cN
 		}
-		return map[string]any{"a": "@fold$", "k": map[string]any{"fold$": cfg}}
+		return altOf("a", "@fold$", "k", map[string]any{"fold$": cfg})
 	}
 	ref := rr.registerAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 		if r.Parent == nil {
@@ -1372,7 +1393,7 @@ func (rr *refRegistry) fold(cN int) map[string]any {
 		}
 		r.Node = tabnas.Undefined
 	})
-	return map[string]any{"a": string(ref)}
+	return altOf("a", string(ref))
 }
 
 // ---- src accumulation ----------------------------------------------
@@ -1531,12 +1552,12 @@ func buildMarks(alts []Sequence, literals, regexTokens map[string]string) *markT
 // ---- segmentToAlt --------------------------------------------------
 
 func segmentToAlt(seg segment, tag string, refs *refRegistry, initNode bool, ruleName, nodeKind string) map[string]any {
-	spec := map[string]any{"g": tag}
+	spec := altOf("g", tag)
 	if len(seg.terms) > 0 {
-		spec["s"] = strings.Join(seg.terms, " ")
+		setKey(spec, "s", strings.Join(seg.terms, " "))
 	}
 	if seg.ref != "" {
-		spec["p"] = seg.ref
+		setKey(spec, "p", seg.ref)
 	}
 	// Suffix-debt bookkeeping rides on the alt that does the push, so the
 	// child inherits the updated counter: the engine applies `n` before it
@@ -1546,7 +1567,7 @@ func segmentToAlt(seg segment, tag string, refs *refRegistry, initNode bool, rul
 		for k, v := range seg.debt {
 			n[k] = v
 		}
-		spec["n"] = n
+		setKey(spec, "n", n)
 	}
 	nterms := len(seg.terms)
 	if nterms > 0 || initNode {
@@ -1590,33 +1611,27 @@ func emitTailRepeat(prod *Production, literals, regexTokens map[string]string,
 
 	open := segmentToAlt(prefixSeg, tag, refs, true, prod.Name, prodKind)
 	if marks != nil {
-		open["m"] = marks.byIndex[0]
+		setKey(open, "m", marks.byIndex[0])
 	}
 
-	repeat := map[string]any{
-		"s": strings.Join(sepSeg.terms, " "),
-		"r": prod.Name,
-		// The separator continuation of a repetition — the `,` of a comma
-		// list, whatever the grammar spells it as. Recovering here drops one
-		// bad item and keeps the rest of the list, which is the single most
-		// useful resync point a list grammar has. Only the separator's FIRST
-		// token becomes the sync point; a multi-token separator syncs on its
-		// leading token.
-		"g": syncG(tag, "comma"),
-	}
-	for k, v := range refs.fold(len(sepSeg.terms)) {
-		repeat[k] = v
-	}
+	repeat := altOf("s", strings.Join(sepSeg.terms, " "), "r", prod.Name)
+	merge(repeat, refs.fold(len(sepSeg.terms)))
+	// The separator continuation of a repetition — the `,` of a comma
+	// list, whatever the grammar spells it as. Recovering here drops one
+	// bad item and keeps the rest of the list, which is the single most
+	// useful resync point a list grammar has. Only the separator's FIRST
+	// token becomes the sync point; a multi-token separator syncs on its
+	// leading token.
+	setKey(repeat, "g", syncG(tag, "comma"))
 	if marks != nil {
-		repeat["m"] = marks.byIndex[1]
+		setKey(repeat, "m", marks.byIndex[1])
 	}
 
-	end := map[string]any{"g": tag}
-	for k, v := range refs.fold(0) {
-		end[k] = v
-	}
+	end := altOf()
+	merge(end, refs.fold(0))
+	setKey(end, "g", tag)
 	if marks != nil {
-		end["m"] = "_"
+		setKey(end, "m", "_")
 	}
 
 	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
@@ -1784,25 +1799,33 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	for _, t := range prod.DebtOwed {
 		owed[t] = true
 	}
-	debtGuard := func(o map[string]any) map[string]any {
+	// Applied once every entry is made, as TypeScript's applyDebtGuard is:
+	// to the entries that continue (they carry the alternative they came
+	// from), so a peek copied from one is guarded as it is, and the guard
+	// is the last key each entry gets.
+	applyDebtGuard := func(list []dispatchEntry) {
 		if prod.DebtGuard == "" || len(owed) == 0 {
-			return o
+			return
 		}
-		// Entries are keyed by the token sequence they peek, so the head token
-		// says which branch this is. A continue alternative always names one;
-		// if it somehow does not, guard it — that is the direction that keeps
-		// the loop from starving its parent.
-		if s, ok := o["s"].(string); ok {
-			head := s
-			if i := strings.IndexByte(s, ' '); i >= 0 {
-				head = s[:i]
+		for _, e := range list {
+			if len(e.alt) == 0 {
+				continue
 			}
-			if !owed[head] {
-				return o
+			// Entries are keyed by the token sequence they peek, so the head
+			// token says which branch this is. A continue alternative always
+			// names one; if it somehow does not, guard it — that is the
+			// direction that keeps the loop from starving its parent.
+			if s, ok := e.o["s"].(string); ok {
+				head := s
+				if i := strings.IndexByte(s, ' '); i >= 0 {
+					head = s[:i]
+				}
+				if !owed[head] {
+					continue
+				}
 			}
+			setKey(e.o, "c", map[string]any{"n." + prod.DebtGuard: 0})
 		}
-		o["c"] = map[string]any{"n." + prod.DebtGuard: 0}
-		return o
 	}
 
 	if prod.TailRepeat != nil {
@@ -1829,12 +1852,11 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		loopItem = loopItemOf(prod)
 	}
 	loopEntry := func() map[string]any {
-		o := map[string]any{
-			"c": map[string]any{"n." + loopCounter: 0},
-			"n": map[string]int{loopCounter: 1},
-			"r": prod.Name,
-			"g": tag,
-		}
+		o := altOf(
+			"c", map[string]any{"n." + loopCounter: 0},
+			"n", map[string]int{loopCounter: 1},
+			"r", prod.Name,
+		)
 		// A loop is a helper unless the IR says otherwise, as the TS
 		// `prod.nodeKind ?? 'helper'` has it (kind() defaults to user).
 		loopKind := prod.NodeKind
@@ -1844,6 +1866,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		merge(o, refs.node(map[string]any{
 			"init": true, "rule": prod.Name, "kind": loopKind, "nterms": 0,
 		}))
+		setKey(o, "g", tag)
 		// Inside an `; @array` the loop fills the array it inherits, so its
 		// entry allocates nothing and only counts.
 		if arrayElem {
@@ -1930,15 +1953,22 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 
 					if paths != nil {
 						for _, p := range paths {
-							o := map[string]any{
-								"s": strings.Join(p, " "), "b": len(p),
-								"p": seg.ref, "g": tag,
+							o := altOf("s", strings.Join(p, " "), "b", len(p), "p", seg.ref)
+							// The suffix-debt bookkeeping, as below; TypeScript
+							// carries it on both forms.
+							if len(seg.debt) > 0 {
+								n := map[string]int{}
+								for k, v := range seg.debt {
+									n[k] = v
+								}
+								setKey(o, "n", n)
 							}
 							merge(o, refs.node(map[string]any{
 								"init": true, "rule": prod.Name, "kind": prodKind, "nterms": 0,
 							}))
+							setKey(o, "g", tag)
 							if mark != "" {
-								o["m"] = mark
+								setKey(o, "m", mark)
 							}
 							entries = append(entries, dispatchEntry{o: made(o), alt: alt})
 						}
@@ -1947,9 +1977,7 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 					}
 
 					for _, tok := range sortedKeys(firstTokens) {
-						o := map[string]any{
-							"s": tok, "b": 1, "p": seg.ref, "g": tag,
-						}
+						o := altOf("s", tok, "b", 1, "p", seg.ref)
 						// This path builds the push alt by hand rather than
 						// through segmentToAlt, so it has to carry the same
 						// suffix-debt bookkeeping.
@@ -1958,15 +1986,16 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 							for k, v := range seg.debt {
 								n[k] = v
 							}
-							o["n"] = n
+							setKey(o, "n", n)
 						}
 						merge(o, refs.node(map[string]any{
 							"init": true, "rule": prod.Name, "kind": prodKind, "nterms": 0,
 						}))
+						setKey(o, "g", tag)
 						if mark != "" {
-							o["m"] = mark
+							setKey(o, "m", mark)
 						}
-						entries = append(entries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
+						entries = append(entries, dispatchEntry{o: made(o), alt: alt})
 					}
 					budget.restore(peekBase)
 					continue
@@ -1981,16 +2010,24 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			case loopItem == nil:
 				o = segmentToAlt(seg, tag, refs, true, prod.Name, prodKind)
 			case len(alt) > 0:
-				o = segmentToAlt(segment{terms: seg.terms}, tag, refs, false, prod.Name, prodKind)
-				o["r"] = prod.Name
+				// `{g, s, r, ...acts}` in TypeScript: the replace goes after
+				// the token, ahead of the actions.
+				base := segmentToAlt(segment{terms: seg.terms}, tag, refs, false, prod.Name, prodKind)
+				o = altOf("g", base["g"])
+				if s, ok := base["s"]; ok {
+					setKey(o, "s", s)
+				}
+				setKey(o, "r", prod.Name)
+				for _, k := range keyOrder(base) {
+					if k != "g" && k != "s" {
+						setKey(o, k, base[k])
+					}
+				}
 			default:
 				o = segmentToAlt(seg, tag, refs, false, prod.Name, prodKind)
 			}
 			if mark != "" {
-				o["m"] = mark
-			}
-			if len(alt) > 0 {
-				o = debtGuard(o)
+				setKey(o, "m", mark)
 			}
 
 			// The terminating alternative of a repetition helper names no
@@ -2002,8 +2039,8 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			if len(alt) == 0 && prod.RepeatHelper {
 				for _, tok := range sortedKeys(followSets[prod.Name]) {
 					g := copyMap(o)
-					g["s"] = tok
-					g["b"] = 1
+					setKey(g, "s", tok)
+					setKey(g, "b", 1)
 					entries = append(entries, dispatchEntry{o: made(g)})
 				}
 				// Contested repetitions additionally get FOLLOW₂ guards,
@@ -2042,8 +2079,8 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				if len(peek) > 0 && len(peek) <= 64 {
 					for _, tok := range peek {
 						g := copyMap(o)
-						g["s"] = strings.Join(append(append([]string{}, seg.terms...), tok), " ")
-						g["b"] = 1
+						setKey(g, "s", strings.Join(append(append([]string{}, seg.terms...), tok), " "))
+						setKey(g, "b", 1)
 						entries = append(entries, dispatchEntry{o: made(g), alt: alt})
 					}
 					continue
@@ -2057,17 +2094,22 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			entries = append(entries, dispatchEntry{o: made(o), alt: srcAlt})
 		}
 
+		applyDebtGuard(entries)
 		specificityPermute(entries, cc, grammar)
+		// Inside an `; @array` the rule allocates nothing: the value
+		// actions come off the entries BEFORE the keyword reordering copies
+		// them into guards, so a guard carries exactly what its entry
+		// carries. Mirrors the TS emitter, step for step.
+		if arrayElem {
+			for _, e := range entries {
+				useValueActions(e.o, nil, nil)
+			}
+		}
 		opens := reorderKeywordShadow(prod, entries, grammar,
 			literals, regexTokens, followSets, cc, budget, made)
 		// A loop has no close: every alternative either re-enters it by
 		// replacement or ends it, and nothing it did is left to capture.
 		if loopItem != nil {
-			if arrayElem {
-				for _, o := range opens {
-					useValueActions(o, nil, nil)
-				}
-			}
 			opens = append([]map[string]any{loopEntry()}, opens...)
 			commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)},
 				budget, pre)
@@ -2077,17 +2119,14 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		closes := []map[string]any{}
 		if anyHasRef(prod.Alts) {
 			close := captureChildFields(refs, prod.Name, prodKind)
-			close["g"] = tag
+			setKey(close, "g", tag)
 			if marks != nil {
-				close["m"] = "_"
+				setKey(close, "m", "_")
 			}
 			rs.Close = mapsToAlts([]map[string]any{close})
 			closes = append(closes, close)
 		}
 		if arrayElem {
-			for _, o := range opens {
-				useValueActions(o, nil, nil)
-			}
 			// At most one distinct pushed rule is an ELEMENT here: the
 			// only multi-alt shapes left on this path are an option (one
 			// pushing alternative) and a group whose alternatives were
@@ -2103,7 +2142,6 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 			for _, c := range closes {
 				pushElement(c, elem, valueRules)
 			}
-			rs.Open = mapsToAlts(opens)
 			if len(closes) > 0 {
 				rs.Close = mapsToAlts(closes)
 			}
@@ -2252,12 +2290,13 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		usable := dispatch[i].prefixes
 		if len(usable) > 0 {
 			for _, p := range usable {
-				o := map[string]any{"s": strings.Join(p, " "), "b": len(p), via: implName, "g": tag}
+				o := altOf("s", strings.Join(p, " "), "b", len(p), via, implName)
 				merge(o, copyMap(initDispatchFields))
+				setKey(o, "g", tag)
 				if mark != "" {
-					o["m"] = mark
+					setKey(o, "m", mark)
 				}
-				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o), alt: alt})
 			}
 		} else {
 			firstTokens := firstOfAlt(alt, literals, regexTokens, firstSets, nullable)
@@ -2272,12 +2311,13 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 				}
 			}
 			for _, tok := range sortedKeys(firstTokens) {
-				o := map[string]any{"s": tok, "b": 1, via: implName, "g": tag}
+				o := altOf("s", tok, "b", 1, via, implName)
 				merge(o, copyMap(initDispatchFields))
+				setKey(o, "g", tag)
 				if mark != "" {
-					o["m"] = mark
+					setKey(o, "m", mark)
 				}
-				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(debtGuard(o)), alt: alt})
+				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o), alt: alt})
 			}
 		}
 	}
@@ -2290,39 +2330,43 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 	// entries, so an ε-derivation never preempts a real match.
 	for _, n := range nullableImpls {
 		for _, tok := range sortedKeys(followSets[prod.Name]) {
-			o := map[string]any{"s": tok, "b": 1, "p": n.implName, "g": tag}
+			o := altOf("s", tok, "b", 1, "p", n.implName)
 			merge(o, copyMap(n.fields))
+			setKey(o, "g", tag)
 			if n.mark != "" {
-				o["m"] = n.mark
+				setKey(o, "m", n.mark)
 			}
 			dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o)})
 		}
-		o := map[string]any{"p": n.implName, "g": tag}
+		o := altOf("p", n.implName)
 		merge(o, copyMap(n.fields))
+		setKey(o, "g", tag)
 		if n.mark != "" {
-			o["m"] = n.mark
+			setKey(o, "m", n.mark)
 		}
 		dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o)})
 	}
 
 	if emptyAltSeen {
 		fallbackKind := prodKind
-		o := map[string]any{"g": tag}
 		// A loop's exit ends the loop in the node it inherited.
+		o := altOf("g", tag)
 		if loopItem == nil {
+			o = altOf()
 			merge(o, refs.node(map[string]any{
 				"init": true, "rule": prod.Name, "kind": fallbackKind, "nterms": 0,
 			}))
+			setKey(o, "g", tag)
 		}
 		if dispatchMarks != nil {
-			o["m"] = "_"
+			setKey(o, "m", "_")
 		}
 		// Same FOLLOW guards as the single-segment path above.
 		if prod.RepeatHelper {
 			for _, tok := range sortedKeys(followSets[prod.Name]) {
 				g := copyMap(o)
-				g["s"] = tok
-				g["b"] = 1
+				setKey(g, "s", tok)
+				setKey(g, "b", 1)
 				dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(g)})
 			}
 			guards := pairExitGuards(prod, o, followPairs, firstSets, cc, made)
@@ -2335,16 +2379,19 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		dispatchEntries = append(dispatchEntries, dispatchEntry{o: made(o)})
 	}
 
+	// The impl rule this dispatches to inherits the array and fills it
+	// directly, so the dispatcher allocates nothing and captures nothing.
+	// Before the debt guard and the keyword reordering, as in the TS
+	// emitter, so a guard copied from an entry carries what it carries.
+	if arrayElem {
+		for _, e := range dispatchEntries {
+			useValueActions(e.o, nil, nil)
+		}
+	}
+	applyDebtGuard(dispatchEntries)
 	specificityPermute(dispatchEntries, cc, grammar)
 	dispOpens := reorderKeywordShadow(prod, dispatchEntries, grammar,
 		literals, regexTokens, followSets, cc, budget, made)
-	// The impl rule this dispatches to inherits the array and fills it
-	// directly, so the dispatcher allocates nothing and captures nothing.
-	if arrayElem {
-		for _, o := range dispOpens {
-			useValueActions(o, nil, nil)
-		}
-	}
 	// A loop ends by exiting: nothing it did in its open is left to
 	// capture, because the iteration captures its own item. So it has no
 	// close, and registers no capture for one.
@@ -2355,9 +2402,9 @@ func emitProduction(prod *Production, grammar *Grammar, literals, regexTokens ma
 		return nil
 	}
 	dispClose := captureChildFields(refs, prod.Name, prodKind)
-	dispClose["g"] = tag
+	setKey(dispClose, "g", tag)
 	if dispatchMarks != nil {
-		dispClose["m"] = "_"
+		setKey(dispClose, "m", "_")
 	}
 	if arrayElem {
 		useValueActions(dispClose, nil, nil)
@@ -2410,10 +2457,10 @@ func emitRepeatLoop(loop *Production, name string, item *Element, tag string,
 	if prov != nil {
 		prov[step] = originOf(loop)
 	}
-	take := map[string]any{"p": item.Name, "n": map[string]int{loopCounter: 0}, "g": tag}
-	back := map[string]any{"r": step, "n": map[string]int{loopCounter: 1}}
+	take := altOf("p", item.Name, "n", map[string]int{loopCounter: 0}, "g", tag)
+	back := altOf("r", step, "n", map[string]int{loopCounter: 1})
 	merge(back, captureChildFields(refs, name, "helper"))
-	back["g"] = tag
+	setKey(back, "g", tag)
 	// Inside an `; @array` the item is an element, unless it is a helper
 	// that fills the same array itself.
 	if arrayElem {
@@ -2428,7 +2475,7 @@ func emitRepeatLoop(loop *Production, name string, item *Element, tag string,
 		Close: []*tabnas.GrammarAltSpec{mapToAlt(back)},
 	}, budget, 0)
 	commitRule(ruleSpec, step, &tabnas.GrammarRuleSpec{
-		Open: []*tabnas.GrammarAltSpec{mapToAlt(map[string]any{"r": loop.Name, "g": tag})},
+		Open: []*tabnas.GrammarAltSpec{mapToAlt(altOf("r", loop.Name, "g", tag))},
 	}, budget, 0)
 }
 
@@ -2624,9 +2671,9 @@ func emitChainArray(headName string, alt Sequence, literals, regexTokens map[str
 		}
 		headAlt := segmentToAlt(seg, tag, refs, i == 0, name, kind)
 		if i == 0 && headKind == "user" && refs.emitMarks {
-			headAlt["m"] = altDiscriminator(alt, literals, regexTokens)
+			setKey(headAlt, "m", altDiscriminator(alt, literals, regexTokens))
 		}
-		rs := &tabnas.GrammarRuleSpec{Open: mapsToAlts([]map[string]any{headAlt})}
+		rs := &tabnas.GrammarRuleSpec{}
 
 		// Step rules exist only because the alternative had more than one
 		// segment; nothing in the author's grammar is named after them.
@@ -2637,12 +2684,13 @@ func emitChainArray(headName string, alt Sequence, literals, regexTokens map[str
 		isLast := i == len(segs)-1
 		var closeMaps []map[string]any
 		if !isLast {
-			close := map[string]any{"r": chainName(i + 1), "g": tag}
+			close := altOf("r", chainName(i+1))
 			merge(close, captureChildFields(refs, name, kind))
+			setKey(close, "g", tag)
 			closeMaps = []map[string]any{close}
 		} else if seg.ref != "" {
 			close := captureChildFields(refs, name, kind)
-			close["g"] = tag
+			setKey(close, "g", tag)
 			closeMaps = []map[string]any{close}
 		}
 
@@ -2719,7 +2767,7 @@ func emitChainArray(headName string, alt Sequence, literals, regexTokens map[str
 					cfg = map[string]any{cfgKey: map[string]any{"src": true}}
 				}
 				if closeMaps == nil {
-					closeMaps = []map[string]any{{"g": tag}}
+					closeMaps = []map[string]any{altOf("g", tag)}
 				}
 				for _, c := range closeMaps {
 					useValueActions(c, []string{act}, cfg)
@@ -2781,7 +2829,7 @@ func pushElement(spec map[string]any, elem string, valueRules map[string]bool) {
 // them. Mirrors the TS `useValueActions`.
 func useValueActions(spec map[string]any, actions []string, cfg map[string]any) {
 	if len(actions) == 1 {
-		spec["a"] = actions[0]
+		setKey(spec, "a", actions[0])
 	} else if len(actions) > 1 {
 		// []any, not []string. Everything downstream that reads a
 		// composed `a` type-switches on []any — appendAction, which
@@ -2794,22 +2842,31 @@ func useValueActions(spec map[string]any, actions []string, cfg map[string]any) 
 		for i, a := range actions {
 			as[i] = a
 		}
-		spec["a"] = as
+		setKey(spec, "a", as)
 	} else {
-		delete(spec, "a")
+		delKey(spec, "a")
 	}
-	if k, ok := spec["k"].(map[string]any); ok {
+	k, _ := spec["k"].(map[string]any)
+	if k != nil {
 		// Builtins mode names its tree config; closure mode carries none.
 		delete(k, "node$")
 		delete(k, "capture$")
+	}
+	// A new object, `{...k, ...cfg}` as TypeScript writes it: a `k` the
+	// alternate already has keeps its place, and one it gains goes last.
+	if cfg != nil {
+		nk := make(map[string]any, len(k)+len(cfg))
+		for name, v := range k {
+			nk[name] = v
+		}
 		for name, v := range cfg {
-			k[name] = v
+			nk[name] = v
 		}
-		if len(k) == 0 {
-			delete(spec, "k")
-		}
-	} else if len(cfg) > 0 {
-		spec["k"] = cfg
+		setKey(spec, "k", nk)
+		k = nk
+	}
+	if k != nil && len(k) == 0 {
+		delKey(spec, "k")
 	}
 }
 
@@ -2833,20 +2890,6 @@ func anyHasRef(alts []Sequence) bool {
 		}
 	}
 	return false
-}
-
-func merge(dst, src map[string]any) {
-	for k, v := range src {
-		dst[k] = v
-	}
-}
-
-func copyMap(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }
 
 func sortedKeys(m map[string]bool) []string {

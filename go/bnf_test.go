@@ -1012,9 +1012,17 @@ func TestProvenanceSurvivesCompilation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s failed: %v", name, err)
 		}
-		meta, _ := out["meta"].(map[string]any)
-		prov, _ := meta["provenance"].(map[string]any)
-		if prov["__start__"] != "doc" {
+		// Every object under the root is ordered, as TypeScript writes it.
+		meta, _ := out["meta"].(*tabnas.OrderedMap)
+		var prov any
+		if meta != nil {
+			prov, _ = meta.Get("provenance")
+		}
+		var start any
+		if pm, ok := prov.(*tabnas.OrderedMap); ok {
+			start, _ = pm.Get("__start__")
+		}
+		if start != "doc" {
 			t.Errorf("%s dropped meta.provenance (got %#v)", name, out["meta"])
 		}
 	}
@@ -1134,9 +1142,16 @@ func TestSyncTagsOnTheOnlyTwoTokenNamingCloseAlts(t *testing.T) {
 func TestSyncTagsKeepTheRestOfAListUnderATaggedHost(t *testing.T) {
 	syncGroups := map[string]bool{"close": true, "comma": true, "end": true}
 
-	closeAlts := func(rules map[string]any, rule string) []any {
-		rm, _ := rules[rule].(map[string]any)
-		cl, _ := rm["close"].([]any)
+	// The serialized tree's objects are ordered (*tabnas.OrderedMap), in
+	// the order TypeScript writes them.
+	closeAlts := func(rules *tabnas.OrderedMap, rule string) []any {
+		rv, _ := rules.Get(rule)
+		rm, _ := rv.(*tabnas.OrderedMap)
+		if rm == nil {
+			return nil
+		}
+		cv, _ := rm.Get("close")
+		cl, _ := cv.([]any)
 		return cl
 	}
 
@@ -1144,23 +1159,27 @@ func TestSyncTagsKeepTheRestOfAListUnderATaggedHost(t *testing.T) {
 	// one gets embedded in. Its single tag is what disables the fallback
 	// the generated rules would otherwise have relied on.
 	underHost := func(data map[string]any) map[string]any {
-		rules, _ := data["rule"].(map[string]any)
-		rules["host"] = map[string]any{
+		rules, _ := data["rule"].(*tabnas.OrderedMap)
+		rules.Set("host", map[string]any{
 			"open":  []any{map[string]any{"p": "doc", "g": "host"}},
 			"close": []any{map[string]any{"s": "#ZZ", "a": "@bubble$", "g": "host,end"}},
-		}
-		opts, _ := data["options"].(map[string]any)
-		rule, _ := opts["rule"].(map[string]any)
-		rule["start"] = "host"
+		})
+		opts, _ := data["options"].(*tabnas.OrderedMap)
+		rv, _ := opts.Get("rule")
+		rv.(*tabnas.OrderedMap).Set("start", "host")
 		return data
 	}
 
 	strip := func(data map[string]any) map[string]any {
-		rules, _ := data["rule"].(map[string]any)
-		for name := range rules {
+		rules, _ := data["rule"].(*tabnas.OrderedMap)
+		for _, name := range rules.Keys {
 			for _, av := range closeAlts(rules, name) {
-				am, _ := av.(map[string]any)
-				g, ok := am["g"].(string)
+				am, _ := av.(*tabnas.OrderedMap)
+				if am == nil {
+					continue
+				}
+				gv, _ := am.Get("g")
+				g, ok := gv.(string)
 				if !ok {
 					continue
 				}
@@ -1170,7 +1189,7 @@ func TestSyncTagsKeepTheRestOfAListUnderATaggedHost(t *testing.T) {
 						kept = append(kept, tg)
 					}
 				}
-				am["g"] = strings.Join(kept, ",")
+				am.Set("g", strings.Join(kept, ","))
 			}
 		}
 		return data
@@ -1922,12 +1941,12 @@ func TestRemovalSurvivesSerialisation(t *testing.T) {
 			t.Errorf("%s: unexpected error: %v", tc.name, err)
 			continue
 		}
-		rules, ok := data["rule"].(map[string]any)
+		rules, ok := data["rule"].(*tabnas.OrderedMap)
 		if !ok {
-			t.Errorf("%s: rule block missing or not a map: %T", tc.name, data["rule"])
+			t.Errorf("%s: rule block missing or not an object: %T", tc.name, data["rule"])
 			continue
 		}
-		got, present := rules["gone"]
+		got, present := rules.Get("gone")
 		if !present {
 			t.Errorf("%s: removal dropped entirely; want a nil entry", tc.name)
 			continue
@@ -1935,7 +1954,7 @@ func TestRemovalSurvivesSerialisation(t *testing.T) {
 		if nil != got {
 			t.Errorf("%s: removal serialised as %v, want nil", tc.name, got)
 		}
-		if _, present := rules["kept"]; !present {
+		if _, present := rules.Get("kept"); !present {
 			t.Errorf("%s: surviving rule was dropped", tc.name)
 		}
 	}

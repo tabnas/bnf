@@ -15,8 +15,10 @@ import (
 // mapToAlt converts a generic alt-spec map (the shape the TS emitter
 // builds) into a typed *GrammarAltSpec. Recognised keys: s, b, p, r, a,
 // c, k, u, n, m, g. The `m` key (mark) has no typed field, so it rides
-// in U under "_mark" for serialisation/inspection; the engine ignores
-// it. (markListing reads it back from there.)
+// in U under "m$" for serialisation/inspection; the engine ignores
+// it. (markListing reads it back from there.) The map's key log
+// (altKeysKey) is not a field: it is recorded, for the serializers, as
+// the order of the alternate's keys.
 func mapToAlt(m map[string]any) *tabnas.GrammarAltSpec {
 	alt := &tabnas.GrammarAltSpec{}
 	if v, ok := m["s"]; ok {
@@ -64,6 +66,9 @@ func mapToAlt(m map[string]any) *tabnas.GrammarAltSpec {
 		}
 		alt.U["m$"] = v
 	}
+	// The order its keys were set in, which the serializers write it in
+	// (spec_order.go).
+	trace.noteAlt(alt, m)
 	return alt
 }
 
@@ -916,11 +921,11 @@ func emitProbeHelper(prod *Production, tag string, ruleSpec map[string]*tabnas.G
 			tok = el.Name
 		}
 		if tok != "" {
-			opens = append(opens, map[string]any{"s": tok, "r": prod.Name, "g": tag})
+			opens = append(opens, altOf("s", tok, "r", prod.Name, "g", tag))
 		}
 	}
 	// Empty fallback — pops without consuming anything. Must be last.
-	opens = append(opens, map[string]any{"g": tag})
+	opens = append(opens, altOf("g", tag))
 	// Charged with the list it is made from (rewriteProbeDispatches).
 	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{Open: mapsToAlts(opens)},
 		budget, probeRuleUnits(len(elems)))
@@ -946,14 +951,14 @@ func emitProbeDispatch(prod *Production, tag string, ruleSpec map[string]*tabnas
 
 	if useBuiltins {
 		open := []map[string]any{
-			{"c": "@probePhase0$", "a": "@probeInit$", "p": pd.ProbeRule,
-				"k": map[string]any{"pd_d": disambiguatorToken}, "g": tag},
-			{"c": "@probePhase1$", "p": pd.WithBranch, "g": tag},
-			{"c": "@probePhase2$", "p": pd.NoBranch, "g": tag},
+			altOf("c", "@probePhase0$", "a", "@probeInit$", "p", pd.ProbeRule,
+				"k", map[string]any{"pd_d": disambiguatorToken}, "g", tag),
+			altOf("c", "@probePhase1$", "p", pd.WithBranch, "g", tag),
+			altOf("c", "@probePhase2$", "p", pd.NoBranch, "g", tag),
 		}
-		close0 := map[string]any{"c": "@probePhase0$", "a": "@probeDecide$", "r": prod.Name, "g": tag}
+		close0 := altOf("c", "@probePhase0$", "a", "@probeDecide$", "r", prod.Name, "g", tag)
 		close1 := copyMap(bubbleFields)
-		close1["g"] = tag
+		setKey(close1, "g", tag)
 		commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 			Open:  mapsToAlts(open),
 			Close: mapsToAlts([]map[string]any{close0, close1}),
@@ -993,13 +998,13 @@ func emitProbeDispatch(prod *Production, tag string, ruleSpec map[string]*tabnas
 	})
 
 	open := []map[string]any{
-		{"c": string(phase0), "a": string(initMark), "p": pd.ProbeRule, "g": tag},
-		{"c": string(phase1), "p": pd.WithBranch, "g": tag},
-		{"c": string(phase2), "p": pd.NoBranch, "g": tag},
+		altOf("c", string(phase0), "a", string(initMark), "p", pd.ProbeRule, "g", tag),
+		altOf("c", string(phase1), "p", pd.WithBranch, "g", tag),
+		altOf("c", string(phase2), "p", pd.NoBranch, "g", tag),
 	}
-	close0 := map[string]any{"c": string(phase0), "a": string(decide), "r": prod.Name, "g": tag}
+	close0 := altOf("c", string(phase0), "a", string(decide), "r", prod.Name, "g", tag)
 	close1 := copyMap(bubbleFields)
-	close1["g"] = tag
+	setKey(close1, "g", tag)
 	commitRule(ruleSpec, prod.Name, &tabnas.GrammarRuleSpec{
 		Open:  mapsToAlts(open),
 		Close: mapsToAlts([]map[string]any{close0, close1}),

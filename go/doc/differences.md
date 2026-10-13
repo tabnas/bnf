@@ -68,7 +68,7 @@ skipped or expected-to-fail cases of these shapes in their Go suites,
 and both suites pass against this compiler unchanged. Every guard here
 is inert for a tokenising notation, which is why.
 
-## FOLLOW-guard emission order: divergent, behaviour-neutral
+## FIRST- and FOLLOW-set emission order: divergent, behaviour-neutral
 
 TS iterates a FOLLOW set in insertion order; Go sorts it, because Go map
 iteration is randomised and the emitted spec has to be reproducible. 57
@@ -83,6 +83,111 @@ class; 43 such pairs in `c.gbnf`), whichever matches first performs the
 identical action, so the order between them is not observable. Only a
 group whose entries differed in `p` or `b` would be order-sensitive, and
 the FOLLOW loop cannot produce one.
+
+The same holds wherever the emitter fans an alternate out over a FIRST
+set: the peek entries of an alternative that begins with a reference,
+the entry per first token of a dispatched alternative, and the second
+tokens of a keyword guard or a FOLLOW₂ guard. Each group comes from one
+template, and TS lists it in the order its analysis met the tokens, Go
+in token-name order. Over a corpus of 1,169 grammars captured as IR from
+the front-ends' suites, 808 of which compile, 112 list one such group in
+another order, and in each of them every group holds the same alternates
+as in TS. Apart from the order of one reference's suffix-debt counters
+(the next section), it is the one difference of order left between the
+two serialised specs.
+
+## The serialised spec: written as TypeScript writes it
+
+`ToJsonic` over `ToPureSpec`, `ToRecognitionSpec` or `SpecToData` writes
+a spec in the order TS writes it. The rules come in the order the
+emitter commits them, the tokens and token sets in the order it makes
+them, and each alternate's keys in the order it sets them. For a grammar
+both ports compile alike, the text is byte for byte the same, and
+`go/oracle_text_test.go` holds the Go port to the canonical compiler's
+own text for every shared fixture it can compare.
+
+The order means something. The emitter allocates the match tokens as it
+walks the rules, an engine numbers a spec's tokens in the order its
+options list them, and of two tokens that a position expects, the lower
+number is tried first. A notation's render writes the rules back in the
+spec's order, so the text it writes compiles back to the same ranks.
+
+A Go map keeps no order, so the order comes from three places:
+
+| What | Where the order is kept |
+|---|---|
+| the rules | `GrammarSpec.RuleOrder`, which `EmitGrammarSpec` fills, and which the engine installs the rules in |
+| the match tokens | `MatchOptions.TokenOrder` |
+| the fixed tokens, the token sets, each alternate's keys | recorded for each spec `EmitGrammarSpec` returns, for as long as the spec lives |
+
+A spec built by hand, loaded from JSON or copied has no record. It is
+written in the order its own fields give, and in name order for the
+rest.
+
+The tree these functions return carries the order. Its root is a
+`map[string]any`, and every object inside it is a `*tabnas.OrderedMap`,
+which `ToJsonic` writes in its key order, and `encoding/json` writes in
+its key order too. Code that walks the tree reads an object through its
+`Keys` and `Vals`, or `Get`.
+
+`options.match.tokenOrder` is not written: the order is in the keys, as
+it is in the canonical compiler's spec, and the notations' renders
+refuse a spec that gives the order as a list of its own. A Go engine
+that loads a serialised spec through `tabnas.GrammarSpecFromJSON` takes
+the rules' order from the keys but not the match tokens', so it ranks
+two match tokens that claim the same input by name, where the TypeScript
+engine ranks them by the order the spec lists them. That is the engine's
+reading of the JSON, the same for a spec either compiler wrote. A spec
+installed in memory keeps `TokenOrder` and ranks its tokens as the
+emitter did.
+
+Each match token's matcher is written as TS writes it too. RE2 spells a
+code point `\x{1F600}` and compiles no flag but `i`, so neither
+JavaScript's spelling nor a flag such as `u` can be read back from a
+compiled regexp. The emitter records each match token's flags, and each
+class atom's spelling, with the order. A code point is written `\uHHHH`,
+which JavaScript reads alike with `u` and without, unless its pattern
+names one at U+10000 or beyond. `\uHHHH` reaches no further, and
+JavaScript reads `\u1F600` as U+1F60 and a `0`. Every code point of such
+a pattern is written `\u{H}` instead, under `u`, which a braced escape
+needs. That is how TS spells a class atom, and how its front-ends spell
+a class, but for its GBNF front-end, which braces only the code points
+from U+10000 up: a GBNF class that runs from below U+10000 to beyond it
+is written here with every code point braced, the same characters
+spelled the other way. A class atom takes the name TS gives it, and a
+class token keeps the name its pattern gives it, which a Go front-end
+spells `\x{…}`. The Go engine reads either spelling back, since
+`tabnas.GrammarSpecFromJSON` reads `\u{…}` and needs no counterpart for
+`u`. A `v` is written as TS writes it, and the Go engine, like the Rust
+one, refuses it when it loads the spec. A spec with no record has its
+matchers written from their RE2 source: the same spelling, `i` from a
+`(?i)` group, `u` where a code point is braced, and no other flag.
+
+Of the 808 grammars in the previous section's corpus that TS compiles:
+
+| Go's text | Grammars |
+|---|---|
+| byte for byte the TS text | 455 |
+| the TS text, once the class token names are mapped | 193 |
+| a FIRST or FOLLOW group in another order | 112 |
+| a reference's two suffix-debt counters in another order, which a Go IR holds in a map | 1 |
+| none, since Go refuses a pattern RE2 cannot compile | 16 |
+| a value that differs | 31 |
+
+A class token is named after its pattern, which a Go front-end spells
+`\x{0030}` where the TS front-end spells it `\u0030`, so the mapped names
+are those. The 31 values that differ are these:
+
+- the word guard, which RE2 writes `\b`: 11
+- an escape the two dialects read apart, so that the dispatch depth or
+  the class partition differs: 10
+- an alternation that TS wraps in a group: 4
+- a code point below U+10000 that the IR spells in braces, written
+  `\uHHHH` here: 2
+- a rule named `__proto__`, which TS drops when it serialises: 2
+- a `/` that TS escapes: 1
+- a rule named `CA`, which TS lifts to a literal on the engine's comma
+  token `#CA`, where Go keeps it a rule: 1
 
 ## Hidden left recursion (ported, tabnas/bnf#6)
 
