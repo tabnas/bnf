@@ -62,7 +62,7 @@ mod readme_examples {}
 /// release orchestrator rewrites both, and `tests/version_test.rs` fails
 /// the build if they drift. Mirrors `VERSION` in `ts/src/bnf.ts` and
 /// `const VERSION` in `go/bnf.go`.
-pub const VERSION: &str = "0.1.29";
+pub const VERSION: &str = "0.1.30";
 
 pub use budget::MAX_EMIT_UNITS;
 pub use emit::emit_grammar_spec;
