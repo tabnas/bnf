@@ -473,6 +473,10 @@ fn bind_ref(parser: &mut Tabnas, name: &str, action: &RefAction) {
                     .insert("pd_phase".into(), tabnas::Value::Number(0.0));
                 let mark = tabnas::Value::Number(ctx.mark() as f64);
                 r.k_mut().insert("pd_mark".into(), mark);
+                // The passes until the decision are the probe's, never the
+                // document's: open it, so the engine flags them
+                // (`RuleDone::probe`) as it does for its own `@probeInit$`.
+                ctx.probe_open(r);
                 Ok(())
             });
         }
@@ -491,6 +495,10 @@ fn bind_ref(parser: &mut Tabnas, name: &str, action: &RefAction) {
                     "pd_phase".into(),
                     tabnas::Value::Number(if matched { 1.0 } else { 2.0 }),
                 );
+                // The probe is decided and rewound: close it, as the
+                // engine's `@probeDecide$` does. This pass is still the
+                // probe's; the next is the document's again.
+                ctx.probe_close();
                 Ok(())
             });
         }
