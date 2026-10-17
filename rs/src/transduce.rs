@@ -16,6 +16,7 @@
 //! the same order.
 
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write;
 
 use serde_json::Value;
 
@@ -105,10 +106,10 @@ fn acts_of(alt: &AltSpec) -> (Vec<(String, Value)>, String) {
             (a, cfg)
         })
         .collect();
-    let signature = acts
-        .iter()
-        .map(|(a, cfg)| format!("{a} {cfg};"))
-        .collect::<String>();
+    let mut signature = String::new();
+    for (a, cfg) in &acts {
+        let _ = write!(signature, "{a} {cfg};");
+    }
     (acts, signature)
 }
 

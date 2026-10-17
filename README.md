@@ -109,8 +109,8 @@ actions the compiler attached:
 - a member named by a constant is a member;
 - a member that holds the text the pushed rule matched is a text.
 
-A host runs the part over the parser's events, so a document of a custom
-grammar streams. The result is `{ entry, source }`, or `{ whole }` with
+A host runs the part over the rule passes of each parse, so a document of
+a custom grammar streams. The result is `{ entry, source }`, or `{ whole }` with
 the reason the grammar's documents are read whole instead. A start rule
 with no annotation builds the `{rule, src, kids}` tree: its `src` comes
 before its `kids` and holds the text of every node beneath it, so no
