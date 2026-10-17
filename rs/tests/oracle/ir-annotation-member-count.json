@@ -56,5 +56,6 @@
  "pureError": "demo: rule 'doc' names 1 member but has 2 parts that produce a value. A value annotation names one member per part that produces a value; a literal produces no value and is not a member.",
  "recognition": null,
  "recognitionError": null,
- "cases": []
+ "cases": [],
+ "transduce": null
 }

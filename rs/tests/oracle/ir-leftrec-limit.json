@@ -702,5 +702,6 @@
  "pureError": "demo: rule 'r11' exceeds the left-recursion expansion limit of 512 alternatives while inlining 'r12', which begins 2 of its alternatives and has 511 of its own. Factor 'r12' out of the alternatives it begins.",
  "recognition": null,
  "recognitionError": null,
- "cases": []
+ "cases": [],
+ "transduce": null
 }

@@ -1,0 +1,150 @@
+{
+ "name": "ir-transduce-hosts",
+ "ir": {
+  "productions": [
+   {
+    "name": "hosts",
+    "value": {
+     "kind": "array"
+    },
+    "alts": [
+     [
+      {
+       "kind": "star",
+       "inner": {
+        "kind": "group",
+        "alts": [
+         [
+          {
+           "kind": "ref",
+           "name": "entry"
+          },
+          {
+           "kind": "term",
+           "literal": "\n"
+          }
+         ],
+         [
+          {
+           "kind": "term",
+           "literal": "\n"
+          }
+         ]
+        ]
+       }
+      },
+      {
+       "kind": "opt",
+       "inner": {
+        "kind": "ref",
+        "name": "entry"
+       }
+      }
+     ]
+    ]
+   },
+   {
+    "name": "entry",
+    "value": {
+     "kind": "object",
+     "members": [
+      "address",
+      "names"
+     ]
+    },
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "address"
+      },
+      {
+       "kind": "ref",
+       "name": "names"
+      }
+     ]
+    ]
+   },
+   {
+    "name": "address",
+    "alts": [
+     [
+      {
+       "kind": "ref",
+       "name": "word"
+      }
+     ]
+    ]
+   },
+   {
+    "name": "names",
+    "value": {
+     "kind": "array"
+    },
+    "alts": [
+     [
+      {
+       "kind": "plus",
+       "inner": {
+        "kind": "ref",
+        "name": "word"
+       }
+      }
+     ]
+    ]
+   },
+   {
+    "name": "word",
+    "alts": [
+     [
+      {
+       "kind": "group",
+       "alts": [
+        [
+         {
+          "kind": "regex",
+          "pattern": "[a-z0-9.:-]+",
+          "flags": ""
+         }
+        ]
+       ]
+      }
+     ]
+    ]
+   }
+  ]
+ },
+ "opts": {
+  "tag": "tst",
+  "start": "hosts"
+ },
+ "pure": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#T\": \"\\n\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": true\n    },\n    \"match\": {\n      \"token\": {\n        \"#RX__A_Z0_9\": \"@~/^[a-z0-9.:-]+/\"\n      }\n    }\n  },\n  \"rule\": {\n    \"hosts\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen2_star__gen1_group\",\n          \"a\": \"@array$\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"hosts$step1\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"hosts$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen3_opt_entry\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"entry\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen4_group\",\n          \"a\": [\n            \"@object$\",\n            \"@key$\"\n          ],\n          \"k\": {\n            \"key$\": {\n              \"lit\": \"address\"\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"entry$step1\",\n          \"a\": \"@setval$\",\n          \"k\": {\n            \"setval$\": {\n              \"src\": true\n            }\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"entry$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"names\",\n          \"a\": \"@key$\",\n          \"k\": {\n            \"key$\": {\n              \"lit\": \"names\"\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@setval$\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"address\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"word\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"address\",\n              \"kind\": \"user\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"address\",\n              \"kind\": \"user\"\n            }\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"names\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen5_plus_word\",\n          \"a\": \"@array$\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"word\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen7_group\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"word\",\n              \"kind\": \"user\",\n              \"nterms\": 0\n            }\n          }\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@capture$\",\n          \"k\": {\n            \"capture$\": {\n              \"rule\": \"word\",\n              \"kind\": \"user\"\n            }\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen1_group$alt0\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"entry\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen1_group$alt0$step1\",\n          \"a\": \"@push$\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen1_group$alt0$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#T\"\n        }\n      ]\n    },\n    \"_gen1_group$alt1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#T\"\n        }\n      ]\n    },\n    \"_gen1_group\": {\n      \"open\": [\n        {\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1,\n          \"p\": \"_gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#T\",\n          \"b\": 1,\n          \"p\": \"_gen1_group$alt1\",\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen2_star__gen1_group$alt0\": {\n      \"open\": [\n        {\n          \"p\": \"_gen1_group\",\n          \"n\": {\n            \"rep\": 0\n          },\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen2_star__gen1_group$alt0$step1\",\n          \"n\": {\n            \"rep\": 1\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen2_star__gen1_group$alt0$step1\": {\n      \"open\": [\n        {\n          \"r\": \"_gen2_star__gen1_group\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen2_star__gen1_group\": {\n      \"open\": [\n        {\n          \"c\": {\n            \"n.rep\": 0\n          },\n          \"n\": {\n            \"rep\": 1\n          },\n          \"r\": \"_gen2_star__gen1_group\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #RX__A_Z0_9\",\n          \"b\": 3,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #T #RX__A_Z0_9\",\n          \"b\": 4,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #T #T\",\n          \"b\": 4,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #T\",\n          \"b\": 3,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#T\",\n          \"b\": 1,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen3_opt_entry\": {\n      \"open\": [\n        {\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1,\n          \"p\": \"entry\",\n          \"g\": \"tst\"\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"a\": \"@push$\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen4_group\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#RX__A_Z0_9\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen4_group\",\n              \"kind\": \"helper\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"_gen5_star_word$alt0\": {\n      \"open\": [\n        {\n          \"p\": \"word\",\n          \"n\": {\n            \"rep\": 0\n          },\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen5_star_word$alt0$step1\",\n          \"n\": {\n            \"rep\": 1\n          },\n          \"a\": \"@push$\",\n          \"k\": {\n            \"push$\": {\n              \"src\": true\n            }\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_star_word$alt0$step1\": {\n      \"open\": [\n        {\n          \"r\": \"_gen5_star_word\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_star_word\": {\n      \"open\": [\n        {\n          \"c\": {\n            \"n.rep\": 0\n          },\n          \"n\": {\n            \"rep\": 1\n          },\n          \"r\": \"_gen5_star_word\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1,\n          \"r\": \"_gen5_star_word$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#T\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_plus_word\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"word\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen5_plus_word$step1\",\n          \"a\": \"@push$\",\n          \"k\": {\n            \"push$\": {\n              \"src\": true\n            }\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_plus_word$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen5_star_word\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen7_group\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#RX__A_Z0_9\",\n          \"a\": \"@node$\",\n          \"k\": {\n            \"node$\": {\n              \"init\": true,\n              \"rule\": \"_gen7_group\",\n              \"kind\": \"helper\",\n              \"nterms\": 1\n            }\n          }\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"hosts\",\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"a\": \"@bubble$\",\n          \"g\": \"tst,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"hosts\",\n      \"_gen1_group\": \"hosts\",\n      \"_gen1_group$alt0\": \"hosts\",\n      \"_gen1_group$alt0$step1\": \"hosts\",\n      \"_gen1_group$alt1\": \"hosts\",\n      \"_gen2_star__gen1_group\": \"hosts\",\n      \"_gen2_star__gen1_group$alt0\": \"hosts\",\n      \"_gen2_star__gen1_group$alt0$step1\": \"hosts\",\n      \"_gen3_opt_entry\": \"hosts\",\n      \"_gen4_group\": \"entry\",\n      \"_gen5_plus_word\": \"names\",\n      \"_gen5_plus_word$step1\": \"names\",\n      \"_gen5_star_word\": \"names\",\n      \"_gen5_star_word$alt0\": \"names\",\n      \"_gen5_star_word$alt0$step1\": \"names\",\n      \"_gen7_group\": \"word\",\n      \"entry$step1\": \"entry\",\n      \"hosts$step1\": \"hosts\"\n    }\n  }\n}",
+ "pureError": null,
+ "recognition": "{\n  \"options\": {\n    \"fixed\": {\n      \"token\": {\n        \"#T\": \"\\n\"\n      }\n    },\n    \"rule\": {\n      \"start\": \"__start__\"\n    },\n    \"lex\": {\n      \"empty\": true\n    },\n    \"match\": {\n      \"token\": {\n        \"#RX__A_Z0_9\": \"@~/^[a-z0-9.:-]+/\"\n      }\n    }\n  },\n  \"rule\": {\n    \"hosts\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen2_star__gen1_group\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"hosts$step1\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"hosts$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen3_opt_entry\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"entry\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen4_group\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"entry$step1\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"entry$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"names\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"address\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"word\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"names\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen5_plus_word\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"word\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen7_group\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen1_group$alt0\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"entry\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen1_group$alt0$step1\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen1_group$alt0$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#T\"\n        }\n      ]\n    },\n    \"_gen1_group$alt1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#T\"\n        }\n      ]\n    },\n    \"_gen1_group\": {\n      \"open\": [\n        {\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1,\n          \"p\": \"_gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#T\",\n          \"b\": 1,\n          \"p\": \"_gen1_group$alt1\",\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen2_star__gen1_group$alt0\": {\n      \"open\": [\n        {\n          \"p\": \"_gen1_group\",\n          \"n\": {\n            \"rep\": 0\n          },\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen2_star__gen1_group$alt0$step1\",\n          \"n\": {\n            \"rep\": 1\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen2_star__gen1_group$alt0$step1\": {\n      \"open\": [\n        {\n          \"r\": \"_gen2_star__gen1_group\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen2_star__gen1_group\": {\n      \"open\": [\n        {\n          \"c\": {\n            \"n.rep\": 0\n          },\n          \"n\": {\n            \"rep\": 1\n          },\n          \"r\": \"_gen2_star__gen1_group\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #RX__A_Z0_9\",\n          \"b\": 3,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #T #RX__A_Z0_9\",\n          \"b\": 4,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #T #T\",\n          \"b\": 4,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9 #RX__A_Z0_9 #T\",\n          \"b\": 3,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#T\",\n          \"b\": 1,\n          \"r\": \"_gen2_star__gen1_group$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen3_opt_entry\": {\n      \"open\": [\n        {\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1,\n          \"p\": \"entry\",\n          \"g\": \"tst\"\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen4_group\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#RX__A_Z0_9\"\n        }\n      ]\n    },\n    \"_gen5_star_word$alt0\": {\n      \"open\": [\n        {\n          \"p\": \"word\",\n          \"n\": {\n            \"rep\": 0\n          },\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen5_star_word$alt0$step1\",\n          \"n\": {\n            \"rep\": 1\n          },\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_star_word$alt0$step1\": {\n      \"open\": [\n        {\n          \"r\": \"_gen5_star_word\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_star_word\": {\n      \"open\": [\n        {\n          \"c\": {\n            \"n.rep\": 0\n          },\n          \"n\": {\n            \"rep\": 1\n          },\n          \"r\": \"_gen5_star_word\",\n          \"g\": \"tst\"\n        },\n        {\n          \"s\": \"#RX__A_Z0_9\",\n          \"b\": 1,\n          \"r\": \"_gen5_star_word$alt0\",\n          \"g\": \"tst\"\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#T\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\",\n          \"s\": \"#ZZ\",\n          \"b\": 1\n        },\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_plus_word\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"word\"\n        }\n      ],\n      \"close\": [\n        {\n          \"r\": \"_gen5_plus_word$step1\",\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen5_plus_word$step1\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"p\": \"_gen5_star_word\"\n        }\n      ],\n      \"close\": [\n        {\n          \"g\": \"tst\"\n        }\n      ]\n    },\n    \"_gen7_group\": {\n      \"open\": [\n        {\n          \"g\": \"tst\",\n          \"s\": \"#RX__A_Z0_9\"\n        }\n      ]\n    },\n    \"__start__\": {\n      \"open\": [\n        {\n          \"p\": \"hosts\",\n          \"g\": \"tst\"\n        }\n      ],\n      \"close\": [\n        {\n          \"s\": \"#ZZ\",\n          \"g\": \"tst,end\"\n        }\n      ]\n    }\n  },\n  \"v\": 5,\n  \"meta\": {\n    \"provenance\": {\n      \"__start__\": \"hosts\",\n      \"_gen1_group\": \"hosts\",\n      \"_gen1_group$alt0\": \"hosts\",\n      \"_gen1_group$alt0$step1\": \"hosts\",\n      \"_gen1_group$alt1\": \"hosts\",\n      \"_gen2_star__gen1_group\": \"hosts\",\n      \"_gen2_star__gen1_group$alt0\": \"hosts\",\n      \"_gen2_star__gen1_group$alt0$step1\": \"hosts\",\n      \"_gen3_opt_entry\": \"hosts\",\n      \"_gen4_group\": \"entry\",\n      \"_gen5_plus_word\": \"names\",\n      \"_gen5_plus_word$step1\": \"names\",\n      \"_gen5_star_word\": \"names\",\n      \"_gen5_star_word$alt0\": \"names\",\n      \"_gen5_star_word$alt0$step1\": \"names\",\n      \"_gen7_group\": \"word\",\n      \"entry$step1\": \"entry\",\n      \"hosts$step1\": \"hosts\"\n    }\n  }\n}",
+ "recognitionError": null,
+ "cases": [
+  {
+   "source": "127.0.0.1 localhost\n::1 ip6-localhost ip6-loopback\n",
+   "accepted": true,
+   "value": [
+    {
+     "address": "127.0.0.1",
+     "names": [
+      "localhost"
+     ]
+    },
+    {
+     "address": "::1",
+     "names": [
+      "ip6-localhost",
+      "ip6-loopback"
+     ]
+    }
+   ]
+  }
+ ],
+ "transduce": {
+  "entry": "ir-transduce-hosts-transduce",
+  "source": "; The transducer part of the grammar ir-transduce-hosts: the JSON events of the value\n; its @object and @array annotations build, from its rule passes, as\n; tabnas-bnf wrote them from the value actions those annotations attach.\ndef ir-transduce-hosts-transduce [input]\n  transduce-tree\n    record\n      entry :_gen5_plus_word (record (entry :text true))\n      entry :_gen5_star_word$alt0 (record (entry :text true))\n      entry :entry (record (entry :container :object) (entry :member \"address\") (entry :text true))\n      entry :entry$step1 (record (entry :container :object) (entry :member \"names\"))\n      entry :hosts (record (entry :container :array))\n      entry :hosts$step1 (record (entry :container :array))\n      entry :names (record (entry :container :array))\n    input\n"
+ }
+}

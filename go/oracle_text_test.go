@@ -42,6 +42,11 @@ type oracleFixture struct {
 		Accepted bool   `json:"accepted"`
 		Code     string `json:"code"`
 	} `json:"cases"`
+	Transduce *struct {
+		Entry  string `json:"entry"`
+		Source string `json:"source"`
+		Whole  string `json:"whole"`
+	} `json:"transduce"`
 }
 
 func oracleFixtures(t *testing.T) []oracleFixture {
@@ -130,6 +135,43 @@ func TestOracleTextMatchesTypeScript(t *testing.T) {
 		if !compared[name] {
 			t.Errorf("%s was not compared with TypeScript's text", name)
 		}
+	}
+}
+
+// The transducer part TransduceAlc writes for the emitted spec, under the
+// fixture's name, or why the grammar is read whole, is TypeScript's in
+// both emit modes (rs/tests/oracle_test.rs holds the Rust port the same
+// way). A fixture whose spec text this port writes otherwise is compared
+// too: the part reads the value actions and the rule names, not the order
+// of the alternates.
+func TestOracleTransducerPartMatchesTypeScript(t *testing.T) {
+	checked := 0
+	for _, fx := range oracleFixtures(t) {
+		if fx.Pure == nil || fx.Transduce == nil {
+			continue
+		}
+		ir, _ := inRE2Spelling(fx.IR)
+		for _, builtins := range []bool{true, false} {
+			opts := fx.Opts
+			opts.Builtins = builtins
+			spec, err := EmitGrammarSpec(oracleGrammar(t, ir), &opts)
+			if err != nil {
+				t.Fatalf("%s: TypeScript emits this IR, Go refused it: %v", fx.Name, err)
+			}
+			got := TransduceAlc(spec, fx.Name)
+			checked++
+			if got.Entry != fx.Transduce.Entry || got.Whole != fx.Transduce.Whole {
+				t.Errorf("%s: got entry %q whole %q, want entry %q whole %q", fx.Name,
+					got.Entry, got.Whole, fx.Transduce.Entry, fx.Transduce.Whole)
+			}
+			if got.Source != fx.Transduce.Source {
+				t.Errorf("%s: the part differs from TypeScript's at %s", fx.Name,
+					firstDifference(fx.Transduce.Source, got.Source))
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no fixture records a transducer part")
 	}
 }
 

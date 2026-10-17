@@ -50,6 +50,7 @@ mod prose;
 mod ranges;
 mod shared;
 mod spec;
+mod transduce;
 
 /// The README's Rust examples run as doctests, so a stale one fails the
 /// gate rather than misleading the reader. Its `toml` and `bash` fences
@@ -80,3 +81,4 @@ pub use spec::{
     to_recognition_spec, ActionError, ActionFn, ActionsMap, AltSpec, CompileError, CompileOptions,
     GrammarSpec, JsonicOptions, RefAction, RuleSpec,
 };
+pub use transduce::{transduce_alc, TransducePart};

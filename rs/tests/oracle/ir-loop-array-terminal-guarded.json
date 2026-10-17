@@ -125,5 +125,9 @@
     "x"
    ]
   }
- ]
+ ],
+ "transduce": {
+  "entry": "ir-loop-array-terminal-guarded-transduce",
+  "source": "; The transducer part of the grammar ir-loop-array-terminal-guarded: the JSON events of the value\n; its @object and @array annotations build, from its rule passes, as\n; tabnas-bnf wrote them from the value actions those annotations attach.\ndef ir-loop-array-terminal-guarded-transduce [input]\n  transduce-tree\n    record\n      entry :_gen2_group (record (entry :text true))\n      entry :list (record (entry :container :array))\n      entry :list$step1 (record (entry :container :array))\n    input\n"
+ }
 }

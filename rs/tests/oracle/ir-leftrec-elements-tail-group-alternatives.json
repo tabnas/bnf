@@ -3877,5 +3877,6 @@
  "pureError": "demo: rule 'top' exceeds the left-recursion element limit of 131072 elements while inlining 's', which begins 1 of its alternatives and would add more than 131072 elements to the 0 already added to the grammar. Factor 's' out of the alternatives it begins.",
  "recognition": null,
  "recognitionError": null,
- "cases": []
+ "cases": [],
+ "transduce": null
 }
