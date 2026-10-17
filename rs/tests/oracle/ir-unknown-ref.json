@@ -22,5 +22,6 @@
  "pureError": "demo: rule 'doc' references unknown rule 'nope'",
  "recognition": null,
  "recognitionError": null,
- "cases": []
+ "cases": [],
+ "transduce": null
 }

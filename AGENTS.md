@@ -129,6 +129,7 @@ needs is the proof.
 |---|---|
 | `ts/src/compiler.ts` | The IR types and the whole emit pipeline: desugar, left-recursion elimination (incl. suffix-debt counters for contested tail loops), tail repeats, probe dispatch, literal lifting, token allocation, first sets, per-decision lookahead dispatch, token classes, chain emission. |
 | `ts/src/spec.ts` | Spec-level transforms: recognition/pure lowering, jsonic serialisation, user-action attachment. Operates on an emitted `GrammarSpec`. |
+| `ts/src/transduce.ts` | `transduceAlc`: the transducer part of an emitted grammar, alchemy's `transduce-tree` with a spec read off the value actions the `@object`/`@array` annotations attach, or why the grammar is read whole. Operates on an emitted `GrammarSpec`; `go/transduce.go` and `rs/src/transduce.rs` write its text byte for byte, and `rs/tests/oracle/*.json` hold each fixture's part. |
 | `ts/src/bnf.ts` | Package entry; re-exports the public surface. |
 | `go/` | Go port (follows TS). |
 | `go/clib/` | `libtabnasbnf`, the C shared library, on the uniform tabnas C ABI (admin ADR-12: `tabnas_version`, `tabnas_grammar`, `tabnas_parse`, `tabnas_grammar_free`, `tabnas_free`). Its parse input is a serialized `GrammarSpec`; its value is `{recognition, pure}`. The files admin `tasks/adopt-clib.sh` stamps are **template-owned**: change the template and re-stamp. `reduce_test.go` is this repo's own and holds the reduction guarantees. |

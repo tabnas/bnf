@@ -231,5 +231,8 @@
    "code": "unexpected"
   }
  ],
+ "transduce": {
+  "whole": "the start rule pair has no annotation, so the value is the {rule, src, kids} tree, whose src comes before its kids and holds the text of every node beneath it: no stream writes the root before the document has ended"
+ },
  "grammar": "pair   = emoji \"!\" / animal \"?\" / other \".\"\nemoji  = %x1F600-1F64F\nanimal = %x1F640-1F6FF\nother  = %x80-1F5FF\n"
 }

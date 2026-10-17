@@ -8242,5 +8242,6 @@
  "pureError": "demo: rule 'r0' exceeds the left-recursion element limit of 131072 elements while inlining 'r1', which begins 1 of its alternatives and would add more than 256 elements to the 130816 already added to the grammar. Factor 'r1' out of the alternatives it begins.",
  "recognition": null,
  "recognitionError": null,
- "cases": []
+ "cases": [],
+ "transduce": null
 }

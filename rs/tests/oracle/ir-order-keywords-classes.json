@@ -141,5 +141,8 @@
    "accepted": false,
    "code": "unexpected"
   }
- ]
+ ],
+ "transduce": {
+  "whole": "the start rule stmt has no annotation, so the value is the {rule, src, kids} tree, whose src comes before its kids and holds the text of every node beneath it: no stream writes the root before the document has ended"
+ }
 }

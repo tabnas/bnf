@@ -5,13 +5,16 @@
 // The TypeScript oracle for the Rust port: writes the fixtures
 // tests/oracle_test.rs replays. Each fixture is
 //
-//   { name, grammar, ir, opts, pure, recognition, recognitionError, cases }
+//   { name, grammar, ir, opts, pure, recognition, recognitionError, cases,
+//     transduce }
 //
 // where `ir` is the IR EXACTLY as a front-end handed it to the canonical
 // `emitGrammarSpec` (captured by hooking the compiler module as each
 // front-end resolves it), `pure` and `recognition` are the strict-jsonic
-// texts TypeScript emits for that IR, and each case records the
-// TypeScript engine's verdict on one source.
+// texts TypeScript emits for that IR, each case records the TypeScript
+// engine's verdict on one source, and `transduce` is the transducer part
+// `transduceAlc` writes for the emitted spec under the fixture's name, or
+// why the grammar is read whole.
 //
 // Needs the sibling checkouts built: ../../../../parser/ts,
 // ../../../../abnf/ts and (optionally) ../../../../ebnf/ts, plus this
@@ -20,6 +23,12 @@
 //   node rs/tests/oracle/generate.cjs corpus rs/tests/oracle
 //   node rs/tests/oracle/generate.cjs file <grammar.abnf> <out.json>
 //   node rs/tests/oracle/generate.cjs limits rs/tests/oracle
+//   node rs/tests/oracle/generate.cjs transduce rs/tests/oracle
+//   node rs/tests/oracle/generate.cjs regen <fixture.json>
+//
+// regen, limits and transduce need no front-end, only this repository's
+// ts/ and the engine; corpus and file need the front-ends they convert
+// with.
 
 const Fs = require('node:fs')
 const Path = require('node:path')
@@ -33,11 +42,13 @@ const paths = {
   abnf: Path.join(SIBLINGS, 'abnf', 'ts', 'dist', 'abnf'),
   ebnf: Path.join(SIBLINGS, 'ebnf', 'ts', 'dist', 'ebnf'),
 }
-for (const [name, file] of Object.entries(paths)) {
-  if (name !== 'ebnf' && !Fs.existsSync(file + '.js')) {
-    throw new Error(`oracle prerequisite is missing: ${file}.js (build ${name}'s ts/ first)`)
+function prerequisite(name) {
+  if (!Fs.existsSync(paths[name] + '.js')) {
+    throw new Error(`oracle prerequisite is missing: ${paths[name]}.js (build ${name}'s ts/ first)`)
   }
+  return require(paths[name])
 }
+for (const name of ['parser', 'bnf', 'compiler']) prerequisite(name)
 
 const bnf = require(paths.bnf)
 const { Tabnas } = require(paths.parser)
@@ -91,7 +102,7 @@ function fixtureFor(name, ir, opts, sources) {
   }
   catch (e) {
     return { name, ir, opts, pure: null, pureError: String(e.message),
-      recognition: null, recognitionError: null, cases: [] }
+      recognition: null, recognitionError: null, cases: [], transduce: null }
   }
   const pure = bnf.toJsonic(bnf.toPureSpec(live), { strict: true })
   const closure = origEmit(ir, { ...opts, builtins: false })
@@ -119,13 +130,14 @@ function fixtureFor(name, ir, opts, sources) {
       cases.push({ source, accepted: false, code: String(e.code) })
     }
   }
-  return { name, ir, opts, pure, pureError: null, recognition, recognitionError, cases }
+  const transduce = bnf.transduceAlc(live, name)
+  return { name, ir, opts, pure, pureError: null, recognition, recognitionError, cases, transduce }
 }
 
 // The grammars the parser repository's ci/rust/notation-corpus.js proves
 // run on the Rust engine when compiled by TypeScript.
 function suites() {
-  const abnf = require(paths.abnf)
+  const abnf = prerequisite('abnf')
   const out = [{
     name: 'abnf',
     convert: (g) => abnf.abnfConvert(g, { builtins: true }),
@@ -175,7 +187,7 @@ function corpus(outdir) {
 
 // One ABNF file, no sources: the emitted text alone is the check.
 function file(grammarFile, out) {
-  const abnf = require(paths.abnf)
+  const abnf = prerequisite('abnf')
   const grammar = Fs.readFileSync(grammarFile, 'utf8')
   captured = null
   abnf.abnfConvert(grammar, { builtins: true })
@@ -268,13 +280,66 @@ function limits(outdir) {
   }
 }
 
+// The transducer part's fixtures: grammars whose value annotations make a
+// part, built here from IR as tests/transduce.test.js builds them, so the
+// ports are held to the part's text as to the spec's.
+function transduce(outdir) {
+  const ref = (name) => ({ kind: 'ref', name })
+  const term = (literal) => ({ kind: 'term', literal })
+  const re = (pattern) => ({ kind: 'regex', pattern, flags: '' })
+  const digits = () => ({ kind: 'plus', inner: re('[0-9]') })
+  const letters = () => ({ kind: 'plus', inner: re('[a-z]') })
+  const group = (...alts) => ({ kind: 'group', alts })
+  const fixtures = [
+    ['ir-transduce-object', 'top', [
+      { name: 'top', value: { kind: 'object', members: ['a', 'b', 'c'] },
+        alts: [[ref('a'), term('.'), ref('b'), term('.'), ref('c')]] },
+      { name: 'a', alts: [[digits()]] },
+      { name: 'b', alts: [[digits()]] },
+      { name: 'c', alts: [[digits()]] },
+    ], ['1.2.30']],
+    ['ir-transduce-nested', 'top', [
+      { name: 'top', value: { kind: 'object', members: ['name', 'inner'] },
+        alts: [[ref('name'), term('='), ref('inner')]] },
+      { name: 'name', alts: [[letters()]] },
+      { name: 'inner', value: { kind: 'object', members: ['maj', 'min'] },
+        alts: [[ref('maj'), term('.'), ref('min')]] },
+      { name: 'maj', alts: [[digits()]] },
+      { name: 'min', alts: [[digits()]] },
+    ], ['ab=1.2']],
+    ['ir-transduce-list', 'list', [
+      { name: 'list', value: { kind: 'array' },
+        alts: [[ref('item'), { kind: 'star', inner: group([term(','), ref('item')]) }]] },
+      { name: 'item', alts: [[digits()]] },
+    ], ['1', '1,2,3']],
+    ['ir-transduce-hosts', 'hosts', [
+      { name: 'hosts', value: { kind: 'array' },
+        alts: [[{ kind: 'star', inner: group([ref('entry'), term('\n')], [term('\n')]) },
+          { kind: 'opt', inner: ref('entry') }]] },
+      { name: 'entry', value: { kind: 'object', members: ['address', 'names'] },
+        alts: [[ref('address'), ref('names')]] },
+      { name: 'address', alts: [[ref('word')]] },
+      { name: 'names', value: { kind: 'array' }, alts: [[{ kind: 'plus', inner: ref('word') }]] },
+      { name: 'word', alts: [[group([re('[a-z0-9.:-]+')])]] },
+    ], ['127.0.0.1 localhost\n::1 ip6-localhost ip6-loopback\n']],
+  ]
+  Fs.mkdirSync(outdir, { recursive: true })
+  for (const [name, start, productions, sources] of fixtures) {
+    const fx = fixtureFor(name, { productions }, { tag: 'tst', start }, sources)
+    if (undefined === fx.transduce?.source) throw new Error(`${name} writes no part: ${fx.transduce?.whole}`)
+    Fs.writeFileSync(Path.join(outdir, name + '.json'), JSON.stringify(fx, null, 1))
+    console.log(`wrote ${name}`)
+  }
+}
+
 const [mode, arg, arg2] = process.argv.slice(2)
 if (mode === 'corpus') corpus(arg)
 else if (mode === 'file') file(arg, arg2)
 else if (mode === 'regen') regen(arg)
 else if (mode === 'limits') limits(arg)
+else if (mode === 'transduce') transduce(arg)
 else {
   console.error('usage: generate.cjs corpus <outdir> | file <grammar.abnf> <out.json>' +
-    ' | regen <fixture.json> | limits <outdir>')
+    ' | regen <fixture.json> | limits <outdir> | transduce <outdir>')
   process.exit(2)
 }

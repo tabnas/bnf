@@ -226,5 +226,8 @@
    "code": "unexpected"
   }
  ],
+ "transduce": {
+  "whole": "the start rule expr has no annotation, so the value is the {rule, src, kids} tree, whose src comes before its kids and holds the text of every node beneath it: no stream writes the root before the document has ended"
+ },
  "grammar": "expr = term *(\"+\" term)\nterm = \"(\" expr \")\" / number\nnumber = 1*DIGIT"
 }

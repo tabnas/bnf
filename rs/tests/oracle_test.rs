@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tabnas_bnf::{
-    emit_grammar_spec, to_jsonic, to_pure_spec, to_recognition_spec, ConvertOptions, Grammar,
-    JsonicOptions,
+    emit_grammar_spec, to_jsonic, to_pure_spec, to_recognition_spec, transduce_alc, ConvertOptions,
+    Grammar, JsonicOptions, TransducePart,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -159,6 +159,58 @@ fn emits_the_same_pure_data_spec_as_typescript() {
                     }
                 }
             },
+        }
+    }
+    assert!(checked > 0);
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The transducer part `transduceAlc` writes for the emitted spec, under
+/// the fixture's name, or why the grammar is read whole: the port writes
+/// the same text, or gives the same reason, in both emit modes, since the
+/// part reads the value actions, which the two modes share.
+#[test]
+fn writes_the_same_transducer_part_as_typescript() {
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for (name, fx) in fixtures() {
+        let want = &fx["transduce"];
+        if refusal_of(&fx).is_some() || want.is_null() {
+            continue;
+        }
+        let grammar: Grammar = serde_json::from_value(fx["ir"].clone()).expect("IR");
+        for builtins in [true, false] {
+            let spec = match emit_grammar_spec(&grammar, &options_of(&fx["opts"], builtins)) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    failures.push(format!("{name}: emit failed: {e}"));
+                    continue;
+                }
+            };
+            checked += 1;
+            match (transduce_alc(&spec, &name), want["source"].as_str()) {
+                (TransducePart::Part { entry, source }, Some(source_want)) => {
+                    dump(&name, "transduce", &source);
+                    if Some(entry.as_str()) != want["entry"].as_str() {
+                        failures.push(format!("{name}: entry {entry}, want {}", want["entry"]));
+                    }
+                    if source != source_want {
+                        failures.push(format!(
+                            "{name}: the part differs at {}",
+                            first_difference(&source, source_want)
+                        ));
+                    }
+                }
+                (TransducePart::Whole(why), None) => {
+                    if Some(why.as_str()) != want["whole"].as_str() {
+                        failures.push(format!(
+                            "{name}: read whole for another reason:\n  got:  {why}\n  want: {}",
+                            want["whole"]
+                        ));
+                    }
+                }
+                (got, _) => failures.push(format!("{name}: got {got:?}, want {want}")),
+            }
         }
     }
     assert!(checked > 0);

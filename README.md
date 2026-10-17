@@ -97,6 +97,27 @@ const spec = emitGrammarSpec(grammar, { tag: 'demo' })
 Object.keys(spec.rule).includes('val')   // => true
 ```
 
+### A transducer part for the value
+
+`transduceAlc(spec, name)` writes the transducer part of an emitted
+grammar: an alchemy program, `<name>-transduce`, that makes the JSON
+events of the value the grammar's `@object` and `@array` annotations
+build, from the grammar's rule passes. It is alchemy's declarative
+`transduce-tree` with a spec keyed by rule name, read off the value
+actions the compiler attached:
+- a rule that begins an object or an array is a container;
+- a member named by a constant is a member;
+- a member that holds the text the pushed rule matched is a text.
+
+A host runs the part over the parser's events, so a document of a custom
+grammar streams. The result is `{ entry, source }`, or `{ whole }` with
+the reason the grammar's documents are read whole instead. A start rule
+with no annotation builds the `{rule, src, kids}` tree: its `src` comes
+before its `kids` and holds the text of every node beneath it, so no
+stream writes the root before the document has ended. Go has
+`TransduceAlc` and Rust `transduce_alc`, and both write TypeScript's text
+byte for byte (`rs/tests/oracle/`).
+
 ## Options
 
 | Option | Effect |
