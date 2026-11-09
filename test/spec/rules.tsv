@@ -1,0 +1,48 @@
+input	expected
+# The schema grammar-rules (docs/grammar-rules.md): a grammar's rules as its
+# text writes them. `input` is a tree as JSON, its members in their order;
+# `expected` is OK, or ERROR:<code> for a tree the schema refuses. The code
+# is the contract, the message informative.
+#
+# Every element, each kind once, and the repetitions an element ends with.
+{"type":"grammar","rules":[]}	OK
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[]]}]}	OK
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"reference","name":"b"},{"type":"literal","text":"x","caseSensitive":false}],[{"type":"char","value":65},{"type":"range","from":48,"to":57}]]}]}	OK
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"class","negated":true,"members":[{"from":97,"to":122},{"from":95,"to":95}]},{"type":"any"},{"type":"token","negated":false,"text":"<think>"},{"type":"prose","text":"a number"}]]}]}	OK
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"group","alternatives":[[{"type":"reference","name":"b"}],[]],"repeat":[{"min":0,"max":1}]},{"type":"reference","name":"c","repeat":[{"min":1},{"min":0,"max":1}]}]]}]}	OK
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"char","value":1114111},{"type":"literal","text":"","caseSensitive":true,"repeat":[{"min":0,"max":0}]}]]}]}	OK
+# ABNF's `=/` is a rule entry of its own, `incremental` after the name.
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"literal","text":"x","caseSensitive":false}]]},{"type":"rule","name":"a","incremental":true,"alternatives":[[{"type":"literal","text":"y","caseSensitive":false}]]}]}	OK
+#
+# A root that is no grammar.
+[]	ERROR:rules_root
+{"type":"rule","rules":[]}	ERROR:rules_root
+{"rules":[],"type":"grammar"}	ERROR:rules_root
+# A node of a type no rule or element has, or whose type is not its first member.
+{"type":"grammar","rules":[{"type":"production","name":"a","alternatives":[[]]}]}	ERROR:rules_type
+{"type":"grammar","rules":[{"name":"a","type":"rule","alternatives":[[]]}]}	ERROR:rules_type
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"string","text":"x"}]]}]}	ERROR:rules_type
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"name":"b","type":"reference"}]]}]}	ERROR:rules_type
+# A member a node does not have, one it lacks, or one out of its order.
+{"type":"grammar"}	ERROR:rules_member
+{"type":"grammar","rules":[],"start":"a"}	ERROR:rules_member
+{"type":"grammar","rules":[{"type":"rule","alternatives":[[]]}]}	ERROR:rules_member
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[]],"incremental":true}]}	ERROR:rules_member
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"literal","caseSensitive":true,"text":"x"}]]}]}	ERROR:rules_member
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"literal","text":"x"}]]}]}	ERROR:rules_member
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"any","repeat":[{"min":1}],"name":"b"}]]}]}	ERROR:rules_member
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"any","repeat":[{"max":1,"min":0}]}]]}]}	ERROR:rules_member
+# A member whose value is not what the schema gives it.
+{"type":"grammar","rules":{}}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"","alternatives":[[]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","incremental":false,"alternatives":[[]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[{"type":"any"}]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"char","value":1114112}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"char","value":6.5}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"range","from":90,"to":65}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"class","negated":false,"members":[{"from":2,"to":1}]}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"literal","text":"x","caseSensitive":"yes"}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"any","repeat":[]}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"any","repeat":[{"min":2,"max":1}]}]]}]}	ERROR:rules_value
+{"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"group","alternatives":[]}]]}]}	ERROR:rules_value

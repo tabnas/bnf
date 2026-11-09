@@ -72,6 +72,10 @@ export type { CompileOptions, JsonicOptions, ActionsMap } from './spec'
 
 export { transduceAlc } from './transduce'
 
+export { checkRules, RulesError, MAX_CODE_POINT } from './rules'
+
+export type { GrammarRules, RulesRule, RulesElement, RulesRepeat } from './rules'
+
 export type { TransducePart } from './transduce'
 
 // VERSION is this package's version. It MUST equal package.json

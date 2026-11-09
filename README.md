@@ -20,6 +20,11 @@ concrete syntax into the IR:
 ABNF / GBNF / EBNF text ──front-end──▶ Grammar ──emitGrammarSpec──▶ GrammarSpec
 ```
 
+It also defines the schema the three front ends share for translation,
+`grammar-rules`: a grammar's rules as its text writes them, in source
+order and before any compile, with `checkRules` to hold a value to it. See
+[`docs/grammar-rules.md`](docs/grammar-rules.md).
+
 Everything hard about that second arrow lives here, and is shared:
 
 - **desugaring** repetition (`*A`, `1*A`, `m*nA`, `[A]`) into helper rules;
