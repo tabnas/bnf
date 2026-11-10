@@ -82,4 +82,4 @@ export type { TransducePart } from './transduce'
 // "version": the release orchestrator rewrites both, and the version
 // test fails the build if they drift. Mirrors `const VERSION` in
 // go/bnf.go.
-export const VERSION = '0.1.32'
+export const VERSION = '0.1.33'
