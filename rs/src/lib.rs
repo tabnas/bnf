@@ -48,6 +48,7 @@ mod leftrec;
 mod probe;
 mod prose;
 mod ranges;
+mod rules;
 mod shared;
 mod spec;
 mod transduce;
@@ -76,6 +77,7 @@ pub use ir::{
     REMOVE_PROSE,
 };
 pub use leftrec::eliminate_left_recursion;
+pub use rules::{check_rules, RulesError, MAX_CODE_POINT};
 pub use spec::{
     attach_action_slots, attach_actions, compile_spec, mark_listing, to_jsonic, to_pure_spec,
     to_recognition_spec, ActionError, ActionFn, ActionsMap, AltSpec, CompileError, CompileOptions,
