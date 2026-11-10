@@ -330,6 +330,7 @@ func rulesRule(v any, at string) error {
 // *RulesError naming what was wrong and where.
 func CheckRules(tree any) error {
 	err := rulesTyped(tree, "$", map[string][]rulesMember{"grammar": {
+		{"start", false, rulesName},
 		{"rules", true, func(v any, at string) error {
 			list, ok := v.([]any)
 			if !ok {

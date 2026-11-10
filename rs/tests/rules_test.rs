@@ -30,5 +30,5 @@ fn rules_spec() {
             ),
         }
     }
-    assert_eq!(rows, 35, "rules.tsv holds {rows} rows, not 35");
+    assert_eq!(rows, 39, "rules.tsv holds {rows} rows, not 39");
 }

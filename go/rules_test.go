@@ -66,7 +66,7 @@ func TestRulesSpec(t *testing.T) {
 			t.Errorf("rules.tsv:%d: want %s, got %s (%v)", i+2, expected, re.Code, err)
 		}
 	}
-	if rows != 35 {
-		t.Errorf("rules.tsv holds %d rows, not 35", rows)
+	if rows != 39 {
+		t.Errorf("rules.tsv holds %d rows, not 39", rows)
 	}
 }

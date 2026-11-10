@@ -6,7 +6,7 @@
  *  ends read their documents as and write them from (alchemy's
  *  docs/streaming-plan.md, section 13.1; docs/grammar-rules.md here).
  *
- *    { "type": "grammar", "rules": [ rule, ... ] }
+ *    { "type": "grammar", ["start": name], "rules": [ rule, ... ] }
  *    rule     { "type": "rule", "name", ["incremental": true], "alternatives": [ [ element, ... ], ... ] }
  *    element  { "type", ...its members, ["repeat": [ { "min", ["max"] }, ... ]] }
  *
@@ -51,7 +51,7 @@ type RulesRule = {
   alternatives: RulesElement[][]
 }
 
-type GrammarRules = { type: 'grammar'; rules: RulesRule[] }
+type GrammarRules = { type: 'grammar'; start?: string; rules: RulesRule[] }
 
 class RulesError extends Error {
   code: string
@@ -207,6 +207,7 @@ function checkRules(tree: unknown): asserts tree is GrammarRules {
   }
   members(tree, [
     ['type', true, () => {}],
+    ['start', false, name],
     ['rules', true, (v, at) => {
       if (!Array.isArray(v)) throw new RulesError('rules_value', at, 'is not a list of rules')
       v.forEach((r, i) => rule(r, `${at}[${i}]`))

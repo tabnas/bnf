@@ -13,7 +13,7 @@ host installs on an engine, is another thing and stays as it is.
 ## The tree
 
 ```text
-{ "type": "grammar", "rules": [ rule, ... ] }
+{ "type": "grammar", ["start": name], "rules": [ rule, ... ] }
 
 rule     { "type": "rule", "name": ..., ["incremental": true], "alternatives": [ alternative, ... ] }
 alternative   [ element, ... ]
@@ -26,6 +26,14 @@ the order this page lists them; a member in brackets is there only where
 the text writes it. The order is part of the schema: a reader streams a
 tree as its parser's rule passes reach each member, so no member waits for
 one the text spells later.
+
+`start` names the rule the grammar starts from, where its notation names
+one whatever the rules' order: GBNF starts from the rule named `root`, so
+its tree is `{"type": "grammar", "start": "root", ...}`, `start` known
+before any rule is read. ABNF's and EBNF's trees have no `start`: they
+start from their first rule. A rule of that name need not be among the
+rules (a GBNF document can lack its `root`), and the check below does not
+look for one.
 
 A rule is an entry for each definition, where the text writes it. ABNF's
 `a =/ "c"` is an entry of its own, `incremental` after its name, after the
@@ -63,7 +71,8 @@ every notation: ABNF's `[ a / b ]` is a group with that repetition, as
 `*1( a / b )` is, and GBNF's and EBNF's `x?` is `x` with it.
 
 The tree holds the rules a document writes, and nothing a compiler adds:
-not ABNF's core rules, not a start rule, not a compile's options.
+not ABNF's core rules, not a compiler's start wrapper, not a compile's
+options.
 Comments are not kept, and neither is ABNF's value annotation, which a
 comment carries.
 
@@ -78,6 +87,18 @@ a class as the ranges and characters it holds. What a notation has no
 form for is refused: prose and `=/` in GBNF and EBNF, a token terminal in
 ABNF and EBNF, and a name the notation cannot spell.
 
+The start rule goes where the target reads it. A notation that starts
+from its first rule (ABNF, EBNF), given a `start` that is not its first
+rule, holds the rules before it, writes the start rule first and streams
+the rest: what is held is the text of the rules before the start rule,
+and nothing is held when the start rule comes first or the tree has no
+`start`. A `start` naming a rule that never arrives is refused at the
+grammar's end, naming the rule, rather than written as a grammar that
+starts elsewhere. GBNF, which starts from `root`, writes a tree with no
+`start` (one that starts from its first rule) with `root ::= ` and that
+rule's name added after the others, and refuses one whose rule named
+`root` is not its first, since GBNF would start from that rule instead.
+
 ## The check
 
 `checkRules` in TypeScript, `CheckRules` in Go and `check_rules` in Rust
@@ -90,7 +111,7 @@ where:
 | `rules_root` | the root is not a grammar |
 | `rules_type` | a rule or an element whose first member is not a type it has |
 | `rules_member` | a member the node does not have, one it lacks, or one out of its order or repeated |
-| `rules_value` | a member whose value is not what the schema gives it: a name that is empty, a code point past 0x10FFFF, a range or a span whose `to` is less than its `from`, a list of alternatives or repetitions that is empty |
+| `rules_value` | a member whose value is not what the schema gives it: a name or a `start` that is empty, a code point past 0x10FFFF, a range or a span whose `to` is less than its `from`, a list of alternatives or repetitions that is empty |
 
 The code is the contract; the message is informative.
 [`test/spec/rules.tsv`](../test/spec/rules.tsv) holds the three runtimes
