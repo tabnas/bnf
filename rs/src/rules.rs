@@ -6,7 +6,7 @@
 //! `docs/streaming-plan.md`, section 13.1; `docs/grammar-rules.md` here).
 //!
 //! ```text
-//! { "type": "grammar", "rules": [ rule, ... ] }
+//! { "type": "grammar", ["start": name], "rules": [ rule, ... ] }
 //! rule     { "type": "rule", "name", ["incremental": true], "alternatives": [ [ element, ... ], ... ] }
 //! element  { "type", ...its members, ["repeat": [ { "min", ["max"] }, ... ]] }
 //! ```
@@ -317,9 +317,15 @@ fn rules(v: &Value, at: &str) -> Result<(), RulesError> {
 /// ```
 pub fn check_rules(tree: &Value) -> Result<(), RulesError> {
     match tree.as_object() {
-        Some(node) if Some("grammar") == typed(node) => {
-            members(node, &[("type", true, any), ("rules", true, rules)], "$")
-        }
+        Some(node) if Some("grammar") == typed(node) => members(
+            node,
+            &[
+                ("type", true, any),
+                ("start", false, name),
+                ("rules", true, rules),
+            ],
+            "$",
+        ),
         _ => Err(fail(
             "rules_root",
             "$",

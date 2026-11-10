@@ -35,5 +35,5 @@ describe('grammar-rules, test/spec/rules.tsv', () => {
       })
     })
   })
-  it('runs every row', () => assert.equal(rows, 35))
+  it('runs every row', () => assert.equal(rows, 39))
 })

@@ -13,6 +13,10 @@ input	expected
 {"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"char","value":1114111},{"type":"literal","text":"","caseSensitive":true,"repeat":[{"min":0,"max":0}]}]]}]}	OK
 # ABNF's `=/` is a rule entry of its own, `incremental` after the name.
 {"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"literal","text":"x","caseSensitive":false}]]},{"type":"rule","name":"a","incremental":true,"alternatives":[[{"type":"literal","text":"y","caseSensitive":false}]]}]}	OK
+# The rule a grammar starts from, where its notation names it (GBNF's root),
+# before the rules; a rule of that name need not be among them.
+{"type":"grammar","start":"root","rules":[{"type":"rule","name":"a","alternatives":[[]]},{"type":"rule","name":"root","alternatives":[[{"type":"reference","name":"a"}]]}]}	OK
+{"type":"grammar","start":"root","rules":[]}	OK
 #
 # A root that is no grammar.
 []	ERROR:rules_root
@@ -34,6 +38,8 @@ input	expected
 {"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[[{"type":"any","repeat":[{"max":1,"min":0}]}]]}]}	ERROR:rules_member
 # A member whose value is not what the schema gives it.
 {"type":"grammar","rules":{}}	ERROR:rules_value
+{"type":"grammar","start":"","rules":[]}	ERROR:rules_value
+{"type":"grammar","start":1,"rules":[]}	ERROR:rules_value
 {"type":"grammar","rules":[{"type":"rule","name":"","alternatives":[[]]}]}	ERROR:rules_value
 {"type":"grammar","rules":[{"type":"rule","name":"a","incremental":false,"alternatives":[[]]}]}	ERROR:rules_value
 {"type":"grammar","rules":[{"type":"rule","name":"a","alternatives":[]}]}	ERROR:rules_value
