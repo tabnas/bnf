@@ -11,7 +11,7 @@
 // alchemy's parser-events source relays them (its tokens less those it
 // gave back, a probe's dropped). The events it makes of a grammar's
 // passes are held to the walk of the value the same grammar builds.
-// alchemy-cli's differential holds the real transduce-tree, natively and
+// dmog's differential holds the real transduce-tree, natively and
 // interpreted, to the same walk.
 
 const { describe, it } = require('node:test')
